@@ -632,7 +632,8 @@ static void w_bar(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t 
     uint8_t sev = point_sev(v, tag);
     uint8_t vc = !ok ? C_DIM : sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_TEXT;
 
-    hmi_draw_text(r, &hmi_font_body, b.x, b.y, name, C_MUTED);
+    int vw = hmi_text_width(&hmi_font_body_b, txt);
+    text_fit(r, &hmi_font_body, b.x, b.y, b.w - vw - 8, name, C_MUTED);    /* label yields to the value */
     text_right(r, &hmi_font_body_b, b.x + b.w, b.y, txt, vc);
 
     int bh = 8;
@@ -667,10 +668,75 @@ static void w_pill(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t
     if (v->data_stale || !tag_value(v, tag, &val, &q)) { t = "Unknown"; dot = C_RED; }
     else if (val) { t = "Running"; dot = C_GREEN; }
     else { t = "Stopped"; dot = C_DIM; }
-    int h = 30;
+    int h = b.h < 30 ? (b.h > 22 ? b.h : 22) : 30;          /* shrink in small panels, never overlap the next row */
     hmi_rect_t p = { b.x, b.y + (b.h - h) / 2, hmi_text_width(&hmi_font_body_b, t) + 40, h };
     if (p.w > b.w) p.w = b.w;
     chip(r, p, dot, t, C_TEXT);
+}
+
+/* Label and style of one control button of device dev for action a, given the tag state */
+static btn_style_t control_look(const hmi_view_t *v, const hmi_device_info_t *dev, const hmi_device_action_t *a,
+                                uint8_t option, bool ok, int16_t val, char *label, size_t cap)
+{
+    const hmi_tag_meta_t *m = hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, a->rel_tag));
+    bool blocked = a->block_tag != HMI_REL_NONE && v->tags &&
+                   v->tags->tags[HMI_DEV_TAG(dev->slot, a->block_tag)].value != 0;
+    btn_style_t st = BTN_PLAIN;
+    switch (a->kind) {
+        case HMI_ACT_TOGGLE_COIL: {
+            bool on = ok && val != 0;
+            if (!on && blocked) {
+                const hmi_tag_meta_t *bm = hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, a->block_tag));
+                snprintf(label, cap, "Blocked: %s", bm ? bm->name : "interlock");
+                return BTN_DISABLED;
+            }
+            snprintf(label, cap, "%s", on ? a->label_on : a->label);
+            st = on ? BTN_DANGER : BTN_PRIMARY;
+            break;
+        }
+        case HMI_ACT_TOGGLE_REG: {
+            char num[16], tv[24];
+            int16_t target = hmi_action_reg_target(a, ok ? val : a->threshold);
+            hmi_format_scaled(num, sizeof(num), target, m ? m->decimals : 0);
+            snprintf(tv, sizeof(tv), "%s %s", num, (m && m->unit) ? m->unit : "");
+            snprintf(label, cap, (ok && val > a->threshold) ? a->label_on : a->label, tv);
+            break;
+        }
+        case HMI_ACT_COIL_ON:
+            if (blocked) {
+                const hmi_tag_meta_t *bm = hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, a->block_tag));
+                snprintf(label, cap, "Blocked: %s", bm ? bm->name : "interlock");
+                return BTN_DISABLED;
+            }
+            snprintf(label, cap, "%s", a->label);
+            st = (ok && val != 0) ? BTN_PLAIN : BTN_PRIMARY;
+            break;
+        case HMI_ACT_COIL_OFF:
+            snprintf(label, cap, "%s", a->label);
+            st = (ok && val != 0) ? BTN_DANGER : BTN_PLAIN;
+            break;
+        case HMI_ACT_PULSE_COIL:
+            snprintf(label, cap, "%s", a->label);
+            st = (ok && val != 0) ? BTN_PRIMARY : BTN_PLAIN;
+            break;
+        case HMI_ACT_SET_REG:
+            snprintf(label, cap, "%s...", a->label);
+            break;
+        case HMI_ACT_SET_ENUM:
+            if (option == HMI_FP_NO_OPTION) {                 /* dashboard: "Mode: Auto" */
+                char opt[24];
+                hmi_action_option_label(a, ok && val >= 0 ? (uint8_t)val : 0xFFu, opt, sizeof(opt));
+                snprintf(label, cap, "%s: %s", a->label, opt[0] ? opt : "--");
+            } else {
+                hmi_action_option_label(a, option, label, cap);
+                st = (ok && val == option) ? BTN_PRIMARY : BTN_PLAIN;
+            }
+            break;
+        default:
+            snprintf(label, cap, "%s", a->label ? a->label : "Action");
+            break;
+    }
+    return st;
 }
 
 static void w_button(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag,
@@ -680,33 +746,16 @@ static void w_button(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8
     int16_t val; uint8_t q;
     bool ok = tag_value(v, tag, &val, &q) && !v->data_stale && dev && dev->state == HMI_DEV_ONLINE;
     char label[56];
-    btn_style_t st = BTN_PLAIN;
-    const hmi_device_action_t *a = dev ? hmi_profile_action(dev->profile, rel) : NULL;
-    const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
-
-    if (!a) {
+    btn_style_t st;
+    int idx = dev ? hmi_profile_quick_action(dev->profile, rel, ok ? val : 0) : -1;
+    if (idx < 0) {
+        const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
         nice_name(label, sizeof(label), m ? m->name : "Action");
         st = BTN_DISABLED;
-    } else if (a->kind == HMI_ACT_TOGGLE_COIL) {
-        bool on = ok && val != 0;
-        bool blocked = !on && a->block_tag != HMI_REL_NONE && v->tags &&
-                       v->tags->tags[HMI_DEV_TAG(dev->slot, a->block_tag)].value != 0;
-        if (blocked) {
-            const hmi_tag_meta_t *bm = hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, a->block_tag));
-            snprintf(label, sizeof(label), "Blocked: %s", bm ? bm->name : "interlock");
-            st = BTN_DISABLED;
-        } else {
-            snprintf(label, sizeof(label), "%s", on ? a->label_on : a->label_off);
-            st = on ? BTN_DANGER : BTN_PRIMARY;
-        }
     } else {
-        char num[16], tv[24];
-        int16_t target = hmi_action_reg_target(a, ok ? val : a->threshold);
-        hmi_format_scaled(num, sizeof(num), target, m ? m->decimals : 0);
-        snprintf(tv, sizeof(tv), "%s %s", num, (m && m->unit) ? m->unit : "");
-        snprintf(label, sizeof(label), (ok && val > a->threshold) ? a->label_on : a->label_off, tv);
+        st = control_look(v, dev, &dev->profile->actions[idx], HMI_FP_NO_OPTION, ok, val, label, sizeof(label));
     }
-    if (!ok || (a && !role_allows(v, (hmi_command_t)a->command))) st = BTN_DISABLED;
+    if (!ok) st = BTN_DISABLED;       /* a role that is too low does not disable: tapping asks for a PIN */
     int h = b.h < HMI_LAYOUT_BUTTON_H ? b.h : HMI_LAYOUT_BUTTON_H;
     hmi_rect_t bb = { b.x, b.y + (b.h - h) / 2, b.w, h };
     button(r, bb, label, st);
@@ -892,8 +941,11 @@ static void device_header(hmi_renderer_t *r, hmi_rect_t p, const hmi_device_info
     char st[40], sub[80];
     uint8_t col;
     device_status(d, st, sizeof(st), &col);
+    const char *open = "Controls >";
+    int ow = hmi_text_width(&hmi_font_body_b, open);
+    text_right(r, &hmi_font_body_b, p.x + p.w - 4, p.y + 7, open, C_BLUE);   /* tap the header: faceplate */
     int stw = hmi_text_width(&hmi_font_body_b, st);
-    int right = p.x + p.w - 4;
+    int right = p.x + p.w - 4 - ow - 14;
     text_right(r, &hmi_font_body_b, right, p.y + 7, st, col);
 
     hmi_draw_circle(r, p.x + 7, p.y + 15, 5, col);
@@ -1465,6 +1517,171 @@ static void scrim_band(hmi_renderer_t *r)
     }
 }
 
+static const hmi_device_info_t *find_device(const hmi_view_t *v, uint8_t slot)
+{
+    for (uint8_t d = 0; v->devices && d < v->ndev; d++) if (v->devices[d].slot == slot) return &v->devices[d];
+    return NULL;
+}
+
+/* Current value of a device tag as operator text: "50.0 Hz", "Auto", "Running", "ACTIVE" */
+static uint8_t device_value_text(const hmi_view_t *v, const hmi_device_info_t *d, uint8_t rel, char *out, size_t cap)
+{
+    uint8_t tag = HMI_DEV_TAG(d->slot, rel);
+    const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
+    int16_t val; uint8_t q;
+    if (!m || v->data_stale || !tag_value(v, tag, &val, &q)) { snprintf(out, cap, "--"); return C_DIM; }
+    const hmi_device_action_t *e = hmi_profile_enum_action(d->profile, rel);
+    if (e) {
+        hmi_action_option_label(e, val >= 0 ? (uint8_t)val : 0xFFu, out, cap);
+        if (!out[0]) snprintf(out, cap, "%d", (int)val);
+        return C_TEXT;
+    }
+    if (m->type == TAG_TYPE_DIGITAL) {
+        if (m->digital_alarm_sev) { snprintf(out, cap, "%s", val ? "ACTIVE" : "OK"); return val ? sev_color(m->digital_alarm_sev) : C_MUTED; }
+        bool motor = false;
+        for (uint8_t i = 0; i < d->profile->n_actions; i++)
+            if (d->profile->actions[i].rel_tag == rel && d->profile->actions[i].kind == HMI_ACT_COIL_ON) motor = true;
+        snprintf(out, cap, "%s", val ? (motor ? "Running" : "On") : (motor ? "Stopped" : "Off"));
+        return val ? C_GREEN : C_MUTED;
+    }
+    char num[16];
+    hmi_format_scaled(num, sizeof(num), val, m->decimals);
+    snprintf(out, cap, "%s%s%s", num, (m->unit && m->unit[0]) ? " " : "", m->unit ? m->unit : "");
+    uint8_t sev = point_sev(v, tag);
+    return sev ? sev_color(sev) : C_TEXT;
+}
+
+static void render_faceplate(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    const hmi_device_info_t *d = find_device(v, v->fp_slot);
+    if (!d || !d->profile) return;
+    const hmi_device_profile_t *p = d->profile;
+
+    char st[40], sub[96];
+    uint8_t col;
+    device_status(d, st, sizeof(st), &col);
+    hmi_rect_t close = hmi_layout_modal_cancel(sw, sh, HMI_MODAL_FACEPLATE);
+    if (band_hits(r, m.y, 60)) {
+        text_center(r, &hmi_font_body_b, close, "Close", C_BLUE);
+        hmi_draw_circle(r, m.x + 22, m.y + 22, 6, col);
+        int x = hmi_draw_text(r, &hmi_font_title, m.x + 36, m.y + 11, d->label, C_TEXT);
+        text_fit(r, &hmi_font_body_b, x + 12, m.y + 13, close.x - 16 - (x + 12), st, col);
+        snprintf(sub, sizeof(sub), "%s  -  %s", d->product[0] ? d->product : p->name, d->endpoint);
+        text_fit(r, &hmi_font_caption, m.x + 18, m.y + 38, close.x - 8 - (m.x + 18), sub, C_MUTED);
+    }
+
+    /* values */
+    hmi_rect_t vc = hmi_layout_fp_values(sw, sh);
+    if (band_hits(r, vc.y, vc.h)) {
+        hmi_draw_round_frame(r, vc.x, vc.y, vc.w, vc.h, 12, C_SURF, C_LINE);
+        hmi_draw_text(r, &hmi_font_caption, vc.x + 12, vc.y + 8, "VALUES", C_MUTED);
+        int n = 0;
+        for (uint8_t i = 0; i < p->meta_count; i++) if (p->meta[i].tag_id != p->comm_tag) n++;
+        int rh = n ? (vc.h - 34) / n : 24;
+        if (rh > 26) rh = 26;
+        int k = 0;
+        for (uint8_t i = 0; i < p->meta_count; i++) {
+            uint8_t rel = p->meta[i].tag_id;
+            if (rel == p->comm_tag) continue;
+            int y = vc.y + 28 + k * rh;
+            k++;
+            if (!band_hits(r, y, rh)) continue;
+            char name[40], val[32];
+            nice_name(name, sizeof(name), p->meta[i].name);
+            uint8_t c = device_value_text(v, d, rel, val, sizeof(val));
+            int vw = hmi_text_width(&hmi_font_body_b, val);
+            text_fit(r, &hmi_font_body, vc.x + 12, y + (rh - hmi_font_body.line_h) / 2, vc.w - 36 - vw, name, C_MUTED);
+            text_right(r, &hmi_font_body_b, vc.x + vc.w - 12, y + (rh - hmi_font_body_b.line_h) / 2, val, c);
+        }
+    }
+
+    /* controls */
+    uint8_t rels[HMI_FP_MAX_ROWS];
+    uint8_t nrows = hmi_profile_fp_rows(p, rels);
+    bool online = d->state == HMI_DEV_ONLINE && !v->data_stale;
+    for (uint8_t row = 0; row < nrows; row++) {
+        hmi_rect_t rr = hmi_layout_fp_row(sw, sh, row);
+        if (!band_hits(r, rr.y - 4, rr.h + 8)) continue;
+        if (row) hmi_draw_rect(r, rr.x, rr.y - 3, rr.w, 1, C_LINE);
+        const hmi_tag_meta_t *m0 = hmi_tag_get_meta(HMI_DEV_TAG(d->slot, rels[row]));
+        char name[40], val[32];
+        nice_name(name, sizeof(name), m0 ? m0->name : "Control");
+        uint8_t c = device_value_text(v, d, rels[row], val, sizeof(val));
+        int tw = rr.w * 36 / 100 - 8;
+        text_fit(r, &hmi_font_body_b, rr.x, rr.y + rr.h / 2 - hmi_font_body_b.line_h + 1, tw, name, C_TEXT);
+        text_fit(r, &hmi_font_caption, rr.x, rr.y + rr.h / 2 + 2, tw, val, c);
+    }
+    hmi_fp_ctrl_t cs[HMI_FP_MAX_CTRLS];
+    uint8_t nc = hmi_profile_fp_controls(p, cs, HMI_FP_MAX_CTRLS);
+    for (uint8_t k = 0; k < nc; k++) {
+        hmi_rect_t br = hmi_layout_fp_ctrl(sw, sh, p, k);
+        if (!band_hits(r, br.y, br.h)) continue;
+        const hmi_device_action_t *a = &p->actions[cs[k].action];
+        int16_t val; uint8_t q;
+        bool ok = tag_value(v, HMI_DEV_TAG(d->slot, a->rel_tag), &val, &q) && online;
+        char label[40];
+        btn_style_t bs = control_look(v, d, a, cs[k].option, ok, val, label, sizeof(label));
+        button(r, br, label, ok ? bs : BTN_DISABLED);
+    }
+
+    /* footer: who may operate */
+    int fy = m.y + m.h - 22;
+    if (band_hits(r, fy, 18)) {
+        char foot[96];
+        int role = v->sec ? (int)v->sec->current_role : 0;
+        if (!online) snprintf(foot, sizeof(foot), "Device is not online: controls are disabled");
+        else if (role == ROLE_VIEWER) snprintf(foot, sizeof(foot), "Signed in as Viewer: a control asks for the PIN of the role it needs");
+        else snprintf(foot, sizeof(foot), "Signed in as %s  -  commands go to the PLC at once and are logged", s_role_names[role]);
+        hmi_rect_t fr = { m.x + 16, fy, m.w - 32, 18 };
+        text_center(r, &hmi_font_caption, fr, foot, C_MUTED);
+    }
+}
+
+static void render_numpad(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    hmi_rect_t cancel = hmi_layout_modal_cancel(sw, sh, HMI_MODAL_NUMPAD);
+    text_center(r, &hmi_font_body_b, cancel, "Cancel", C_BLUE);
+    text_fit(r, &hmi_font_title, m.x + 18, m.y + 16, cancel.x - 8 - (m.x + 18), v->np_title ? v->np_title : "Enter value", C_TEXT);
+
+    hmi_rect_t dsp = hmi_layout_numpad_display(sw, sh);
+    if (band_hits(r, dsp.y, dsp.h)) {
+        hmi_draw_round_frame(r, dsp.x, dsp.y, dsp.w, dsp.h, 10, C_SURF, C_BLUE);
+        int ux = dsp.x + dsp.w - 12;
+        if (v->np_unit && v->np_unit[0]) {
+            text_right(r, &hmi_font_body_b, ux, dsp.y + (dsp.h - hmi_font_body_b.line_h) / 2, v->np_unit, C_MUTED);
+            ux -= hmi_text_width(&hmi_font_body_b, v->np_unit) + 8;
+        }
+        bool empty = !v->np_entry || !v->np_entry[0];
+        text_right(r, &hmi_font_headline, ux, dsp.y + (dsp.h - hmi_font_headline.line_h) / 2,
+                   empty ? "0" : v->np_entry, empty ? C_DIM : C_TEXT);
+    }
+    hmi_rect_t info = { m.x + 8, m.y + 108, m.w - 16, 20 };
+    const char *msg = v->modal_msg ? v->modal_msg : v->np_info;
+    if (msg) text_center(r, &hmi_font_caption, info, msg, v->modal_msg && v->modal_msg_error ? C_RED : C_MUTED);
+
+    static const char * const labels[HMI_NP_KEYS] = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "Delete", "Set", ".", "-" };
+    for (int k = 0; k < HMI_NP_KEYS; k++) {
+        hmi_rect_t kr = hmi_layout_numpad_key(sw, sh, k);
+        if (kr.w == 0 || !band_hits(r, kr.y, kr.h)) continue;
+        bool okk = (k == HMI_NP_OK);
+        hmi_draw_round_frame(r, kr.x, kr.y, kr.w, kr.h, 10, okk ? C_BLUE : C_SURF, okk ? C_BLUE : C_LINE);
+        const hmi_font_t *f = (k <= 9 || k >= HMI_NP_DOT) ? &hmi_font_title : &hmi_font_body_b;
+        text_center(r, f, kr, labels[k], okk ? C_WHITE : C_TEXT);
+    }
+}
+
+static void render_confirm(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    text_fit(r, &hmi_font_title, m.x + 20, m.y + 20, m.w - 40, v->cf_title ? v->cf_title : "Confirm", C_TEXT);
+    if (v->cf_detail) text_fit(r, &hmi_font_body, m.x + 20, m.y + 58, m.w - 40, v->cf_detail, C_MUTED);
+    text_fit(r, &hmi_font_caption, m.x + 20, m.y + 86, m.w - 40, "The command is sent to the PLC immediately and logged.", C_DIM);
+    button(r, hmi_layout_confirm_button(sw, sh, false), "Cancel", BTN_PLAIN);
+    button(r, hmi_layout_confirm_button(sw, sh, true), v->cf_ok ? v->cf_ok : "Confirm", v->cf_danger ? BTN_FILLED_RED : BTN_PRIMARY);
+}
+
 static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
 {
     int sw = r->screen_w, sh = r->screen_h;
@@ -1474,6 +1691,9 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
     /* soft shadow + sheet */
     hmi_draw_round_rect(r, m.x - 3, m.y - 1, m.w + 6, m.h + 7, 18, C_BG);
     hmi_draw_round_frame(r, m.x, m.y, m.w, m.h, 16, C_CARD, C_LINE);
+    if (v->modal == HMI_MODAL_FACEPLATE) { render_faceplate(r, v, m); return; }
+    if (v->modal == HMI_MODAL_NUMPAD)    { render_numpad(r, v, m); return; }
+    if (v->modal == HMI_MODAL_CONFIRM)   { render_confirm(r, v, m); return; }
     hmi_rect_t cancel = hmi_layout_modal_cancel(sw, sh, v->modal);
     text_center(r, &hmi_font_body_b, cancel, "Cancel", C_BLUE);
 

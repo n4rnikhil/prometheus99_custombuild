@@ -1,17 +1,18 @@
 /**
  * @file device_profile.h
- * @brief Plug-and-play device profiles: everything the HMI needs to know about a PLC type
+ * @brief Plug-and-play driver modules: everything the HMI needs to know about a PLC type
  *
- * A profile is pure const data (portable C99, lives in flash on an MCU):
+ * A driver module is pure const data (portable C99, lives in flash on an MCU):
  *   - how to recognise the device (Modbus FC43 vendor / product name)
  *   - its tags (metadata, relative ids 0 .. HMI_DEVICE_TAG_SPAN-1)
  *   - which Modbus registers / coils feed which tags
- *   - the operator actions its buttons perform
- *   - two UI manifests: a full layout and a compact one for small panels
+ *   - the operator controls: start / stop, setpoints, mode selectors, resets
+ *   - two dashboard layouts: a full one and a compact one for small panels
  *
- * When the discovery thread finds a device, the device manager picks the first
- * profile that matches, gives it a free slot (tag block HMI_DEV_TAG(slot, 0..23))
- * and the dashboard draws its manifest. Adding a new PLC type = adding one profile.
+ * When the discovery thread finds a device, the device manager picks the first module
+ * that matches, gives it a free slot (tag block HMI_DEV_TAG(slot, 0..23)) and the
+ * dashboard draws its layout. Its controls are on the dashboard (quick buttons) and in
+ * the device faceplate. Adding a new PLC type = adding one module.
  */
 
 #ifndef INDUSTRIAL_HMI_DEVICE_PROFILE_H
@@ -22,27 +23,55 @@
 
 #define HMI_REL_NONE    0xFFu
 #define HMI_REL_DEVICE  (HMI_DEVICE_TAG_SPAN - 1)   /* pseudo tag in manifests: "this device" (card title = device name) */
-#define HMI_MAX_ACTIONS 4
+#define HMI_MAX_ACTIONS 16
+#define HMI_MAX_OPTIONS 4                           /* choices of a mode selector */
 
 typedef enum {
     HMI_ACT_NONE = 0,
-    HMI_ACT_TOGGLE_COIL,    /* write !current to a coil (start / stop) */
-    HMI_ACT_TOGGLE_REG      /* current > threshold ? value_low : value_high, written to a holding register */
+    HMI_ACT_TOGGLE_COIL,    /* write !current to a coil */
+    HMI_ACT_TOGGLE_REG,     /* current > threshold ? value_low : value_high, written to a holding register */
+    HMI_ACT_COIL_ON,        /* write 1 to a coil ("Start", "Open") - refused while block_tag is set */
+    HMI_ACT_COIL_OFF,       /* write 0 to a coil ("Stop", "Close") - never blocked */
+    HMI_ACT_PULSE_COIL,     /* write 1, then 0 after HMI_PULSE_MS ("Reset fault", "Reset counter") */
+    HMI_ACT_SET_REG,        /* operator enters a value (numeric keypad) within [min, max], written to a register */
+    HMI_ACT_SET_ENUM        /* operator picks one of `options` ("Manual|Auto"); the option index is written */
 } hmi_action_kind_t;
 
+#define HMI_PULSE_MS 500u
+
 typedef struct {
-    uint8_t     rel_tag;      /* the button's tag; its value decides the toggle direction */
+    uint8_t     rel_tag;      /* the tag this control acts on (its value shows the current state) */
     uint8_t     kind;         /* hmi_action_kind_t */
     uint8_t     command;      /* hmi_command_t checked by RBAC */
     uint8_t     block_tag;    /* turning ON is refused while this rel tag is non-zero (e.g. E-stop); HMI_REL_NONE = none */
     uint16_t    address;      /* 0-based coil or holding register */
-    int16_t     threshold;
-    int16_t     value_low;
-    int16_t     value_high;
-    const char *label_on;     /* button label when the tag is on / above threshold, e.g. "Stop pump" */
-    const char *label_off;    /* ... otherwise, e.g. "Start pump". TOGGLE_REG labels may contain %s = target value */
+    int16_t     threshold;    /* TOGGLE_REG only */
+    int16_t     value_low;    /* TOGGLE_REG only */
+    int16_t     value_high;   /* TOGGLE_REG only */
+    const char *label_on;     /* TOGGLE kinds: label while on / above threshold */
+    const char *label;        /* button label: "Start", "Stop", "Set", "Reset"; TOGGLE kinds: label while off */
     const char *log_name;     /* "Pump A" -> journal "Pump A start commanded" */
+    int16_t     min, max;     /* SET_REG: accepted raw range (the PLC must clamp as well) */
+    const char *options;      /* SET_ENUM: "Off|Hand|Auto" (index 0, 1, 2 is written) */
+    bool        confirm;      /* ask "Are you sure?" before sending */
 } hmi_device_action_t;
+
+/* Constructors for driver modules (designated initialisers; need core/security.h for HMI_CMD_*) */
+#define HMI_A_START(rel, coil, blk, lbl, log, conf) \
+    { .rel_tag = (rel), .kind = HMI_ACT_COIL_ON, .command = HMI_CMD_OPERATE, .block_tag = (blk), \
+      .address = (coil), .label = (lbl), .log_name = (log), .confirm = (conf) }
+#define HMI_A_STOP(rel, coil, lbl, log, conf) \
+    { .rel_tag = (rel), .kind = HMI_ACT_COIL_OFF, .command = HMI_CMD_OPERATE, .block_tag = HMI_REL_NONE, \
+      .address = (coil), .label = (lbl), .log_name = (log), .confirm = (conf) }
+#define HMI_A_PULSE(rel, coil, lbl, log, conf) \
+    { .rel_tag = (rel), .kind = HMI_ACT_PULSE_COIL, .command = HMI_CMD_OPERATE, .block_tag = HMI_REL_NONE, \
+      .address = (coil), .label = (lbl), .log_name = (log), .confirm = (conf) }
+#define HMI_A_SET(rel, reg, cmd, lbl, log, mn, mx) \
+    { .rel_tag = (rel), .kind = HMI_ACT_SET_REG, .command = (cmd), .block_tag = HMI_REL_NONE, \
+      .address = (reg), .label = (lbl), .log_name = (log), .min = (mn), .max = (mx) }
+#define HMI_A_MODE(rel, reg, opts, log, conf) \
+    { .rel_tag = (rel), .kind = HMI_ACT_SET_ENUM, .command = HMI_CMD_OPERATE, .block_tag = HMI_REL_NONE, \
+      .address = (reg), .label = "Mode", .log_name = (log), .options = (opts), .confirm = (conf) }
 
 typedef struct {
     uint16_t       start;     /* first 0-based address */
@@ -79,23 +108,51 @@ typedef struct {
     uint8_t         n_compact;
 } hmi_device_profile_t;
 
-/* Built-in profiles (device_profiles.c), most specific first */
-extern const hmi_device_profile_t g_profile_drive;
+/* Built-in driver modules (src/drivers/profiles/), most specific first in the registry */
 extern const hmi_device_profile_t g_profile_tank_skid;
+extern const hmi_device_profile_t g_profile_drive;
+extern const hmi_device_profile_t g_profile_conveyor;
+extern const hmi_device_profile_t g_profile_boiler;
+extern const hmi_device_profile_t g_profile_pump_station;
+extern const hmi_device_profile_t g_profile_compressor;
+extern const hmi_device_profile_t g_profile_ahu;
+extern const hmi_device_profile_t g_profile_abb_drive;
 extern const hmi_device_profile_t g_profile_generic;
 
 uint8_t hmi_profile_count(void);
 const hmi_device_profile_t* hmi_profile_at(uint8_t idx);
 
-/* First profile matching an identity. vendor/product may be NULL or "" when the
- * device did not answer FC43. Never returns NULL (the generic profile matches anything). */
+/* First module matching an identity. vendor/product may be NULL or "" when the
+ * device did not answer FC43. Never returns NULL (the generic module matches anything). */
 const hmi_device_profile_t* hmi_profile_match(const char *vendor, const char *product);
 
-/* Action for a relative tag, or NULL */
+/* First action for a relative tag, or NULL / -1 */
 const hmi_device_action_t* hmi_profile_action(const hmi_device_profile_t *p, uint8_t rel_tag);
-/* Index of that action (0..n_actions-1) or -1 */
 int hmi_profile_action_index(const hmi_device_profile_t *p, uint8_t rel_tag);
+/* The action a one-tap button on that tag performs in the current state: Stop while
+ * running, Start while stopped, otherwise the first action of the tag. -1 = none. */
+int hmi_profile_quick_action(const hmi_device_profile_t *p, uint8_t rel_tag, int16_t current);
+/* Mode selector of a tag (SET_ENUM), used to show its value as text; NULL if none */
+const hmi_device_action_t* hmi_profile_enum_action(const hmi_device_profile_t *p, uint8_t rel_tag);
 /* Target value a TOGGLE_REG action would write for the current value */
 int16_t hmi_action_reg_target(const hmi_device_action_t *a, int16_t current);
+/* SET_ENUM options: count (0 for other kinds) and the label of option idx ("" if none) */
+uint8_t hmi_action_option_count(const hmi_device_action_t *a);
+void    hmi_action_option_label(const hmi_device_action_t *a, uint8_t idx, char *out, size_t cap);
+
+/* --- Faceplate: a device's controls grouped by the tag they act on --- */
+#define HMI_FP_MAX_ROWS  7
+#define HMI_FP_MAX_CTRLS 20
+#define HMI_FP_NO_OPTION 0xFFu
+typedef struct {
+    uint8_t row;       /* faceplate row */
+    uint8_t action;    /* index into profile->actions */
+    uint8_t option;    /* SET_ENUM option index, else HMI_FP_NO_OPTION */
+} hmi_fp_ctrl_t;
+
+/* Rows = distinct action tags in action order (at most HMI_FP_MAX_ROWS). */
+uint8_t hmi_profile_fp_rows(const hmi_device_profile_t *p, uint8_t rel_out[HMI_FP_MAX_ROWS]);
+/* Buttons in row order: one per action, one per option of a mode selector. */
+uint8_t hmi_profile_fp_controls(const hmi_device_profile_t *p, hmi_fp_ctrl_t *out, uint8_t cap);
 
 #endif /* INDUSTRIAL_HMI_DEVICE_PROFILE_H */

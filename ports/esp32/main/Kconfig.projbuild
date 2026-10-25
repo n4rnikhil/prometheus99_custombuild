@@ -1,0 +1,27 @@
+menu "Prometheus HMI"
+
+    config HMI_WIFI_SSID
+        string "Wi-Fi network (SSID)"
+        default ""
+        help
+            Network that reaches the PLCs. Leave empty to start without Wi-Fi.
+
+    config HMI_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config HMI_ARGS
+        string "Runtime options"
+        default "--plc 192.168.1.10 --log /data/alarms.log --vault /data/security.vault"
+        help
+            Same options as the desktop runtime, e.g.
+            "--plc 192.168.1.10 --scan 192.168.1.0/24 --log /data/alarms.log --vault /data/security.vault".
+            Files live on the "storage" LittleFS partition mounted at /data.
+
+    config HMI_NTP_SERVER
+        string "Time server for alarm time stamps"
+        default "pool.ntp.org"
+        help
+            Leave empty to skip SNTP (alarm log UTC stamps then start at 1970).
+
+endmenu

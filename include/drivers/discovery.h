@@ -26,6 +26,7 @@
 #define INDUSTRIAL_HMI_DISCOVERY_H
 
 #include "device_info.h"
+#include "../hal/atomic.h"
 
 #define HMI_DISCOVERY_MAX_RANGES  16
 #define HMI_DISCOVERY_MAX_TARGETS 1024   /* per sweep, after expansion */
@@ -43,7 +44,7 @@ void hmi_discovery_add_defaults(void);          /* localhost: 502 and 1502-1509 
 uint32_t hmi_discovery_target_count(void);
 
 /* Thread body: sweeps until *running becomes 0. */
-void hmi_discovery_run(volatile long *running, hmi_discovery_attached_fn attached, hmi_discovery_found_fn found);
+void hmi_discovery_run(hal_atomic_t *running, hmi_discovery_attached_fn attached, hmi_discovery_found_fn found);
 
 /* Statistics for the diagnostics screen */
 typedef struct {

@@ -50,7 +50,11 @@ typedef enum {
     HMI_HIT_MODAL_ROLE,       /* role picker row; param = hmi_role_t */
     HMI_HIT_MODAL_KEY,        /* PIN keypad; param 0..9 = digit, 10 = delete, 11 = OK */
     HMI_HIT_MODAL_CANCEL,     /* dialog Cancel button, or a tap outside the dialog */
-    HMI_HIT_MODAL_BLOCK       /* tap inside the dialog on no control: swallowed */
+    HMI_HIT_MODAL_BLOCK,      /* tap inside the dialog on no control: swallowed */
+    HMI_HIT_DEVICE_OPEN,      /* device panel header: open its faceplate; param = device slot */
+    HMI_HIT_FP_CTRL,          /* faceplate control; param = index into hmi_profile_fp_controls() */
+    HMI_HIT_NUMPAD_KEY,       /* numeric keypad; param = 0..9 or HMI_NP_* */
+    HMI_HIT_CONFIRM_OK        /* confirmation dialog: confirm */
 } hmi_hit_kind_t;
 
 /* Dialogs drawn over the screen. While one is open only the dialog and the
@@ -58,8 +62,18 @@ typedef enum {
 typedef enum {
     HMI_MODAL_NONE = 0,
     HMI_MODAL_ROLE,           /* choose a role */
-    HMI_MODAL_PIN             /* PIN keypad for the chosen role */
+    HMI_MODAL_PIN,            /* PIN keypad for the chosen role */
+    HMI_MODAL_FACEPLATE,      /* a device's values and all its controls */
+    HMI_MODAL_NUMPAD,         /* numeric entry of a setpoint */
+    HMI_MODAL_CONFIRM         /* "are you sure?" before a command is sent */
 } hmi_modal_t;
+
+/* Numeric keypad keys besides the digits 0..9 */
+#define HMI_NP_DEL   10
+#define HMI_NP_OK    11
+#define HMI_NP_DOT   12
+#define HMI_NP_MINUS 13
+#define HMI_NP_KEYS  14
 
 #define HMI_KEY_DELETE 10
 #define HMI_KEY_OK     11
@@ -120,13 +134,27 @@ bool       hmi_layout_device_compact(hmi_rect_t body);
 /* The manifest a device shows in a body of this size */
 const uint32_t* hmi_layout_device_manifest(const hmi_device_profile_t *p, hmi_rect_t body, uint8_t *count);
 
+/* --- Device faceplate (HMI_MODAL_FACEPLATE) ---
+ * Left column: every value of the device. Right column: one row per controlled tag,
+ * with its buttons (Start / Stop, Set..., mode options, Reset). */
+hmi_rect_t hmi_layout_device_open(hmi_rect_t panel);                 /* tap target: panel header */
+hmi_rect_t hmi_layout_fp_values(int sw, int sh);
+hmi_rect_t hmi_layout_fp_row(int sw, int sh, int row);
+hmi_rect_t hmi_layout_fp_ctrl(int sw, int sh, const hmi_device_profile_t *p, int ctrl);
+
+/* --- Numeric keypad (HMI_MODAL_NUMPAD) and confirmation (HMI_MODAL_CONFIRM) --- */
+hmi_rect_t hmi_layout_numpad_display(int sw, int sh);
+hmi_rect_t hmi_layout_numpad_key(int sw, int sh, int key);           /* 0..9, HMI_NP_* */
+hmi_rect_t hmi_layout_confirm_button(int sw, int sh, bool ok);       /* ok = Confirm, else Cancel */
+
 /* Topmost interactive element at (x, y).
  *   tokens/ntok : manifest of a fixed-manifest screen (telemetry), may be NULL/0
  *   devs/ndev   : present devices in display order (process screen), may be NULL/0
  *   modal       : hmi_modal_t currently open (HMI_MODAL_NONE for none)
+ *   fp_slot     : device slot of the open faceplate (looked up in devs)
  * HMI_HIT_WIDGET_BUTTON returns the ABSOLUTE tag id of the button. */
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
                               const uint32_t *tokens, uint8_t ntok,
-                              const hmi_device_info_t *devs, uint8_t ndev, int x, int y);
+                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t fp_slot, int x, int y);
 
 #endif /* INDUSTRIAL_HMI_LAYOUT_H */

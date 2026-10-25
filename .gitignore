@@ -45,3 +45,8 @@ graphify-out/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# unit-test scratch files and Linux build outputs
+hmi_test_*
+/industrial_hmi
+tests/test_core

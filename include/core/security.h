@@ -54,6 +54,10 @@ typedef enum {
     HMI_CMD_ESTOP_RESET,       /* OPERATOR+ */
     HMI_CMD_WATCHDOG_RESET,    /* MAINTENANCE+ */
     HMI_CMD_INJECT_FAULT,      /* ENGINEER */
+    HMI_CMD_OPERATE,           /* OPERATOR+: start / stop / mode / reset of plant equipment */
+    HMI_CMD_SETPOINT,          /* OPERATOR+: process setpoints */
+    HMI_CMD_TUNE,              /* MAINTENANCE+: tuning values (ramp times, limits) */
+    HMI_CMD_RAW_WRITE,         /* ENGINEER: write any register of an unrecognised device */
     HMI_CMD_COUNT
 } hmi_command_t;
 

@@ -2,13 +2,15 @@
  * @file driver_host.c
  * @brief Host telemetry: system CPU load, system RAM load, and this process's memory
  *
- * All values come from documented Win32 APIs. No value is synthesised.
+ * All values come from the operating system through hal/sys.h (Win32 APIs, Linux procfs,
+ * ESP-IDF heap). A figure the platform cannot provide is shown as unavailable, never invented.
  */
 
 #include "../../include/drivers/driver_host.h"
 #include "../../include/renderer/bytecode.h"
-#include <windows.h>
-#include <psapi.h>
+#include "../../include/hal/sys.h"
+#include <string.h>
+#include <stdio.h>
 
 static const hmi_tag_meta_t s_host_meta[HOST_TAG_COUNT] = {
     /* id                   type            name               unit  min  max    warn   trip   dec dig  action1                          action2 */
@@ -36,35 +38,18 @@ static const uint32_t s_host_manifest[] = {
 #define HOST_MANIFEST_COUNT ((uint8_t)(sizeof(s_host_manifest) / sizeof(s_host_manifest[0])))
 #define HOST_SAMPLE_PERIOD_MS 500u
 
-static uint64_t s_last_idle;
-static uint64_t s_last_kernel;
-static uint64_t s_last_user;
 static uint32_t s_last_sample_ms;
-static bool     s_have_baseline;
 static bool     s_first_poll = true;
 
-static uint64_t ft_to_u64(const FILETIME *ft)
+static int16_t clamp_kb(uint32_t kb)
 {
-    return ((uint64_t)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
-}
-
-static int16_t clamp_kb(SIZE_T bytes)
-{
-    SIZE_T kb = bytes / 1024u;
     return (int16_t)(kb > 32767u ? 32767u : kb);
 }
 
 static bool host_init(void)
 {
-    FILETIME idle, kernel, user;
-    s_have_baseline = false;
     s_first_poll = true;
-    if (GetSystemTimes(&idle, &kernel, &user)) {
-        s_last_idle = ft_to_u64(&idle);
-        s_last_kernel = ft_to_u64(&kernel);
-        s_last_user = ft_to_u64(&user);
-        s_have_baseline = true;
-    }
+    hal_host_stats_init();
     return true;
 }
 
@@ -78,37 +63,18 @@ static bool host_poll_cyclic(hmi_tag_table_t *tags, uint32_t now_ms)
     s_first_poll = false;
     s_last_sample_ms = now_ms;
 
-    /* CPU: kernel time includes idle time, so busy = (kernel + user) - idle. */
-    FILETIME idle, kernel, user;
-    if (GetSystemTimes(&idle, &kernel, &user)) {
-        uint64_t ci = ft_to_u64(&idle), ck = ft_to_u64(&kernel), cu = ft_to_u64(&user);
-        if (s_have_baseline) {
-            uint64_t idle_d = ci - s_last_idle;
-            uint64_t total_d = (ck - s_last_kernel) + (cu - s_last_user);
-            if (total_d > 0 && total_d >= idle_d) {
-                int16_t cpu = (int16_t)(((total_d - idle_d) * 100u) / total_d);
-                hmi_tag_write_analog(tags, HOST_TAG_CPU_LOAD, cpu, QUALITY_GOOD);
-            }
-        }
-        s_last_idle = ci; s_last_kernel = ck; s_last_user = cu;
-        s_have_baseline = true;
-    } else {
-        hmi_tag_set_quality(tags, HOST_TAG_CPU_LOAD, QUALITY_COMM_FAULT);
-    }
+    hal_host_stats_t hs;
+    hal_host_stats_poll(&hs);
 
-    MEMORYSTATUSEX mem;
-    mem.dwLength = sizeof(mem);
-    if (GlobalMemoryStatusEx(&mem)) {
-        hmi_tag_write_analog(tags, HOST_TAG_RAM_LOAD, (int16_t)mem.dwMemoryLoad, QUALITY_GOOD);
-    } else {
-        hmi_tag_set_quality(tags, HOST_TAG_RAM_LOAD, QUALITY_COMM_FAULT);
-    }
+    if (hs.cpu_ok) hmi_tag_write_analog(tags, HOST_TAG_CPU_LOAD, hs.cpu_pct, QUALITY_GOOD);
+    else           hmi_tag_set_quality(tags, HOST_TAG_CPU_LOAD, QUALITY_COMM_FAULT);
 
-    PROCESS_MEMORY_COUNTERS_EX pmc;
-    pmc.cb = sizeof(pmc);
-    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof(pmc))) {
-        hmi_tag_write_analog(tags, HOST_TAG_PROC_PRIV_KB, clamp_kb(pmc.PrivateUsage), QUALITY_GOOD);
-        hmi_tag_write_analog(tags, HOST_TAG_PROC_WS_KB, clamp_kb(pmc.WorkingSetSize), QUALITY_GOOD);
+    if (hs.ram_ok) hmi_tag_write_analog(tags, HOST_TAG_RAM_LOAD, hs.ram_pct, QUALITY_GOOD);
+    else           hmi_tag_set_quality(tags, HOST_TAG_RAM_LOAD, QUALITY_COMM_FAULT);
+
+    if (hs.proc_ok) {
+        hmi_tag_write_analog(tags, HOST_TAG_PROC_PRIV_KB, clamp_kb(hs.proc_private_kb), QUALITY_GOOD);
+        hmi_tag_write_analog(tags, HOST_TAG_PROC_WS_KB, clamp_kb(hs.proc_resident_kb), QUALITY_GOOD);
     } else {
         hmi_tag_set_quality(tags, HOST_TAG_PROC_PRIV_KB, QUALITY_COMM_FAULT);
         hmi_tag_set_quality(tags, HOST_TAG_PROC_WS_KB, QUALITY_COMM_FAULT);
@@ -119,10 +85,10 @@ static bool host_poll_cyclic(hmi_tag_table_t *tags, uint32_t now_ms)
 static void host_get_stats(hmi_driver_stats_t *out)
 {
     if (!out) return;
-    ZeroMemory(out, sizeof(*out));
+    memset(out, 0, sizeof(*out));
     out->mode = HMI_DRV_MODE_HOST;
     out->link_state = HMI_LINK_UP;
-    lstrcpynA(out->endpoint, "LOCAL HOST", (int)sizeof(out->endpoint));
+    snprintf(out->endpoint, sizeof(out->endpoint), "%s", "LOCAL HOST");
     out->poll_period_ms = HOST_SAMPLE_PERIOD_MS;
 }
 

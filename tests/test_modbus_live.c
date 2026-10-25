@@ -18,22 +18,23 @@
 #include "../include/drivers/device_manager.h"
 #include "../include/drivers/discovery.h"
 #include "../include/hal/timer.h"
+#include "../include/hal/atomic.h"
 
-static volatile long g_run = 1;
+static hal_atomic_t g_run = 1;
 static hmi_device_candidate_t g_q[8];
-static volatile LONG g_head, g_tail;
+static hal_atomic_t g_head, g_tail;
 static hmi_device_info_t g_pub[HMI_MAX_DEVICES];
-static volatile LONG g_pub_lock;
+static hal_atomic_t g_pub_lock;
 
 static bool attached(const char *host, uint16_t port, uint8_t unit)
 {
     char ep[24];
     snprintf(ep, sizeof(ep), "%s:%u", host, (unsigned)port);
-    while (InterlockedExchange(&g_pub_lock, 1)) Sleep(0);
+    while (hal_atomic_exchange(&g_pub_lock, 1)) Sleep(0);
     bool hit = false;
     for (int i = 0; i < HMI_MAX_DEVICES; i++)
         if (g_pub[i].state && g_pub[i].unit_id == unit && strcmp(g_pub[i].endpoint, ep) == 0) hit = true;
-    InterlockedExchange(&g_pub_lock, 0);
+    hal_atomic_store(&g_pub_lock, 0);
     return hit;
 }
 
@@ -41,7 +42,7 @@ static void found(const hmi_device_candidate_t *c)
 {
     if ((uint32_t)(g_head - g_tail) >= 8) return;
     g_q[(uint32_t)g_head % 8] = *c;
-    InterlockedIncrement(&g_head);
+    hal_atomic_add(&g_head, 1);
 }
 
 static DWORD WINAPI disc_thread(LPVOID p)
@@ -69,12 +70,12 @@ int main(int argc, char **argv)
     uint32_t start = hmi_timer_get_ms(), last_print = 0;
     while ((uint32_t)(hmi_timer_get_ms() - start) < (uint32_t)seconds * 1000u) {
         uint32_t now = hmi_timer_get_ms();
-        while (g_tail != g_head) { hmi_devmgr_attach(&g_q[(uint32_t)g_tail % 8], &tags, &al, now); InterlockedIncrement(&g_tail); }
+        while (g_tail != g_head) { hmi_devmgr_attach(&g_q[(uint32_t)g_tail % 8], &tags, &al, now); hal_atomic_add(&g_tail, 1); }
         hmi_devmgr_poll(&tags, &al, now);
         hmi_alarms_evaluate(&al, &tags, now);
-        while (InterlockedExchange(&g_pub_lock, 1)) Sleep(0);
+        while (hal_atomic_exchange(&g_pub_lock, 1)) Sleep(0);
         hmi_devmgr_publish(g_pub, now);
-        InterlockedExchange(&g_pub_lock, 0);
+        hal_atomic_store(&g_pub_lock, 0);
 
         for (int i = 0; i < HMI_MAX_DEVICES; i++) {
             const hmi_device_info_t *d = &g_pub[i];
@@ -87,7 +88,7 @@ int main(int argc, char **argv)
             }
         }
         if (tank_up && !wrote && tank_slot >= 0 && (uint32_t)(now - start) > 3000u) {
-            hmi_devmgr_action((uint8_t)tank_slot, 1, &tags, &al, now);     /* valve 65 -> 25 % */
+            hmi_devmgr_action((uint8_t)tank_slot, 4, 25, &tags, &al, now);   /* Set valve: 65 -> 25 % */
             wrote = true;
         }
         if (wrote && tank_slot >= 0 && tags.tags[HMI_DEV_TAG(tank_slot, 2)].value == 25 &&

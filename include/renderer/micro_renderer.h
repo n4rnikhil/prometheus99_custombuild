@@ -70,8 +70,18 @@ typedef struct {
     uint8_t  modal_role;           /* role being signed in to (PIN dialog) */
     uint8_t  pin_len;              /* digits typed so far (digits are never passed to the renderer) */
     uint32_t lockout_ms;           /* remaining PIN lockout */
-    const char *modal_msg;         /* hint / error line in the PIN dialog */
+    const char *modal_msg;         /* hint / error line in the PIN dialog and the keypad */
     bool     modal_msg_error;
+    /* Device controls */
+    uint8_t     fp_slot;           /* faceplate: device slot */
+    const char *np_title;          /* numeric keypad: what is being set */
+    const char *np_entry;          /* characters typed so far ("" = none) */
+    const char *np_unit;
+    const char *np_info;           /* "Now 50.0 Hz  -  allowed 0.0 to 60.0" */
+    const char *cf_title;          /* confirmation dialog */
+    const char *cf_detail;
+    const char *cf_ok;             /* confirm button label */
+    bool        cf_danger;         /* red confirm button */
 } hmi_view_t;
 
 /* --- Lifecycle --- */

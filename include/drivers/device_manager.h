@@ -23,8 +23,9 @@
 /* remove_after_ms: 0 = never remove offline devices */
 void hmi_devmgr_init(uint32_t remove_after_ms);
 
-/* Put the built-in tank-skid simulator in the first free slot. */
-bool hmi_devmgr_attach_simulator(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms);
+/* Put a built-in simulated device (sim_type_t from plc_sim.h, e.g. SIM_TANK) in the first free
+ * slot. It is driven through the same Modbus requests and driver module as a real device. */
+bool hmi_devmgr_attach_simulator(uint8_t sim_type, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms);
 
 /* Attach a discovered device. false if it is already attached or no slot is free. */
 bool hmi_devmgr_attach(const hmi_device_candidate_t *c, hmi_tag_table_t *tags,
@@ -36,8 +37,9 @@ bool hmi_devmgr_is_attached(const char *host, uint16_t port, uint8_t unit);
 void hmi_devmgr_poll(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms);
 
 /* Execute action idx of the device in slot (already RBAC-authorised by the UI).
- * Logs the outcome to the journal. */
-void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, hmi_tag_table_t *tags,
+ * value: SET_REG = raw value to write, SET_ENUM = option index, ignored otherwise.
+ * Interlocks (block_tag) and ranges are checked here again. Logs the outcome to the journal. */
+void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, int16_t value, hmi_tag_table_t *tags,
                        hmi_alarm_supervisor_t *alarms, uint32_t now_ms);
 
 /* E-stop trip (true) or reset (false) on every device that has an E-stop coil.

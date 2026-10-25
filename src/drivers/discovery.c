@@ -2,20 +2,18 @@
  * @file discovery.c
  * @brief Modbus TCP device discovery: parallel non-blocking probes + FC43 identification
  *
- * Runs in its own thread (THREAD_PRIORITY_BELOW_NORMAL), never in the 1 kHz loop.
+ * Runs in its own low-priority thread, never in the 1 kHz loop.
  * All buffers are static: no heap.
  */
 
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../../include/drivers/discovery.h"
 #include "../../include/drivers/modbus_proto.h"
+#include "../../include/hal/net.h"
+#include "../../include/hal/timer.h"
 
 typedef struct {
     uint32_t ip_first, ip_last;     /* host byte order */
@@ -24,12 +22,12 @@ typedef struct {
     bool     explicit_target;
 } range_t;
 
-typedef struct { char host[16]; uint16_t port; DWORD until; } ignored_t;
+typedef struct { char host[16]; uint16_t port; uint32_t until; } ignored_t;
 static ignored_t s_ignored[HMI_DISCOVERY_IGNORE_LIST];
 
 static bool is_ignored(const char *host, uint16_t port)
 {
-    DWORD now = GetTickCount();
+    uint32_t now = hmi_timer_get_ms();
     for (int i = 0; i < HMI_DISCOVERY_IGNORE_LIST; i++) {
         if (s_ignored[i].port == port && strcmp(s_ignored[i].host, host) == 0) {
             if ((int32_t)(s_ignored[i].until - now) > 0) return true;
@@ -43,7 +41,7 @@ static bool is_ignored(const char *host, uint16_t port)
 static void ignore(const char *host, uint16_t port)
 {
     int slot = 0;
-    DWORD now = GetTickCount();
+    uint32_t now = hmi_timer_get_ms();
     for (int i = 0; i < HMI_DISCOVERY_IGNORE_LIST; i++) {
         if (s_ignored[i].port == 0 || (int32_t)(s_ignored[i].until - now) <= 0) { slot = i; break; }
         if ((int32_t)(s_ignored[i].until - s_ignored[slot].until) < 0) slot = i;   /* else evict the oldest */
@@ -66,11 +64,7 @@ static bool parse_ipv4(const char *s, size_t n, uint32_t *out)
     if (n == 0 || n >= sizeof(buf)) return false;
     memcpy(buf, s, n);
     buf[n] = '\0';
-    if (strcmp(buf, "localhost") == 0) { *out = 0x7F000001u; return true; }
-    struct in_addr a;
-    if (inet_pton(AF_INET, buf, &a) != 1) return false;
-    *out = ntohl(a.s_addr);
-    return true;
+    return hal_ip_parse(buf, out);
 }
 
 bool hmi_discovery_add(const char *spec, bool explicit_target)
@@ -154,19 +148,23 @@ uint32_t hmi_discovery_target_count(void)
 /* ------------------------------------------------------------------------- */
 /* Probing                                                                    */
 /* ------------------------------------------------------------------------- */
-#define BATCH 32
+#define BATCH HMI_DISCOVERY_BATCH   /* one readiness mask bit per probe */
+#if BATCH < 1 || BATCH > HAL_NET_WAIT_MAX
+#error "HMI_DISCOVERY_BATCH must be 1..HAL_NET_WAIT_MAX"
+#endif
 
 typedef enum { PR_IDLE, PR_CONNECTING, PR_WAIT_ID, PR_WAIT_FC03, PR_DONE_ID, PR_DONE_MODBUS, PR_DEAD } probe_state_t;
 
 typedef struct {
-    SOCKET   sock;
-    uint8_t  state;
-    char     host[16];
-    uint16_t port;
-    uint8_t  unit;
-    bool     explicit_target;
-    uint8_t  rx[MB_MAX_ADU];
-    size_t   rx_len;
+    hal_sock_t sock;
+    uint8_t    state;
+    char       host[16];
+    uint32_t   ip;               /* host byte order */
+    uint16_t   port;
+    uint8_t    unit;
+    bool       explicit_target;
+    uint8_t    rx[MB_MAX_ADU];
+    size_t     rx_len;
     mb_device_id_t id;
 } probe_t;
 
@@ -174,8 +172,8 @@ static probe_t s_probe[BATCH];
 
 static void probe_close(probe_t *p, uint8_t final_state)
 {
-    if (p->sock != INVALID_SOCKET) closesocket(p->sock);
-    p->sock = INVALID_SOCKET;
+    hal_tcp_close(p->sock);
+    p->sock = HAL_SOCK_INVALID;
     p->state = final_state;
 }
 
@@ -185,28 +183,30 @@ static bool probe_send_fc03(probe_t *p, uint16_t tid)
     mb_request_t rq = { tid, p->unit, MB_FC_READ_HOLDING, 0, 1 };
     size_t n = mb_encode_request(&rq, adu, sizeof(adu));
     p->rx_len = 0;
-    return n && send(p->sock, (const char *)adu, (int)n, 0) == (int)n;
+    return n && hal_tcp_send(p->sock, adu, n) == (int)n;
 }
 
 /* Wait (up to timeout) for sockets in `want` state; handle replies. */
-static void pump_replies(uint8_t want, uint32_t timeout_ms, volatile long *running)
+static void pump_replies(uint8_t want, uint32_t timeout_ms, hal_atomic_t *running)
 {
-    DWORD deadline = GetTickCount() + timeout_ms;
+    uint32_t t0 = hmi_timer_get_ms();
     for (;;) {
-        fd_set rs;
-        FD_ZERO(&rs);
+        hal_sock_t socks[BATCH];
+        int idx[BATCH];
         int pending = 0;
-        for (int i = 0; i < BATCH; i++) if (s_probe[i].state == want) { FD_SET(s_probe[i].sock, &rs); pending++; }
-        if (!pending || !*running) return;
-        DWORD now = GetTickCount();
-        if ((int32_t)(deadline - now) <= 0) break;
-        struct timeval tv = { 0, (long)((deadline - now) * 1000u) };
-        if (select(0, &rs, NULL, NULL, &tv) <= 0) break;
-        for (int i = 0; i < BATCH; i++) {
+        for (int i = 0; i < BATCH; i++) if (s_probe[i].state == want) { socks[pending] = s_probe[i].sock; idx[pending++] = i; }
+        if (!pending) return;
+        uint32_t used = (uint32_t)(hmi_timer_get_ms() - t0);
+        if (!hal_atomic_load(running) || used >= timeout_ms) break;
+        uint32_t ready = 0;
+        if (hal_net_wait(socks, pending, NULL, 0, timeout_ms - used, &ready, NULL) <= 0) break;
+        for (int k = 0; k < pending; k++) {
+            if (!(ready & (1u << k))) continue;
+            int i = idx[k];
             probe_t *p = &s_probe[i];
-            if (p->state != want || !FD_ISSET(p->sock, &rs)) continue;
-            int n = recv(p->sock, (char *)p->rx + p->rx_len, (int)(sizeof(p->rx) - p->rx_len), 0);
-            if (n <= 0) { probe_close(p, PR_DEAD); continue; }
+            int n = hal_tcp_recv(p->sock, p->rx + p->rx_len, sizeof(p->rx) - p->rx_len);
+            if (n < 0) { probe_close(p, PR_DEAD); continue; }
+            if (n == 0) continue;
             p->rx_len += (size_t)n;
             int32_t need = mb_adu_length(p->rx, p->rx_len);
             if (need < 0) { probe_close(p, PR_DEAD); continue; }
@@ -229,47 +229,39 @@ static void pump_replies(uint8_t want, uint32_t timeout_ms, volatile long *runni
     for (int i = 0; i < BATCH; i++) if (s_probe[i].state == want) probe_close(&s_probe[i], PR_DEAD);
 }
 
-static void probe_batch(int count, volatile long *running, hmi_discovery_found_fn found)
+static void probe_batch(int count, hal_atomic_t *running, hmi_discovery_found_fn found)
 {
     /* 1. connect */
     for (int i = 0; i < count; i++) {
         probe_t *p = &s_probe[i];
-        p->sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (p->sock == INVALID_SOCKET) { p->state = PR_DEAD; continue; }
-        u_long nb = 1;
-        ioctlsocket(p->sock, FIONBIO, &nb);
-        struct sockaddr_in a;
-        memset(&a, 0, sizeof(a));
-        a.sin_family = AF_INET;
-        a.sin_port = htons(p->port);
-        inet_pton(AF_INET, p->host, &a.sin_addr);
-        int rc = connect(p->sock, (const struct sockaddr *)&a, sizeof(a));
-        if (rc == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) { probe_close(p, PR_DEAD); continue; }
+        p->sock = hal_tcp_connect_start(p->ip, p->port);
+        if (p->sock == HAL_SOCK_INVALID) { p->state = PR_DEAD; continue; }
         p->state = PR_CONNECTING;
         s_stats.probes++;
     }
-    DWORD deadline = GetTickCount() + HMI_DISCOVERY_CONNECT_MS;
+    uint32_t t0 = hmi_timer_get_ms();
     for (;;) {
-        fd_set ws, es;
-        FD_ZERO(&ws); FD_ZERO(&es);
+        hal_sock_t socks[BATCH];
+        int idx[BATCH];
         int pending = 0;
-        for (int i = 0; i < count; i++) if (s_probe[i].state == PR_CONNECTING) { FD_SET(s_probe[i].sock, &ws); FD_SET(s_probe[i].sock, &es); pending++; }
-        if (!pending || !*running) break;
-        DWORD now = GetTickCount();
-        if ((int32_t)(deadline - now) <= 0) break;
-        struct timeval tv = { 0, (long)((deadline - now) * 1000u) };
-        if (select(0, NULL, &ws, &es, &tv) <= 0) break;
-        for (int i = 0; i < count; i++) {
+        for (int i = 0; i < count; i++) if (s_probe[i].state == PR_CONNECTING) { socks[pending] = s_probe[i].sock; idx[pending++] = i; }
+        if (!pending) break;
+        uint32_t used = (uint32_t)(hmi_timer_get_ms() - t0);
+        if (!hal_atomic_load(running) || used >= HMI_DISCOVERY_CONNECT_MS) break;
+        uint32_t ready = 0;
+        if (hal_net_wait(NULL, 0, socks, pending, HMI_DISCOVERY_CONNECT_MS - used, NULL, &ready) <= 0) break;
+        for (int k = 0; k < pending; k++) {
+            if (!(ready & (1u << k))) continue;
+            int i = idx[k];
             probe_t *p = &s_probe[i];
-            if (p->state != PR_CONNECTING) continue;
-            if (FD_ISSET(p->sock, &es)) { probe_close(p, PR_DEAD); continue; }
-            if (FD_ISSET(p->sock, &ws)) {
-                uint8_t req[16];
-                size_t n = mb_encode_devid_request((uint16_t)(0x4300 + i), p->unit, req, sizeof(req));
-                p->rx_len = 0;
-                if (n && send(p->sock, (const char *)req, (int)n, 0) == (int)n) p->state = PR_WAIT_ID;
-                else probe_close(p, PR_DEAD);
-            }
+            int c = hal_tcp_connect_poll(p->sock);
+            if (c < 0) { probe_close(p, PR_DEAD); continue; }
+            if (c == 0) continue;
+            uint8_t req[16];
+            size_t n = mb_encode_devid_request((uint16_t)(0x4300 + i), p->unit, req, sizeof(req));
+            p->rx_len = 0;
+            if (n && hal_tcp_send(p->sock, req, n) == (int)n) p->state = PR_WAIT_ID;
+            else probe_close(p, PR_DEAD);
         }
     }
     for (int i = 0; i < count; i++) if (s_probe[i].state == PR_CONNECTING) probe_close(&s_probe[i], PR_DEAD);
@@ -304,31 +296,29 @@ static void probe_batch(int count, volatile long *running, hmi_discovery_found_f
     }
 }
 
-void hmi_discovery_run(volatile long *running, hmi_discovery_attached_fn attached, hmi_discovery_found_fn found)
+void hmi_discovery_run(hal_atomic_t *running, hmi_discovery_attached_fn attached, hmi_discovery_found_fn found)
 {
-    WSADATA wd;
-    if (WSAStartup(MAKEWORD(2, 2), &wd) != 0) return;
+    if (!hal_net_init()) return;
     s_stats.targets = hmi_discovery_target_count();
 
-    while (*running) {
-        DWORD t0 = GetTickCount();
+    while (hal_atomic_load(running)) {
+        uint32_t t0 = hmi_timer_get_ms();
         int count = 0;
         uint32_t budget = HMI_DISCOVERY_MAX_TARGETS;
-        for (uint8_t r = 0; r < s_nranges && *running && budget; r++) {
+        for (uint8_t r = 0; r < s_nranges && hal_atomic_load(running) && budget; r++) {
             const range_t *rg = &s_ranges[r];
-            for (uint32_t ip = rg->ip_first; ip <= rg->ip_last && *running && budget; ip++) {
+            for (uint32_t ip = rg->ip_first; ip <= rg->ip_last && hal_atomic_load(running) && budget; ip++) {
                 for (uint32_t port = rg->port_first; port <= rg->port_last && budget; port++) {
                     budget--;
                     char host[16];
-                    struct in_addr a;
-                    a.s_addr = htonl(ip);
-                    inet_ntop(AF_INET, &a, host, sizeof(host));
+                    hal_ip_format(ip, host);
                     if (attached(host, (uint16_t)port, rg->unit)) continue;
                     if (!rg->explicit_target && is_ignored(host, (uint16_t)port)) continue;
                     probe_t *p = &s_probe[count];
                     memset(p, 0, sizeof(*p));
-                    p->sock = INVALID_SOCKET;
+                    p->sock = HAL_SOCK_INVALID;
                     snprintf(p->host, sizeof(p->host), "%s", host);
+                    p->ip = ip;
                     p->port = (uint16_t)port;
                     p->unit = rg->unit;
                     p->explicit_target = rg->explicit_target;
@@ -337,13 +327,13 @@ void hmi_discovery_run(volatile long *running, hmi_discovery_attached_fn attache
                 if (ip == 0xFFFFFFFFu) break;
             }
         }
-        if (count && *running) probe_batch(count, running, found);
+        if (count && hal_atomic_load(running)) probe_batch(count, running, found);
         s_stats.sweeps++;
-        s_stats.last_sweep_ms = GetTickCount() - t0;
+        s_stats.last_sweep_ms = (uint32_t)(hmi_timer_get_ms() - t0);
 
-        for (uint32_t waited = 0; waited < HMI_DISCOVERY_PERIOD_MS && *running; waited += 50u) Sleep(50);
+        for (uint32_t waited = 0; waited < HMI_DISCOVERY_PERIOD_MS && hal_atomic_load(running); waited += 50u) hmi_timer_sleep_ms(50);
     }
-    WSACleanup();
+    hal_net_shutdown();
 }
 
 void hmi_discovery_get_stats(hmi_discovery_stats_t *out)

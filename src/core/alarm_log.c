@@ -1,20 +1,20 @@
 /**
  * @file alarm_log.c
- * @brief Append-only, hash-chained alarm audit log (Win32 file API, no heap)
+ * @brief Append-only, hash-chained alarm audit log (portable file layer, no heap)
  * @standards ISA-18.2 audit trail / IEC 62443-4-2 CR 2.8
  */
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 #include "../../include/core/alarm_log.h"
 #include "../../include/core/crc32.h"
+#include "../../include/hal/fs.h"
+#include "../../include/hal/sys.h"
 
-static HANDLE                s_file = INVALID_HANDLE_VALUE;
-static char                  s_path[MAX_PATH];
+static hal_file_t           *s_file;
+static char                  s_path[HMI_PATH_MAX];
 static uint32_t              s_max_bytes = HMI_ALARM_LOG_MAX_BYTES;
 static uint32_t              s_last_written_seq;
 static uint32_t              s_chain = HMI_ALARM_LOG_GENESIS;
@@ -119,19 +119,18 @@ bool hmi_alarm_log_verify_file(const char *path, uint32_t *out_lines, uint32_t *
     if (out_first_bad) *out_first_bad = 0;
     if (!path) return false;
 
-    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) return false;
+    hal_file_t *f = hal_file_open(path, HAL_FILE_READ);
+    if (!f) return false;
 
     static char buf[4096];
     static char line[512];
     size_t ll = 0;
     bool overflow = false;
     uint32_t chain = HMI_ALARM_LOG_GENESIS;
-    DWORD got = 0;
     for (;;) {
-        if (!ReadFile(f, buf, sizeof(buf), &got, NULL) || got == 0) break;
-        for (DWORD i = 0; i < got; i++) {
+        int got = hal_file_read(f, buf, sizeof(buf));
+        if (got <= 0) break;
+        for (int i = 0; i < got; i++) {
             char c = buf[i];
             if (c == '\n') {
                 lines++;
@@ -155,7 +154,7 @@ bool hmi_alarm_log_verify_file(const char *path, uint32_t *out_lines, uint32_t *
         bad++;
         if (!first_bad) first_bad = lines;
     }
-    CloseHandle(f);
+    hal_file_close(f);
 
     if (out_lines) *out_lines = lines;
     if (out_bad) *out_bad = bad;
@@ -167,19 +166,10 @@ bool hmi_alarm_log_verify_file(const char *path, uint32_t *out_lines, uint32_t *
 /* File I/O                                                                   */
 /* ------------------------------------------------------------------------- */
 
-static void utc_now(char *out, size_t cap)
-{
-    SYSTEMTIME st;
-    GetSystemTime(&st);
-    snprintf(out, cap, "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-}
-
 static bool write_raw(const char *buf, size_t len)
 {
-    if (s_file == INVALID_HANDLE_VALUE || !buf || len == 0) return false;
-    DWORD written = 0;
-    if (!WriteFile(s_file, buf, (DWORD)len, &written, NULL) || written != len) {
+    if (!s_file || !buf || len == 0) return false;
+    if (!hal_file_write(s_file, buf, len)) {
         s_stats.write_errors++;
         return false;
     }
@@ -195,15 +185,13 @@ static void write_header(void)
 }
 
 /* Recover the chain value from the last line of an existing file. */
-static bool recover_tail(HANDLE f, uint32_t size)
+static bool recover_tail(hal_file_t *f, uint32_t size)
 {
     char tail[400];
-    DWORD want = size < sizeof(tail) ? size : (DWORD)sizeof(tail);
-    LARGE_INTEGER pos;
-    pos.QuadPart = (LONGLONG)size - want;
-    DWORD got = 0;
-    if (!SetFilePointerEx(f, pos, NULL, FILE_BEGIN) || !ReadFile(f, tail, want, &got, NULL) || got != want) return false;
+    size_t want = size < sizeof(tail) ? size : sizeof(tail);
+    if (!hal_file_pread(f, size - (uint32_t)want, tail, want)) return false;
 
+    size_t got = want;
     size_t end = got;
     while (end > 0 && (tail[end - 1] == '\r' || tail[end - 1] == '\n')) end--;
     if (end == 0 || end == got) return false;          /* file must end with a newline */
@@ -226,11 +214,13 @@ static bool recover_tail(HANDLE f, uint32_t size)
 
 static bool open_file(bool fresh)
 {
-    s_file = CreateFileA(s_path, FILE_APPEND_DATA | GENERIC_READ, FILE_SHARE_READ, NULL,
-                         fresh ? CREATE_ALWAYS : OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (s_file == INVALID_HANDLE_VALUE) return false;
-    LARGE_INTEGER sz;
-    s_stats.file_bytes = GetFileSizeEx(s_file, &sz) ? (uint32_t)sz.QuadPart : 0;
+    if (fresh) {                                  /* start empty: drop whatever is at the path */
+        hal_file_t *t = hal_file_open(s_path, HAL_FILE_WRITE_NEW);
+        hal_file_close(t);
+    }
+    s_file = hal_file_open(s_path, HAL_FILE_APPEND);
+    if (!s_file) return false;
+    s_stats.file_bytes = hal_file_size(s_file);
     if (s_stats.file_bytes == 0) {
         write_header();
     } else if (recover_tail(s_file, s_stats.file_bytes)) {
@@ -238,11 +228,11 @@ static bool open_file(bool fresh)
     } else {
         /* Unreadable tail (e.g. torn last write): rotate it away and start a fresh file
          * so the damaged log stays available for inspection. */
-        CloseHandle(s_file);
-        s_file = INVALID_HANDLE_VALUE;
-        char backup[MAX_PATH + 16];
+        hal_file_close(s_file);
+        s_file = NULL;
+        char backup[HMI_PATH_MAX + 16];
         snprintf(backup, sizeof(backup), "%s.damaged", s_path);
-        MoveFileExA(s_path, backup, MOVEFILE_REPLACE_EXISTING);
+        hal_file_replace(s_path, backup);
         s_chain = HMI_ALARM_LOG_GENESIS;
         return open_file(true);
     }
@@ -252,12 +242,12 @@ static bool open_file(bool fresh)
 
 static void rotate_if_needed(size_t next_len)
 {
-    if (s_file == INVALID_HANDLE_VALUE || s_stats.file_bytes + next_len <= s_max_bytes) return;
-    CloseHandle(s_file);
-    s_file = INVALID_HANDLE_VALUE;
-    char backup[MAX_PATH + 8];
+    if (!s_file || s_stats.file_bytes + next_len <= s_max_bytes) return;
+    hal_file_close(s_file);
+    s_file = NULL;
+    char backup[HMI_PATH_MAX + 8];
     snprintf(backup, sizeof(backup), "%s.1", s_path);
-    MoveFileExA(s_path, backup, MOVEFILE_REPLACE_EXISTING);
+    hal_file_replace(s_path, backup);
     if (open_file(true)) s_stats.rotations++;
     else s_stats.open = false;
 }
@@ -280,7 +270,7 @@ static void append_record(const hmi_alarm_record_t *rec)
 {
     char utc[48], line[320];
     uint32_t crc = 0;
-    utc_now(utc, sizeof(utc));
+    hal_utc_now(utc, sizeof(utc));
     size_t len = hmi_alarm_log_format_line(line, sizeof(line), rec, utc, s_chain, &crc);
     if (!len) { s_stats.write_errors++; return; }
     rotate_if_needed(len);
@@ -295,7 +285,7 @@ static void append_record(const hmi_alarm_record_t *rec)
 
 void hmi_alarm_log_sync(const hmi_alarm_supervisor_t *snap)
 {
-    if (!snap || s_file == INVALID_HANDLE_VALUE) return;
+    if (!snap || !s_file) return;
     if (snap->journal_total == s_last_written_seq) return;
     if (snap->journal_total < s_last_written_seq) s_last_written_seq = 0;   /* supervisor restarted */
 
@@ -322,10 +312,10 @@ void hmi_alarm_log_sync(const hmi_alarm_supervisor_t *snap)
 
 void hmi_alarm_log_close(void)
 {
-    if (s_file != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(s_file);
-        CloseHandle(s_file);
-        s_file = INVALID_HANDLE_VALUE;
+    if (s_file) {
+        hal_file_sync(s_file);
+        hal_file_close(s_file);
+        s_file = NULL;
     }
     s_stats.open = false;
 }

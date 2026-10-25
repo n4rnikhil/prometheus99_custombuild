@@ -187,11 +187,26 @@ hmi_rect_t hmi_layout_screen_button(int sw, int sh, bool banner_active, hmi_hit_
 #define PIN_DOTS_H     36
 #define PIN_MSG_H      22
 
+/* Numeric keypad: 5 rows of keys, sized to fit the screen height */
+#define NP_TOP   132                                   /* title + display + info line */
+static int np_key_h(int sh)
+{
+    int avail = sh - (HMI_LAYOUT_HEADER_H + 4) - 4;
+    int kh = (avail - NP_TOP - 8) / 5 - MODAL_GAP;
+    return kh < 30 ? 30 : kh > 44 ? 44 : kh;
+}
+
 hmi_rect_t hmi_layout_modal(int sw, int sh, uint8_t modal)
 {
     int w, h;
     if (modal == HMI_MODAL_ROLE) { w = 380; h = MODAL_TITLE_H + 4 * (MODAL_ROW_H + MODAL_GAP) + 8; }
     else if (modal == HMI_MODAL_PIN) { w = 320; h = MODAL_TITLE_H + PIN_DOTS_H + PIN_MSG_H + 4 * (MODAL_ROW_H + MODAL_GAP) + 8; }
+    else if (modal == HMI_MODAL_FACEPLATE) {           /* nearly full screen, over the dock */
+        int y = HMI_LAYOUT_HEADER_H + 4;
+        return mk(12, y, sw - 24, sh - y - 6);
+    }
+    else if (modal == HMI_MODAL_NUMPAD) { w = 360; h = NP_TOP + 5 * (np_key_h(sh) + MODAL_GAP) + 8; }
+    else if (modal == HMI_MODAL_CONFIRM) { w = 440; h = 196; }
     else return mk(0, 0, 0, 0);
     if (w > sw - 32) w = sw - 32;
     int top = HMI_LAYOUT_HEADER_H + 4;
@@ -204,7 +219,7 @@ hmi_rect_t hmi_layout_modal(int sw, int sh, uint8_t modal)
 hmi_rect_t hmi_layout_modal_cancel(int sw, int sh, uint8_t modal)
 {
     hmi_rect_t m = hmi_layout_modal(sw, sh, modal);
-    if (m.w == 0) return m;
+    if (m.w == 0 || modal == HMI_MODAL_CONFIRM) return mk(0, 0, 0, 0);   /* confirm: Cancel at the bottom */
     return mk(m.x + m.w - 12 - 84, m.y + 10, 84, 34);
 }
 
@@ -229,6 +244,81 @@ hmi_rect_t hmi_layout_modal_key(int sw, int sh, int key)
     return mk(m.x + 16 + col * (kw + MODAL_GAP), ky + row * (MODAL_ROW_H + MODAL_GAP), kw, MODAL_ROW_H);
 }
 
+/* ---------------- Faceplate ---------------- */
+
+#define FP_TITLE_H  60
+#define FP_ROW_H    46
+#define FP_FOOT_H   26
+
+hmi_rect_t hmi_layout_fp_values(int sw, int sh)
+{
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_FACEPLATE);
+    int w = (m.w - 48) * 40 / 100;
+    return mk(m.x + 16, m.y + FP_TITLE_H, w, m.h - FP_TITLE_H - FP_FOOT_H);
+}
+
+hmi_rect_t hmi_layout_fp_row(int sw, int sh, int row)
+{
+    if (row < 0 || row >= HMI_FP_MAX_ROWS) return mk(0, 0, 0, 0);
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_FACEPLATE);
+    hmi_rect_t v = hmi_layout_fp_values(sw, sh);
+    int x = v.x + v.w + 16;
+    int rh = (m.h - FP_TITLE_H - FP_FOOT_H) / HMI_FP_MAX_ROWS;          /* 7 rows always fit */
+    if (rh > FP_ROW_H + 6) rh = FP_ROW_H + 6;
+    return mk(x, m.y + FP_TITLE_H + row * rh, m.x + m.w - 16 - x, rh - 6);
+}
+
+hmi_rect_t hmi_layout_fp_ctrl(int sw, int sh, const hmi_device_profile_t *p, int ctrl)
+{
+    hmi_fp_ctrl_t cs[HMI_FP_MAX_CTRLS];
+    uint8_t n = hmi_profile_fp_controls(p, cs, HMI_FP_MAX_CTRLS);
+    if (ctrl < 0 || ctrl >= n) return mk(0, 0, 0, 0);
+    int k = 0, cnt = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        if (cs[i].row != cs[ctrl].row) continue;
+        if (i < ctrl) k++;
+        cnt++;
+    }
+    hmi_rect_t r = hmi_layout_fp_row(sw, sh, cs[ctrl].row);
+    int text_w = r.w * 36 / 100;
+    int bx = r.x + text_w, bw_all = r.w - text_w;
+    int bw = (bw_all - (cnt - 1) * 6) / cnt;
+    int bh = r.h - 6 < 40 ? r.h - 6 : 40;
+    return mk(bx + k * (bw + 6), r.y + (r.h - bh) / 2, bw, bh);
+}
+
+/* ---------------- Numeric keypad / confirmation ---------------- */
+
+hmi_rect_t hmi_layout_numpad_display(int sw, int sh)
+{
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_NUMPAD);
+    return mk(m.x + 16, m.y + 56, m.w - 32, 48);
+}
+
+hmi_rect_t hmi_layout_numpad_key(int sw, int sh, int key)
+{
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_NUMPAD);
+    int kh = np_key_h(sh);
+    int col, row, span = 1;
+    if (key >= 1 && key <= 9) { col = (key - 1) % 3; row = 2 - (key - 1) / 3; }     /* 7 8 9 on top */
+    else if (key == HMI_NP_MINUS) { col = 0; row = 3; }
+    else if (key == 0)            { col = 1; row = 3; }
+    else if (key == HMI_NP_DOT)   { col = 2; row = 3; }
+    else if (key == HMI_NP_DEL)   { col = 0; row = 4; }
+    else if (key == HMI_NP_OK)    { col = 1; row = 4; span = 2; }
+    else return mk(0, 0, 0, 0);
+    int kw = (m.w - 32 - 2 * MODAL_GAP) / 3;
+    int y = m.y + NP_TOP + row * (kh + MODAL_GAP);
+    return mk(m.x + 16 + col * (kw + MODAL_GAP), y, span * kw + (span - 1) * MODAL_GAP, kh);
+}
+
+hmi_rect_t hmi_layout_confirm_button(int sw, int sh, bool ok)
+{
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_CONFIRM);
+    int bw = (m.w - 32 - MODAL_GAP) / 2;
+    return mk(m.x + 16 + (ok ? bw + MODAL_GAP : 0), m.y + m.h - 16 - 44, bw, 44);
+}
+
 /* ---------------- Plug-and-play dashboard ---------------- */
 
 hmi_rect_t hmi_layout_device_panel(hmi_rect_t c, int n, int idx)
@@ -245,6 +335,11 @@ hmi_rect_t hmi_layout_device_panel(hmi_rect_t c, int n, int idx)
     int y0 = c.y + (row * (c.h + g)) / rows;
     int y1 = c.y + ((row + 1) * (c.h + g)) / rows - g;
     return mk(x0, y0, x1 - x0, y1 - y0);
+}
+
+hmi_rect_t hmi_layout_device_open(hmi_rect_t p)
+{
+    return mk(p.x, p.y, p.w, HMI_LAYOUT_DEVICE_HEADER_H - 4);
 }
 
 hmi_rect_t hmi_layout_device_body(hmi_rect_t p)
@@ -281,14 +376,14 @@ static hmi_hit_t result(hmi_hit_kind_t k, uint8_t param, hmi_rect_t r)
 
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
                               const uint32_t *tokens, uint8_t ntok,
-                              const hmi_device_info_t *devs, uint8_t ndev, int x, int y)
+                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t fp_slot, int x, int y)
 {
     /* The E-STOP is reachable even while a dialog is open */
     {
         hmi_rect_t e = hmi_layout_estop_button(sw, sh);
         if (y < HMI_LAYOUT_HEADER_H && hit(e, x, y)) return result(HMI_HIT_ESTOP, 0, e);
     }
-    if (modal == HMI_MODAL_ROLE || modal == HMI_MODAL_PIN) {
+    if (modal != HMI_MODAL_NONE) {
         hmi_rect_t m = hmi_layout_modal(sw, sh, modal);
         hmi_rect_t c = hmi_layout_modal_cancel(sw, sh, modal);
         if (hmi_rect_contains(c, x, y)) return result(HMI_HIT_MODAL_CANCEL, 0, c);
@@ -297,11 +392,29 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
                 hmi_rect_t r = hmi_layout_modal_role(sw, sh, i);
                 if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_MODAL_ROLE, (uint8_t)i, r);
             }
-        } else {
+        } else if (modal == HMI_MODAL_PIN) {
             for (int k = 0; k <= HMI_KEY_OK; k++) {
                 hmi_rect_t r = hmi_layout_modal_key(sw, sh, k);
                 if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_MODAL_KEY, (uint8_t)k, r);
             }
+        } else if (modal == HMI_MODAL_FACEPLATE) {
+            const hmi_device_profile_t *p = NULL;
+            for (uint8_t d = 0; devs && d < ndev; d++) if (devs[d].slot == fp_slot) p = devs[d].profile;
+            for (int k = 0; p && k < HMI_FP_MAX_CTRLS; k++) {
+                hmi_rect_t r = hmi_layout_fp_ctrl(sw, sh, p, k);
+                if (r.w == 0) break;
+                if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_FP_CTRL, (uint8_t)k, r);
+            }
+        } else if (modal == HMI_MODAL_NUMPAD) {
+            for (int k = 0; k < HMI_NP_KEYS; k++) {
+                hmi_rect_t r = hmi_layout_numpad_key(sw, sh, k);
+                if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_NUMPAD_KEY, (uint8_t)k, r);
+            }
+        } else if (modal == HMI_MODAL_CONFIRM) {
+            hmi_rect_t r = hmi_layout_confirm_button(sw, sh, true);
+            if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_CONFIRM_OK, 0, r);
+            r = hmi_layout_confirm_button(sw, sh, false);
+            if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_MODAL_CANCEL, 0, r);
         }
         if (hmi_rect_contains(m, x, y)) return result(HMI_HIT_MODAL_BLOCK, 0, m);
         return result(HMI_HIT_MODAL_CANCEL, 0, m);      /* tap outside closes the dialog */
@@ -348,7 +461,10 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
     if (screen == SCREEN_PROCESS_OVERVIEW && devs) {
         hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
         for (uint8_t d = 0; d < ndev; d++) {
-            hmi_rect_t body = hmi_layout_device_body(hmi_layout_device_panel(c, ndev, d));
+            hmi_rect_t panel = hmi_layout_device_panel(c, ndev, d);
+            hmi_rect_t head = hmi_layout_device_open(panel);
+            if (hmi_rect_contains(head, x, y)) return result(HMI_HIT_DEVICE_OPEN, devs[d].slot, head);
+            hmi_rect_t body = hmi_layout_device_body(panel);
             uint8_t nt = 0;
             const uint32_t *tk = hmi_layout_device_manifest(devs[d].profile, body, &nt);
             for (uint8_t i = 0; tk && i < nt; i++) {

@@ -22,6 +22,10 @@ static const hmi_role_t s_required_role[HMI_CMD_COUNT] = {
     [HMI_CMD_ESTOP_RESET]    = ROLE_OPERATOR,
     [HMI_CMD_WATCHDOG_RESET] = ROLE_MAINTENANCE,
     [HMI_CMD_INJECT_FAULT]   = ROLE_ENGINEER,
+    [HMI_CMD_OPERATE]        = ROLE_OPERATOR,
+    [HMI_CMD_SETPOINT]       = ROLE_OPERATOR,
+    [HMI_CMD_TUNE]           = ROLE_MAINTENANCE,
+    [HMI_CMD_RAW_WRITE]      = ROLE_ENGINEER,
 };
 
 static const char * const s_cmd_names[HMI_CMD_COUNT] = {
@@ -36,6 +40,10 @@ static const char * const s_cmd_names[HMI_CMD_COUNT] = {
     [HMI_CMD_ESTOP_RESET]    = "E-stop reset",
     [HMI_CMD_WATCHDOG_RESET] = "Watchdog reset",
     [HMI_CMD_INJECT_FAULT]   = "Fault injection",
+    [HMI_CMD_OPERATE]        = "Operate equipment",
+    [HMI_CMD_SETPOINT]       = "Change setpoint",
+    [HMI_CMD_TUNE]           = "Change tuning",
+    [HMI_CMD_RAW_WRITE]      = "Write register",
 };
 
 void hmi_security_init(hmi_security_ctx_t *sec)

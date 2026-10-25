@@ -32,6 +32,10 @@ static const hmi_tag_meta_t s_generic_meta[] = {
 
 static const uint8_t s_generic_regs[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
+/* Unknown map: an Engineer may write holding registers 0..6 directly (confirmed, logged). */
+#define RAW(i) { .rel_tag = (i), .kind = HMI_ACT_SET_REG, .command = HMI_CMD_RAW_WRITE, .block_tag = HMI_REL_NONE,                  .address = (i), .label = "Write", .log_name = "HR " #i, .min = -32768, .max = 32767, .confirm = true }
+static const hmi_device_action_t s_generic_actions[] = { RAW(0), RAW(1), RAW(2), RAW(3), RAW(4), RAW(5), RAW(6) };
+
 static const uint32_t s_generic_full[] = {
     HMI_TOKEN_PACK(HMI_REL_DEVICE, WIDGET_CONTAINER_CARD, 0, 0, 0, 0),
     HMI_TOKEN_PACK(0, WIDGET_ANALOG_BAR, 0, 2, 8, 2),
@@ -57,7 +61,7 @@ const hmi_device_profile_t g_profile_generic = {
     s_generic_meta, (uint8_t)(sizeof(s_generic_meta) / sizeof(s_generic_meta[0])),
     { 0, (uint8_t)sizeof(s_generic_regs), s_generic_regs },
     { 0, 0, NULL },
-    NULL, 0,
+    s_generic_actions, (uint8_t)(sizeof(s_generic_actions) / sizeof(s_generic_actions[0])),
     GN_COMM, HMI_REL_NONE, 0xFFFFu, GN_HR0,
     s_generic_full, (uint8_t)(sizeof(s_generic_full) / sizeof(s_generic_full[0])),
     s_generic_compact, (uint8_t)(sizeof(s_generic_compact) / sizeof(s_generic_compact[0])),

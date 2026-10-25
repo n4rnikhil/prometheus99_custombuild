@@ -5,7 +5,7 @@
  * @standards Modbus Application Protocol v1.1b3 / Modbus Messaging on TCP/IP v1.0b
  *
  * Runs entirely inside the 1 kHz fieldbus loop and never blocks:
- *   - connect() is non-blocking and checked with a zero-timeout select()
+ *   - connect() is non-blocking and polled without waiting (hal_tcp_connect_poll)
  *   - one request in flight per slot, frames reassembled from partial recv()s
  *   - operator writes go through a per-slot queue and are sent between reads
  *   - a missing reply after HMI_MODBUS_TIMEOUT_MS takes the slot OFFLINE: tags go
@@ -13,10 +13,6 @@
  *     and after remove_after_ms the device leaves the dashboard
  */
 
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -24,15 +20,12 @@
 #include "../../include/drivers/device_manager.h"
 #include "../../include/drivers/modbus_proto.h"
 #include "../../include/hal/timer.h"
+#include "../../include/hal/net.h"
+#include "../../include/drivers/plc_sim.h"
 
 typedef enum { STEP_NONE, STEP_READ_REGS, STEP_READ_COILS, STEP_WRITE } tcp_step_t;
 typedef struct { bool coil; uint16_t addr; int16_t value; } pending_write_t;
 
-typedef struct {
-    int32_t  level_x100, rpm, valve, temp_x10, press;
-    bool     pump_a, pump_b, estop;
-    uint32_t last_ms, rng;
-} sim_state_t;
 
 typedef struct {
     hmi_device_info_t info;
@@ -41,8 +34,8 @@ typedef struct {
     bool              ever_freed;
 
     /* Modbus TCP */
-    SOCKET             sock;
-    struct sockaddr_in addr;
+    hal_sock_t         sock;
+    uint32_t           ip;            /* host byte order */
     char               host[16];
     uint16_t           port;
     uint16_t           tid;
@@ -60,14 +53,21 @@ typedef struct {
     uint8_t            exc_streak;    /* consecutive read cycles answered with an exception */
     pending_write_t    wq[HMI_MODBUS_WRITE_QUEUE];
     uint8_t            wq_head, wq_count;
+    uint16_t           pulse_coil;    /* PULSE_COIL: coil to release ... */
+    uint32_t           pulse_due_ms;  /* ... at this time */
+    bool               pulse_pending;
 
-    sim_state_t        sim;
+#if HMI_FEATURE_SIM
+    sim_plc_t          sim;           /* built-in simulated device (--sim) */
+    uint32_t           sim_last_ms;
+#endif
 } slot_t;
 
 static slot_t        s_slots[HMI_MAX_DEVICES];
+static bool queue_write(slot_t *s, bool coil, uint16_t addr, int16_t value);
 static mb_response_t s_rsp;            /* ~520 bytes, kept off the stack */
 static uint32_t      s_remove_after_ms;
-static bool          s_wsa_ok;
+static bool          s_net_ok;
 
 /* Journal entry; text is cut to the journal's 56 characters */
 static void LOG(hmi_alarm_supervisor_t *al, uint32_t now_ms, uint8_t sev, const char *fmt, ...)
@@ -89,84 +89,47 @@ static void set_state(slot_t *s, uint8_t st, uint32_t now_ms)
 }
 
 /* ========================================================================= */
-/* Simulator transport (tank skid physics)                                    */
+/* Simulator transport: a plc_sim.c device model, driven with Modbus requests */
 /* ========================================================================= */
-static void sim_reset(sim_state_t *m)
-{
-    memset(m, 0, sizeof(*m));
-    m->level_x100 = 72000; m->rpm = 1450; m->valve = 65; m->temp_x10 = 560; m->press = 130;
-    m->pump_a = true; m->rng = 0x12345678u;
-}
-
-static int32_t sim_noise(sim_state_t *m, int32_t a)
-{
-    m->rng = m->rng * 1664525u + 1013904223u;
-    return a <= 0 ? 0 : (int32_t)((m->rng >> 16) % (uint32_t)(2 * a + 1)) - a;
-}
-
-static void sim_step(sim_state_t *m)
-{
-    if (m->estop) { m->pump_a = false; m->pump_b = false; }
-    int32_t target_rpm = m->pump_a ? 1450 : 0;
-    if (m->rpm < target_rpm) m->rpm += 60;
-    if (m->rpm > target_rpm) m->rpm -= m->estop ? 150 : 80;
-    if (m->rpm < 0) m->rpm = 0;
-    if (m->pump_a && m->rpm >= 1440) m->rpm = 1450 + sim_noise(m, 6);
-    int32_t inflow = (60 * m->rpm) / 1450;
-    int32_t outflow = (m->valve * 9) / 10;
-    if (m->level_x100 < 2000) outflow = (outflow * m->level_x100) / 2000;
-    m->level_x100 += inflow - outflow + sim_noise(m, 3);
-    if (m->level_x100 < 0) m->level_x100 = 0;
-    if (m->level_x100 > 100000) m->level_x100 = 100000;
-    int32_t target_p = 20 + (m->rpm * 95) / 1450 + ((100 - m->valve) * 40) / 100;
-    m->press += (target_p - m->press) / 4 + sim_noise(m, 1);
-    int32_t target_t = 300 + (m->rpm * 290) / 1450 - (m->pump_b ? 140 : 0);
-    m->temp_x10 += (target_t - m->temp_x10) / 40;
-}
-
-/* The simulator presents the same register image a real tank-skid PLC would. */
+#if HMI_FEATURE_SIM
 static void sim_poll(slot_t *s, hmi_tag_table_t *tags, uint32_t now_ms)
 {
-    sim_state_t *m = &s->sim;
-    if (m->last_ms == 0) m->last_ms = now_ms;
+    sim_plc_t *m = &s->sim;
+    if (s->sim_last_ms == 0) s->sim_last_ms = now_ms;
     uint32_t steps = 0;
-    while ((uint32_t)(now_ms - m->last_ms) >= 100u && steps < 50u) { m->last_ms += 100u; sim_step(m); steps++; }
-    if ((uint32_t)(now_ms - m->last_ms) >= 100u) m->last_ms = now_ms;
+    while ((uint32_t)(now_ms - s->sim_last_ms) >= 100u && steps < 50u) { s->sim_last_ms += 100u; sim_step(m); steps++; }
+    if ((uint32_t)(now_ms - s->sim_last_ms) >= 100u) s->sim_last_ms = now_ms;
+    char ev[SIM_EVENT_LEN];
+    while (sim_pop_event(m, ev, sizeof(ev))) {}              /* the journal already has the HMI's commands */
 
     const hmi_device_profile_t *p = s->info.profile;
-    uint16_t regs[5] = { (uint16_t)(m->level_x100 / 100), (uint16_t)m->rpm, (uint16_t)m->valve,
-                         (uint16_t)m->press, (uint16_t)(m->temp_x10 / 10) };
-    bool coils[3] = { m->pump_a, m->pump_b, m->estop };
     uint8_t slot = s->info.slot;
-    for (uint8_t i = 0; i < p->regs.count && i < 5; i++) {
-        if (p->regs.rel_tags[i] != HMI_REL_NONE)
-            hmi_tag_write_analog(tags, HMI_DEV_TAG(slot, p->regs.rel_tags[i]), (int16_t)regs[i], QUALITY_SIMULATED);
+    for (uint8_t i = 0; i < p->regs.count; i++) {
+        uint16_t a = (uint16_t)(p->regs.start + i);
+        if (p->regs.rel_tags[i] != HMI_REL_NONE && a < SIM_HR)
+            hmi_tag_write_analog(tags, HMI_DEV_TAG(slot, p->regs.rel_tags[i]), m->hr[a], QUALITY_SIMULATED);
     }
-    for (uint8_t i = 0; i < p->coils.count && i < 3; i++) {
-        if (p->coils.rel_tags[i] != HMI_REL_NONE)
-            hmi_tag_write_digital(tags, HMI_DEV_TAG(slot, p->coils.rel_tags[i]), coils[i], QUALITY_SIMULATED);
+    for (uint8_t i = 0; i < p->coils.count; i++) {
+        uint16_t a = (uint16_t)(p->coils.start + i);
+        if (p->coils.rel_tags[i] != HMI_REL_NONE && a < SIM_COILS)
+            hmi_tag_write_digital(tags, HMI_DEV_TAG(slot, p->coils.rel_tags[i]), m->coils[a] != 0, QUALITY_SIMULATED);
     }
     hmi_tag_write_digital(tags, HMI_DEV_TAG(slot, p->comm_tag), false, QUALITY_GOOD);
     set_state(s, HMI_DEV_ONLINE, now_ms);
 }
 
+/* Same Modbus request a real device would get, so the model's write rules apply. */
 static bool sim_write(slot_t *s, bool coil, uint16_t addr, int16_t value)
 {
-    sim_state_t *m = &s->sim;
-    bool ok = true;
-    if (coil) {
-        if (addr == 0)      m->pump_a = value && !m->estop;
-        else if (addr == 1) m->pump_b = value && !m->estop;
-        else if (addr == 2) m->estop = value != 0;
-        else ok = false;
-    } else if (addr == 2) {
-        m->valve = value < 0 ? 0 : value > 100 ? 100 : value;
-    } else {
-        ok = false;
-    }
+    mb_request_t rq = { 1, 1, coil ? MB_FC_WRITE_SINGLE_COIL : MB_FC_WRITE_SINGLE_REG, addr, (uint16_t)value };
+    uint8_t adu[16], out[SIM_MAX_ADU];
+    size_t n = mb_encode_request(&rq, adu, sizeof(adu));
+    size_t r = n ? sim_handle(&s->sim, adu, n, out, sizeof(out)) : 0;
+    bool ok = r > 0 && mb_decode_response(&rq, out, r, &s_rsp) == MB_RESP_OK;
     if (ok) s->info.writes_ok++; else s->info.writes_failed++;
     return ok;
 }
+#endif
 
 /* ========================================================================= */
 /* Modbus TCP transport                                                       */
@@ -193,8 +156,8 @@ static void go_offline(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t 
 
 static void tcp_close(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms)
 {
-    if (s->sock != INVALID_SOCKET) closesocket(s->sock);
-    s->sock = INVALID_SOCKET;
+    hal_tcp_close(s->sock);
+    s->sock = HAL_SOCK_INVALID;
     s->connecting = false;
     s->step = STEP_NONE;
     s->rx_len = 0;
@@ -209,34 +172,11 @@ static void tcp_close(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *
 
 static void tcp_start_connect(slot_t *s, uint32_t now_ms)
 {
-    SOCKET k = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (k == INVALID_SOCKET) { s->next_try_ms = now_ms + s->backoff_ms; return; }
-    u_long nb = 1;
-    ioctlsocket(k, FIONBIO, &nb);
-    BOOL nodelay = TRUE;
-    setsockopt(k, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
-    int rc = connect(k, (const struct sockaddr *)&s->addr, sizeof(s->addr));
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
-        closesocket(k);
-        s->next_try_ms = now_ms + s->backoff_ms;
-        return;
-    }
+    hal_sock_t k = hal_tcp_connect_start(s->ip, s->port);
+    if (k == HAL_SOCK_INVALID) { s->next_try_ms = now_ms + s->backoff_ms; return; }
     s->sock = k;
     s->connect_start_ms = now_ms;
     s->connecting = true;
-}
-
-static int tcp_check_connect(slot_t *s)
-{
-    fd_set w, e;
-    FD_ZERO(&w); FD_ZERO(&e);
-    FD_SET(s->sock, &w); FD_SET(s->sock, &e);
-    struct timeval tv = { 0, 0 };
-    int n = select(0, NULL, &w, &e, &tv);
-    if (n == SOCKET_ERROR) return -1;
-    if (n == 0) return 0;
-    if (FD_ISSET(s->sock, &e)) return -1;
-    return FD_ISSET(s->sock, &w) ? 1 : 0;
 }
 
 static bool tcp_send(slot_t *s, tcp_step_t step, uint8_t fc, uint16_t addr, uint16_t qv, uint32_t now_ms)
@@ -249,7 +189,7 @@ static bool tcp_send(slot_t *s, tcp_step_t step, uint8_t fc, uint16_t addr, uint
     s->req.qty_or_value = qv;
     size_t len = mb_encode_request(&s->req, adu, sizeof(adu));
     if (len == 0) return false;
-    if (send(s->sock, (const char *)adu, (int)len, 0) != (int)len) return false;
+    if (hal_tcp_send(s->sock, adu, len) != (int)len) return false;
     s->info.requests++;
     s->step = step;
     s->sent_ms = now_ms;
@@ -338,13 +278,13 @@ static bool on_frame(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *a
 
 static void tcp_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms)
 {
-    if (!s_wsa_ok) return;
-    if (s->sock == INVALID_SOCKET) {
+    if (!s_net_ok) return;
+    if (s->sock == HAL_SOCK_INVALID) {
         if ((int32_t)(now_ms - s->next_try_ms) >= 0) tcp_start_connect(s, now_ms);
         return;
     }
     if (s->connecting) {
-        int c = tcp_check_connect(s);
+        int c = hal_tcp_connect_poll(s->sock);
         if (c < 0 || (uint32_t)(now_ms - s->connect_start_ms) > HMI_MODBUS_CONNECT_TIMEOUT_MS) {
             tcp_close(s, tags, al, now_ms);
             return;
@@ -358,9 +298,9 @@ static void tcp_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *a
     if (s->step != STEP_NONE) {
         for (;;) {
             if (s->rx_len >= sizeof(s->rx)) { s->info.protocol_errors++; tcp_close(s, tags, al, now_ms); return; }
-            int n = recv(s->sock, (char *)s->rx + s->rx_len, (int)(sizeof(s->rx) - s->rx_len), 0);
+            int n = hal_tcp_recv(s->sock, s->rx + s->rx_len, sizeof(s->rx) - s->rx_len);
             if (n > 0) { s->rx_len += (size_t)n; continue; }
-            if (n == 0 || WSAGetLastError() != WSAEWOULDBLOCK) { tcp_close(s, tags, al, now_ms); return; }
+            if (n < 0) { tcp_close(s, tags, al, now_ms); return; }
             break;
         }
         while (s->step != STEP_NONE && s->rx_len > 0) {
@@ -380,7 +320,7 @@ static void tcp_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *a
             if (s->step == STEP_WRITE) s->info.writes_failed++;
             tcp_close(s, tags, al, now_ms);
         }
-        if (s->step != STEP_NONE || s->sock == INVALID_SOCKET) return;
+        if (s->step != STEP_NONE || s->sock == HAL_SOCK_INVALID) return;
     }
 
     if (s->wq_count) {
@@ -438,7 +378,7 @@ static void bind_slot(slot_t *s, uint8_t slot, const hmi_device_profile_t *p, hm
     memset(s, 0, sizeof(*s));
     s->ever_freed = keep_freed;
     s->freed_ms = freed;
-    s->sock = INVALID_SOCKET;
+    s->sock = HAL_SOCK_INVALID;
     s->backoff_ms = HMI_MODBUS_BACKOFF_MIN_MS;
     s->info.slot = slot;
     s->info.profile = p;
@@ -460,8 +400,8 @@ static void bind_slot(slot_t *s, uint8_t slot, const hmi_device_profile_t *p, hm
 static void remove_slot(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms)
 {
     uint8_t slot = s->info.slot;
-    if (s->sock != INVALID_SOCKET) closesocket(s->sock);
-    s->sock = INVALID_SOCKET;
+    hal_tcp_close(s->sock);
+    s->sock = HAL_SOCK_INVALID;
     for (uint8_t rel = 0; rel < HMI_DEVICE_TAG_SPAN; rel++) {
         hmi_tag_bind_meta(HMI_DEV_TAG(slot, rel), NULL);
         hmi_tag_write_analog(tags, HMI_DEV_TAG(slot, rel), 0, QUALITY_COMM_FAULT);
@@ -482,28 +422,33 @@ static void remove_slot(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t
 void hmi_devmgr_init(uint32_t remove_after_ms)
 {
     memset(s_slots, 0, sizeof(s_slots));
-    for (int i = 0; i < HMI_MAX_DEVICES; i++) { s_slots[i].sock = INVALID_SOCKET; s_slots[i].info.slot = (uint8_t)i; }
+    for (int i = 0; i < HMI_MAX_DEVICES; i++) { s_slots[i].sock = HAL_SOCK_INVALID; s_slots[i].info.slot = (uint8_t)i; }
     s_remove_after_ms = remove_after_ms;
-    if (!s_wsa_ok) {
-        WSADATA wd;
-        s_wsa_ok = (WSAStartup(MAKEWORD(2, 2), &wd) == 0);
-    }
+    if (!s_net_ok) s_net_ok = hal_net_init();
 }
 
-bool hmi_devmgr_attach_simulator(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
+bool hmi_devmgr_attach_simulator(uint8_t sim_type, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
 {
+#if HMI_FEATURE_SIM
+    const sim_type_info_t *ti = sim_type_info((sim_type_t)sim_type);
+    if (!ti || !ti->is_plc) return false;
     int i = free_slot(now_ms);
     if (i < 0) return false;
     slot_t *s = &s_slots[i];
-    bind_slot(s, (uint8_t)i, &g_profile_tank_skid, tags, now_ms);
+    bind_slot(s, (uint8_t)i, hmi_profile_match(ti->vendor, ti->product), tags, now_ms);
     s->info.transport = HMI_TRANSPORT_SIM;
     snprintf(s->info.endpoint, sizeof(s->info.endpoint), "Simulator");
-    snprintf(s->info.vendor, sizeof(s->info.vendor), "Prometheus");
-    snprintf(s->info.product, sizeof(s->info.product), "Tank skid simulator");
-    sim_reset(&s->sim);
+    snprintf(s->info.vendor, sizeof(s->info.vendor), "%s", ti->vendor);
+    snprintf(s->info.product, sizeof(s->info.product), "%s", ti->product);
+    sim_init(&s->sim, (sim_type_t)sim_type);
+    s->sim_last_ms = 0;
     set_state(s, HMI_DEV_CONNECTING, now_ms);
     LOG(alarms, now_ms, ALARM_SEV_INFO, "%s attached (simulator)", s->info.label);
     return true;
+#else
+    (void)sim_type; (void)tags; (void)alarms; (void)now_ms;
+    return false;
+#endif
 }
 
 bool hmi_devmgr_is_attached(const char *host, uint16_t port, uint8_t unit)
@@ -530,11 +475,8 @@ bool hmi_devmgr_attach(const hmi_device_candidate_t *c, hmi_tag_table_t *tags,
         }
         return false;
     }
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_port = htons(c->port);
-    if (inet_pton(AF_INET, c->host, &a.sin_addr) != 1) return false;
+    uint32_t ip;
+    if (!hal_ip_parse(c->host, &ip)) return false;
 
     const hmi_device_profile_t *p = c->identified ? hmi_profile_match(c->id.vendor, c->id.product)
                                                   : hmi_profile_match(NULL, NULL);
@@ -543,7 +485,7 @@ bool hmi_devmgr_attach(const hmi_device_candidate_t *c, hmi_tag_table_t *tags,
     bind_slot(s, (uint8_t)i, p, tags, now_ms);
     s->info.transport = HMI_TRANSPORT_TCP;
     s->info.unit_id = c->unit;
-    s->addr = a;
+    s->ip = ip;
     snprintf(s->host, sizeof(s->host), "%s", c->host);
     s->port = c->port;
     snprintf(s->info.endpoint, sizeof(s->info.endpoint), "%s:%u", c->host, (unsigned)c->port);
@@ -562,7 +504,13 @@ void hmi_devmgr_poll(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint
     for (int i = 0; i < HMI_MAX_DEVICES; i++) {
         slot_t *s = &s_slots[i];
         if (s->info.state == HMI_DEV_EMPTY) continue;
+        if (s->pulse_pending && (int32_t)(now_ms - s->pulse_due_ms) >= 0) {   /* release a reset button */
+            s->pulse_pending = false;
+            queue_write(s, true, s->pulse_coil, 0);
+        }
+#if HMI_FEATURE_SIM
         if (s->info.transport == HMI_TRANSPORT_SIM) { sim_poll(s, tags, now_ms); continue; }
+#endif
         tcp_poll(s, tags, alarms, now_ms);
         if (s->info.state == HMI_DEV_OFFLINE && s_remove_after_ms &&
             (uint32_t)(now_ms - s->info.since_ms) >= s_remove_after_ms) {
@@ -573,7 +521,9 @@ void hmi_devmgr_poll(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint
 
 static bool queue_write(slot_t *s, bool coil, uint16_t addr, int16_t value)
 {
+#if HMI_FEATURE_SIM
     if (s->info.transport == HMI_TRANSPORT_SIM) return sim_write(s, coil, addr, value);
+#endif
     if (s->info.state != HMI_DEV_ONLINE || s->wq_count >= HMI_MODBUS_WRITE_QUEUE) { s->info.writes_failed++; return false; }
     pending_write_t *w = &s->wq[(s->wq_head + s->wq_count) % HMI_MODBUS_WRITE_QUEUE];
     w->coil = coil; w->addr = addr; w->value = value;
@@ -587,7 +537,7 @@ static bool tag_ok(const hmi_tag_table_t *tags, uint8_t id)
     return q == QUALITY_GOOD || q == QUALITY_SIMULATED;
 }
 
-void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, hmi_tag_table_t *tags,
+void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, int16_t value, hmi_tag_table_t *tags,
                        hmi_alarm_supervisor_t *al, uint32_t now_ms)
 {
     if (slot >= HMI_MAX_DEVICES) return;
@@ -597,30 +547,75 @@ void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, hmi_tag_table_t *tags,
     const hmi_device_action_t *a = &p->actions[action_idx];
     uint8_t id = HMI_DEV_TAG(slot, a->rel_tag);
     const char *who = s->info.label;
+    const hmi_tag_meta_t *m = &s->meta[a->rel_tag];
+    char v[24];
+    bool ok;
 
-    if (!tag_ok(tags, id)) {
-        LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %s blocked, status unknown", who, a->log_name);
+    if (s->info.state != HMI_DEV_ONLINE || !tag_ok(tags, id)) {
+        LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %s refused, device offline", who, a->log_name);
         return;
     }
     int16_t cur = hmi_tag_read_value(tags, id);
-    if (a->kind == HMI_ACT_TOGGLE_COIL) {
-        bool on = cur != 0;
-        if (!on && a->block_tag != HMI_REL_NONE && hmi_tag_read_value(tags, HMI_DEV_TAG(slot, a->block_tag)) != 0) {
-            const hmi_tag_meta_t *bm = &s->meta[a->block_tag];
-            LOG(al, now_ms, ALARM_SEV_WARNING, "%s: start blocked by %s", who, bm->name ? bm->name : "interlock");
-            return;
+    bool blocked = a->block_tag != HMI_REL_NONE && hmi_tag_read_value(tags, HMI_DEV_TAG(slot, a->block_tag)) != 0;
+    const hmi_tag_meta_t *bm = a->block_tag != HMI_REL_NONE ? &s->meta[a->block_tag] : NULL;
+
+    switch (a->kind) {
+        case HMI_ACT_TOGGLE_COIL: {
+            bool on = cur != 0;
+            if (!on && blocked) {
+                LOG(al, now_ms, ALARM_SEV_WARNING, "%s: start blocked by %s", who, bm && bm->name ? bm->name : "interlock");
+                return;
+            }
+            ok = queue_write(s, true, a->address, (int16_t)(on ? 0 : 1));
+            LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s %s", who, a->log_name,
+                ok ? (on ? "stop commanded" : "start commanded") : "write failed");
+            break;
         }
-        bool ok = queue_write(s, true, a->address, (int16_t)(on ? 0 : 1));
-        LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s %s", who, a->log_name,
-            ok ? (on ? "stop commanded" : "start commanded") : "write failed");
-    } else if (a->kind == HMI_ACT_TOGGLE_REG) {
-        int16_t target = hmi_action_reg_target(a, cur);
-        char v[16];
-        const hmi_tag_meta_t *m = &s->meta[a->rel_tag];
-        hmi_format_scaled(v, sizeof(v), target, m->decimals);
-        bool ok = queue_write(s, false, a->address, target);
-        LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s %s %s%s", who, a->log_name,
-            ok ? "to" : "write failed", v, m->unit ? m->unit : "");
+        case HMI_ACT_TOGGLE_REG: {
+            int16_t target = hmi_action_reg_target(a, cur);
+            hmi_format_scaled(v, sizeof(v), target, m->decimals);
+            ok = queue_write(s, false, a->address, target);
+            LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s %s %s%s", who, a->log_name,
+                ok ? "to" : "write failed", v, m->unit ? m->unit : "");
+            break;
+        }
+        case HMI_ACT_COIL_ON:
+            if (blocked) {
+                LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %s blocked by %s", who, a->log_name, bm && bm->name ? bm->name : "interlock");
+                return;
+            }
+            /* fall through */
+        case HMI_ACT_COIL_OFF:
+            ok = queue_write(s, true, a->address, (int16_t)(a->kind == HMI_ACT_COIL_ON ? 1 : 0));
+            LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s - %s%s", who, a->log_name, a->label,
+                ok ? "" : " FAILED");
+            break;
+        case HMI_ACT_PULSE_COIL:
+            ok = queue_write(s, true, a->address, 1);
+            if (ok) { s->pulse_coil = a->address; s->pulse_due_ms = now_ms + HMI_PULSE_MS; s->pulse_pending = true; }
+            LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s - %s%s", who, a->log_name, a->label,
+                ok ? "" : " FAILED");
+            break;
+        case HMI_ACT_SET_REG:
+            hmi_format_scaled(v, sizeof(v), value, m->decimals);
+            if (value < a->min || value > a->max) {
+                LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %s %s refused, out of range", who, a->log_name, v);
+                return;
+            }
+            ok = queue_write(s, false, a->address, value);
+            LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s -> %s%s%s%s", who, a->log_name, v,
+                (m->unit && m->unit[0]) ? " " : "", m->unit ? m->unit : "", ok ? "" : " FAILED");
+            break;
+        case HMI_ACT_SET_ENUM: {
+            if (value < 0 || value >= (int16_t)hmi_action_option_count(a)) return;
+            char opt[24];
+            hmi_action_option_label(a, (uint8_t)value, opt, sizeof(opt));
+            ok = queue_write(s, false, a->address, value);
+            LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_WARNING, "%s: %s -> %s%s", who, a->log_name, opt, ok ? "" : " FAILED");
+            break;
+        }
+        default:
+            break;
     }
 }
 
@@ -670,8 +665,8 @@ uint8_t hmi_devmgr_count(uint8_t state_mask)
 void hmi_devmgr_shutdown(void)
 {
     for (int i = 0; i < HMI_MAX_DEVICES; i++) {
-        if (s_slots[i].sock != INVALID_SOCKET) closesocket(s_slots[i].sock);
-        s_slots[i].sock = INVALID_SOCKET;
+        hal_tcp_close(s_slots[i].sock);
+        s_slots[i].sock = HAL_SOCK_INVALID;
     }
-    if (s_wsa_ok) { WSACleanup(); s_wsa_ok = false; }
+    if (s_net_ok) { hal_net_shutdown(); s_net_ok = false; }
 }

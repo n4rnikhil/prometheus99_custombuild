@@ -21,6 +21,7 @@
 
 #include "../include/drivers/device_manager.h"
 #include "../include/hal/timer.h"
+#include "../include/hal/atomic.h"
 
 typedef enum {
     F_NORMAL, F_STALE_TID, F_BAD_LEN, F_CLOSE_MID, F_SILENT, F_GARBAGE,
@@ -30,11 +31,11 @@ typedef enum {
 typedef struct {
     SOCKET        listener;
     uint16_t      port;
-    volatile LONG stop;
+    hal_atomic_t stop;
     fault_t       fault;
     int           good_first;     /* requests answered normally before the fault starts */
     int           fault_count;    /* faulty replies, -1 = forever, then normal again */
-    volatile LONG requests;
+    hal_atomic_t requests;
     HANDLE        thread;
 } srv_t;
 
@@ -82,7 +83,7 @@ static void serve_client(srv_t *s, SOCKET c)
         uint16_t tid = (uint16_t)((rq[0] << 8) | rq[1]);
         uint8_t unit = rq[6];
         uint16_t qty = (uint16_t)((rq[10] << 8) | rq[11]);
-        int n = (int)InterlockedIncrement(&s->requests) - 1;
+        int n = (int)hal_atomic_add(&s->requests, 1) - 1;
         bool faulty = s->fault != F_NORMAL && n >= s->good_first &&
                       (s->fault_count < 0 || n < s->good_first + s->fault_count);
         uint8_t out[600];
@@ -187,7 +188,7 @@ static bool server_start(srv_t *s, fault_t fault, int good_first, int fault_coun
 
 static void server_stop(srv_t *s)
 {
-    InterlockedExchange(&s->stop, 1);
+    hal_atomic_store(&s->stop, 1);
     WaitForSingleObject(s->thread, 3000);
     CloseHandle(s->thread);
     closesocket(s->listener);
