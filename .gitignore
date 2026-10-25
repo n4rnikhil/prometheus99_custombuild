@@ -1,0 +1,14 @@
+# build outputs (industrial_hmi.exe itself is tracked as the release artefact)
+tests/*.exe
+tools/*.exe
+*.o
+*.obj
+snapshot_*.bmp
+
+# runtime files written next to the exe
+alarms.log
+alarms.log.1
+alarms.log.damaged
+crash.log
+security.vault
+security.vault.tmp

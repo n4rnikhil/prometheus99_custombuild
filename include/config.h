@@ -1,11 +1,11 @@
 /**
  * @file config.h
  * @brief Industrial HMI Runtime System Configuration
- * @standards IEC 62443-4-2 / IEC 61508 SIL-ready / Apple HIG Ergonomics
+ * @standards IEC 62443-4-2 / IEC 61508 SIL-ready / ISA-101 / ISA-18.2
  *
- * Fully static memory budget: Zero heap allocations.
- * Elastic L1-Cache Resident Display Band Buffer: 9.3 KB (2-bit) / 18.75 KB (4-bit).
- * Apple-inspired Calm Industrial Aesthetic & Action-Oriented Emergency Layout.
+ * All runtime state is statically allocated (no malloc/calloc/free in
+ * application code). The display is rendered through one 19,200-byte
+ * band buffer (4-bit CLUT) that is streamed to the window band by band.
  */
 
 #ifndef INDUSTRIAL_HMI_CONFIG_H
@@ -15,92 +15,116 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* --- Display & Elastic Band Buffer Specifications --- */
+/* --- Display & Band Buffer --- */
 #define HMI_DISPLAY_WIDTH_DEFAULT   800
 #define HMI_DISPLAY_HEIGHT_DEFAULT  480
-#define HMI_DISPLAY_BPP             4      /* 4-bit Indexed: 16-color Apple industrial CLUT */
+#define HMI_DISPLAY_BPP             4      /* 4-bit indexed, 16-colour CLUT */
 
-/* Maximum static band buffer: 19,200 bytes (18.75 KB) - fits entirely in CPU L1 data cache */
+/* Static band buffer: 19,200 bytes (18.75 KB) */
 #define HMI_DISPLAY_MAX_BUF_SIZE    19200
 
-/* Normalized Permille Coordinate System (0 to 1000‰ of screen width/height) */
-#define HMI_PERMILLE_MAX            1000
+/* Widest frame the renderer will rasterise. Wider windows are drawn at this
+ * width (the remainder of the client area stays background). 7680 px gives
+ * row_bytes = 3840 and band_h = 5, so one band always fits the buffer. */
+#define HMI_DISPLAY_MAX_WIDTH       7680
+#define HMI_DISPLAY_MAX_HEIGHT      4320
 
-/* Macro to convert permille to actual screen pixels */
+/* Normalised permille coordinate system (0..1000 of the content area) */
+#define HMI_PERMILLE_MAX            1000
 #define HMI_NORM_TO_PIXEL(norm, total_px) (((norm) * (total_px)) / HMI_PERMILLE_MAX)
 
-/* --- Timing Specifications --- */
-#define HMI_FIELDBUS_FREQ_HZ        1000   /* 1,000 Hz / 1 ms fieldbus & sensor loop */
-#define HMI_FIELDBUS_PERIOD_MS      (1000 / HMI_FIELDBUS_FREQ_HZ)
-#define HMI_UI_FREQ_HZ              30     /* 30 Hz / ~33 ms UI refresh frame rate */
+/* --- Timing --- */
+#define HMI_FIELDBUS_FREQ_HZ        1000   /* 1 kHz fieldbus / supervision loop */
+#define HMI_FIELDBUS_PERIOD_US      (1000000u / HMI_FIELDBUS_FREQ_HZ)
+#define HMI_UI_FREQ_HZ              30     /* ~33 ms UI frame period */
 #define HMI_UI_FRAME_PERIOD_MS      (1000 / HMI_UI_FREQ_HZ)
 
-/* --- Watchdog Supervisor Specifications --- */
-#define HMI_WATCHDOG_MAX_AGE_MS     500    /* Trip threshold: 500 ms heartbeat silence */
-#define HMI_WATCHDOG_TICK_MS        50     /* Independent watchdog cycle */
+/* --- Watchdog --- */
+#define HMI_WATCHDOG_MAX_AGE_MS     500    /* heartbeat silence that trips the watchdog */
+#define HMI_WATCHDOG_TICK_MS        50     /* evaluation period */
+#define HMI_FAULT_INJECT_STALL_MS   750    /* test: fieldbus thread deliberately stalls this long */
 
-/* --- Capacities (100% Statically Bounded - Zero Heap) --- */
-#define HMI_MAX_TAGS                64     /* Max concurrent PLC/hardware tags (512 bytes total) */
-#define HMI_MAX_WIDGETS_PER_SCREEN  24     /* Max declarative widgets on one screen */
-#define HMI_MAX_SCREENS             5      /* Process, Diagnostics, Telemetry, Alarms, Settings */
-#define HMI_TREND_SAMPLES           60     /* 60 data points (60 seconds at 1 Hz) */
-#define HMI_ALARM_JOURNAL_SIZE      16     /* Circular ISA-18.2 audit log */
-#define HMI_INPUT_QUEUE_SIZE        16     /* Debounced input event circular buffer */
+/* --- Snapshot staleness (UI marks data stale when the last publish is older) --- */
+#define HMI_SNAPSHOT_STALE_MS       500
 
-/* --- Ergonomics & Apple HIG Touch Targets --- */
-#define HMI_MIN_TOUCH_TARGET_PX     48     /* ISO 9241 / Apple HIG minimum button size */
+/* --- Modbus TCP --- */
+#define HMI_MODBUS_DEFAULT_PORT     502
+#define HMI_MODBUS_POLL_MS          100    /* one read cycle every 100 ms */
+#define HMI_MODBUS_TIMEOUT_MS       500    /* response timeout per request */
+#define HMI_MODBUS_CONNECT_TIMEOUT_MS 2000
+#define HMI_MODBUS_BACKOFF_MIN_MS   1000
+#define HMI_MODBUS_BACKOFF_MAX_MS   8000
+#define HMI_MODBUS_WRITE_QUEUE      8      /* pending operator writes */
 
-/* --- Apple-Inspired Industrial Color Palette Indices (4-bit CLUT) --- */
-#define COLOR_OBSIDIAN_BG      0   /* #0B0F17 - Deep calming dark space */
-#define COLOR_TITANIUM_CARD    1   /* #161F2E - Elevated card container */
-#define COLOR_CARD_BORDER      2   /* #26334D - Subtle divider stroke */
-#define COLOR_CHALK_WHITE      3   /* #F8FAFC - Primary high-contrast text */
-#define COLOR_SILVER_MUTED     4   /* #94A3B8 - Secondary label text */
-#define COLOR_DARK_GRAY        5   /* #334155 - Inactive bars / gridlines */
-#define COLOR_CYAN_ACCENT      6   /* #00D2FF - Electric Apple Cyan */
-#define COLOR_BLUE_ACCENT      7   /* #38BDF8 - Calm status blue */
-#define COLOR_EMERALD_OK       8   /* #10B981 - Plant normal / nominal */
-#define COLOR_AMBER_WARN       9   /* #F59E0B - Caution / high limit */
-#define COLOR_CRIMSON_TRIP     10  /* #EF4444 - Critical trip / emergency */
-#define COLOR_VIBRANT_ORANGE   11  /* #FB923C - Active setpoint */
-#define COLOR_PURPLE_SECURE    12  /* #A855F7 - Role/Security badge */
-#define COLOR_SURFACE_HOVER    13  /* #1E293B - Pressed button state */
-#define COLOR_NEON_GREEN       14  /* #00FF66 - Digital run status */
-#define COLOR_WHITE_PURE       15  /* #FFFFFF - Pure highlight */
+/* --- Persistent alarm log --- */
+#define HMI_ALARM_LOG_PATH          "alarms.log"
+#define HMI_ALARM_LOG_MAX_BYTES     (1024u * 1024u)  /* rotate to alarms.log.1 beyond this */
 
-/* --- Role-Based Access Control (RBAC - IEC 62443 Security) --- */
+/* --- Capacities (statically bounded) --- */
+#define HMI_MAX_TAGS                64     /* 64 x 8-byte tags = 512 bytes */
+#define HMI_MAX_WIDGETS_PER_SCREEN  24
+#define HMI_MAX_SCREENS             5
+#define HMI_TREND_SAMPLES           60     /* 60 s at 1 Hz */
+#define HMI_ALARM_JOURNAL_SIZE      16     /* in-memory circular journal */
+#define HMI_INPUT_QUEUE_SIZE        16
+
+/* --- Ergonomics --- */
+#define HMI_MIN_TOUCH_TARGET_PX     48     /* ISO 9241-9 minimum touch target */
+
+/* --- 4-bit CLUT palette indices --- */
+#define COLOR_OBSIDIAN_BG      0   /* #0B0F17 */
+#define COLOR_TITANIUM_CARD    1   /* #161F2E */
+#define COLOR_CARD_BORDER      2   /* #26334D */
+#define COLOR_CHALK_WHITE      3   /* #F8FAFC */
+#define COLOR_SILVER_MUTED     4   /* #94A3B8 */
+#define COLOR_DARK_GRAY        5   /* #334155 */
+#define COLOR_CYAN_ACCENT      6   /* #00D2FF */
+#define COLOR_BLUE_ACCENT      7   /* #38BDF8 */
+#define COLOR_EMERALD_OK       8   /* #10B981 */
+#define COLOR_AMBER_WARN       9   /* #F59E0B */
+#define COLOR_CRIMSON_TRIP     10  /* #EF4444 */
+#define COLOR_VIBRANT_ORANGE   11  /* #FB923C */
+#define COLOR_PURPLE_SECURE    12  /* #A855F7 */
+#define COLOR_SURFACE_HOVER    13  /* #1E293B */
+#define COLOR_DIM_TEXT         14  /* tertiary text / disabled */
+#define COLOR_NEON_GREEN       COLOR_DIM_TEXT  /* legacy alias */
+#define COLOR_WHITE_PURE       15  /* #FFFFFF */
+
+/* --- Role-Based Access Control (IEC 62443) --- */
 typedef enum {
-    ROLE_VIEWER      = 0,  /* Read-only monitoring */
-    ROLE_OPERATOR    = 1,  /* Acknowledge alarms, toggle basic equipment */
-    ROLE_MAINTENANCE = 2,  /* Setpoint adjustments, diagnostic tests */
-    ROLE_ENGINEER    = 3   /* Full configuration, firmware failover, calibration */
+    ROLE_VIEWER      = 0,  /* read-only monitoring */
+    ROLE_OPERATOR    = 1,  /* acknowledge alarms, start/stop equipment, reset E-stop */
+    ROLE_MAINTENANCE = 2,  /* setpoints, diagnostics */
+    ROLE_ENGINEER    = 3   /* configuration, watchdog fault injection */
 } hmi_role_t;
 
-/* --- Standard Screen Identifiers --- */
+#define HMI_ROLE_COUNT 4
+
+/* --- Screens --- */
 typedef enum {
-    SCREEN_PROCESS_OVERVIEW = 0, /* Primary PLC Process Overview (Tanks, Pumps, Valves) */
-    SCREEN_FIELD_DIAGNOSTICS,   /* Fieldbus Comms, Tag Tables, I/O Status */
-    SCREEN_HOST_TELEMETRY,      /* Host Hardware Telemetry (CPU, RAM, Disk, Fan) */
-    SCREEN_ALARM_MATRIX,        /* ISA-18.2 Latching Alarm Matrix & Event Journal */
-    SCREEN_SECURITY_SETTINGS,   /* RBAC Login, High-Contrast Toggle, Safe States */
+    SCREEN_PROCESS_OVERVIEW = 0,
+    SCREEN_FIELD_DIAGNOSTICS,
+    SCREEN_HOST_TELEMETRY,
+    SCREEN_ALARM_MATRIX,
+    SCREEN_SECURITY_SETTINGS,
     SCREEN_COUNT
 } hmi_screen_id_t;
 
-/* --- Unified Input Action Keys --- */
+/* --- Input action keys (input_queue) --- */
 typedef enum {
     KEY_NONE = 0,
     KEY_NAV_PREV,
     KEY_NAV_NEXT,
-    KEY_ACTION_ACK,            /* Acknowledge active alarm */
-    KEY_ACTION_TOGGLE_CONTRAST,/* High-contrast outdoor theme */
-    KEY_ACTION_EMERGENCY_STOP, /* E-Stop command to PLC */
-    KEY_ACTION_PUMP_TOGGLE,    /* Toggle primary pump */
-    KEY_ACTION_VALVE_TOGGLE,   /* Toggle control valve */
-    KEY_ACTION_SIMULATE_FAULT, /* Simulate sensor/watchdog fault */
-    KEY_ACTION_ROLE_CYCLE      /* Cycle RBAC role for testing */
+    KEY_ACTION_ACK,
+    KEY_ACTION_TOGGLE_CONTRAST,
+    KEY_ACTION_EMERGENCY_STOP,
+    KEY_ACTION_PUMP_TOGGLE,
+    KEY_ACTION_VALVE_TOGGLE,
+    KEY_ACTION_SIMULATE_FAULT,
+    KEY_ACTION_ROLE_CYCLE
 } hmi_key_t;
 
-/* --- Alarm Severity Levels (ISA-18.2 Compliant) --- */
+/* --- Alarm priority (ISA-18.2) --- */
 typedef enum {
     ALARM_SEV_NONE     = 0,
     ALARM_SEV_INFO     = 1,
@@ -109,11 +133,11 @@ typedef enum {
     ALARM_SEV_ESTOP    = 4
 } hmi_alarm_sev_t;
 
-/* --- Alarm Latching State Machine (ISA-18.2) --- */
+/* --- Summary latch state shown to the operator --- */
 typedef enum {
-    ALARM_LATCH_NORMAL = 0,        /* Normal: No trip condition */
-    ALARM_LATCH_UNACKNOWLEDGED = 1,/* Active alarm, horn sounding, requires ACK */
-    ALARM_LATCH_ACKNOWLEDGED = 2   /* Operator acknowledged, awaiting return to normal */
+    ALARM_LATCH_NORMAL = 0,         /* nothing active, nothing unacknowledged */
+    ALARM_LATCH_UNACKNOWLEDGED = 1, /* at least one alarm needs acknowledgement */
+    ALARM_LATCH_ACKNOWLEDGED = 2    /* all acknowledged, at least one still active */
 } hmi_alarm_latch_t;
 
 #endif /* INDUSTRIAL_HMI_CONFIG_H */

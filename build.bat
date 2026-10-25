@@ -1,84 +1,95 @@
 @echo off
 setlocal enabledelayedexpansion
-echo =================================================================
-echo   Building AEGIS Industrial HMI Runtime (C99 Clean Architecture)
-echo   Standards: IEC 62443 / IEC 61508 / Apple HIG Ergonomics
-echo =================================================================
+REM ==========================================================================
+REM  Prometheus Industrial HMI - build script
+REM    build.bat            release build (GCC/MinGW preferred, MSVC fallback)
+REM    build.bat test       release build + unit tests (tests\test_core.exe)
+REM    build.bat debug      unoptimised build with symbols
+REM    build.bat snapshot   portable C99 tool that renders all screens to BMP files
+REM    build.bat clean      remove build outputs
+REM ==========================================================================
+cd /d "%~dp0"
 
-REM Terminate any running instance to allow binary overwrite
-taskkill /F /IM industrial_hmi.exe >nul 2>&1
+set SRC=src\main.c src\core\sha256.c src\core\tags.c src\core\alarms.c src\core\alarm_log.c src\core\watchdog.c src\core\security.c src\core\crc32.c src\renderer\micro_renderer.c src\renderer\layout.c src\renderer\font_inter.c src\drivers\schneider_profile.c src\drivers\driver_modbus.c src\drivers\modbus_proto.c src\drivers\driver_host.c src\hal\timer.c src\hal\gesture.c src\hal\display_win32.c
+set LIB_SRC=%SRC:src\main.c =%
+set PORTABLE_SRC=src\core\tags.c src\core\alarms.c src\core\security.c src\core\sha256.c src\core\crc32.c src\core\watchdog.c src\renderer\layout.c src\renderer\micro_renderer.c src\renderer\font_inter.c src\drivers\schneider_profile.c
+set GCC_WARN=-std=c99 -Wall -Wextra -Wshadow -Werror
+set GCC_HARDEN=-fstack-protector-strong -static -Wl,--dynamicbase -Wl,--nxcompat -Wl,--high-entropy-va
+set GCC_LIBS=-luser32 -lgdi32 -lwinmm -lpsapi -lws2_32
 
-REM 1. Try Microsoft Visual C++ compiler (MSVC)
-set "VCVARS="
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
-    set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
-    set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
-    set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd.HHmmss"') do set BUILD_ID=%%t
+
+if /i "%~1"=="clean" (
+    del /q industrial_hmi.exe tests\test_core.exe tests\test_modbus_live.exe tools\render_snapshot.exe snapshot_*.bmp *.obj 2>nul
+    echo Cleaned.
+    exit /b 0
 )
 
-if defined VCVARS (
-    echo [BUILD] Using MSVC Compiler with IEC 62443 Security Hardening...
-    call "%VCVARS%" >nul 2>&1
-    
-    cl.exe /nologo /O1 /Os /GL /Gy /GF /Gw /GS /MD /D_CRT_SECURE_NO_WARNINGS /DNDEBUG /Iinclude ^
-        src\core\tags.c ^
-        src\core\alarms.c ^
-        src\core\watchdog.c ^
-        src\core\security.c ^
-        src\core\crc32.c ^
-        src\renderer\font5x7.c ^
-        src\renderer\micro_renderer.c ^
-        src\hal\timer.c ^
-        src\hal\input_queue.c ^
-        src\hal\display_win32.c ^
-        src\drivers\driver_modbus.c ^
-        src\drivers\driver_host.c ^
-        src\main.c ^
-        /Fe:industrial_hmi.exe ^
-        /link /OPT:REF /OPT:ICF /LTCG /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /STACK:32768,4096 /HEAP:65536,4096 user32.lib gdi32.lib winmm.lib psapi.lib >nul 2>&1
+where gcc >nul 2>nul
+if errorlevel 1 goto :msvc
+if /i "%~1"=="snapshot" goto :snapshot
 
-    if !ERRORLEVEL! EQU 0 (
-        del /f /q *.obj >nul 2>&1
-        goto :build_success
-    )
-    echo [WARN] MSVC build failed or not found, attempting GCC fallback...
+echo [GCC] building industrial_hmi.exe
+if /i "%~1"=="debug" (
+    gcc %GCC_WARN% -O0 -g -DHMI_BUILD_ID=\"!BUILD_ID!-debug\" -I include %SRC% %GCC_LIBS% -mwindows -o industrial_hmi.exe
+) else (
+    gcc %GCC_WARN% -Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections %GCC_HARDEN% -DHMI_BUILD_ID=\"!BUILD_ID!\" -I include %SRC% %GCC_LIBS% -mwindows -o industrial_hmi.exe
 )
-
-REM 2. Fallback: MinGW / GCC
-set "WINLIBS_PATH=%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
-set PATH=%WINLIBS_PATH%;C:\msys64\mingw64\bin;%PATH%
-
-echo [BUILD] Using GCC Compiler with Security & Size Optimizations...
-gcc -std=c99 -Wall -Wextra -Os -DNDEBUG -Iinclude ^
-    -fstack-protector-strong -ffunction-sections -fdata-sections ^
-    src/core/tags.c ^
-    src/core/alarms.c ^
-    src/core/watchdog.c ^
-    src/core/security.c ^
-    src/core/crc32.c ^
-    src/renderer/font5x7.c ^
-    src/renderer/micro_renderer.c ^
-    src/hal/timer.c ^
-    src/hal/input_queue.c ^
-    src/hal/display_win32.c ^
-    src/drivers/driver_modbus.c ^
-    src/drivers/driver_host.c ^
-    src/main.c ^
-    -o industrial_hmi.exe ^
-    -lgdi32 -luser32 -lwinmm -lpsapi ^
-    -Wl,--gc-sections -Wl,--dynamicbase -Wl,--nxcompat -s
-
-if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Compilation failed with error code %ERRORLEVEL%
-    exit /b %ERRORLEVEL%
+if errorlevel 1 (
+    echo [FAILED] compile error
+    exit /b 1
 )
+call :report
+if /i "%~1"=="test" goto :test
+exit /b 0
 
-:build_success
-echo =================================================================
-echo [SUCCESS] Build Succeeded!
-for %%A in (industrial_hmi.exe) do echo [SIZE] Executable Size: %%~zA bytes
-echo [SECURITY] IEC 62443 Hardened: Stack Canaries (/GS) + ASLR + DEP/NX Active
-echo =================================================================
+:test
+echo.
+echo [TEST] building unit tests
+gcc %GCC_WARN% -O1 -g -fsanitize=undefined -fsanitize-trap=all -I include tests\test_core.c %LIB_SRC% %GCC_LIBS% -o tests\test_core.exe
+if errorlevel 1 (
+    echo [FAILED] test build
+    exit /b 1
+)
+gcc %GCC_WARN% -O1 -I include tests\test_modbus_live.c src\drivers\driver_modbus.c src\drivers\schneider_profile.c src\drivers\modbus_proto.c src\core\tags.c src\hal\timer.c -lws2_32 -lwinmm -o tests\test_modbus_live.exe
+if errorlevel 1 (
+    echo [FAILED] live test build
+    exit /b 1
+)
+.\tests\test_core.exe
+if errorlevel 1 (
+    echo [FAILED] unit tests
+    exit /b 1
+)
+echo [PASSED] unit tests
+exit /b 0
+
+:snapshot
+echo [GCC] portable snapshot tool (pure C99, no OS headers)
+gcc %GCC_WARN% -pedantic -O2 -I include tools\render_snapshot.c %PORTABLE_SRC% -o tools\render_snapshot.exe
+if errorlevel 1 (
+    echo [FAILED] snapshot build
+    exit /b 1
+)
+.\tools\render_snapshot.exe 1024 600 snapshot
+exit /b %errorlevel%
+
+:msvc
+where cl >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] Neither gcc nor cl.exe found. Install MinGW-w64 or run from a VS Developer Prompt.
+    exit /b 1
+)
+echo [MSVC] building industrial_hmi.exe
+cl /nologo /O1 /W3 /GS /guard:cf /DHMI_BUILD_ID=\"!BUILD_ID!\" /I include %SRC% /Fe:industrial_hmi.exe /link /SUBSYSTEM:WINDOWS /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /GUARD:CF user32.lib gdi32.lib winmm.lib psapi.lib ws2_32.lib
+if errorlevel 1 (
+    echo [FAILED] compile error
+    exit /b 1
+)
+del /q *.obj 2>nul
+call :report
+exit /b 0
+
+:report
+for %%I in (industrial_hmi.exe) do echo [OK] industrial_hmi.exe  %%~zI bytes  build !BUILD_ID!
 exit /b 0
