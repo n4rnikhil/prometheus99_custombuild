@@ -25,6 +25,8 @@
 #include "../core/watchdog.h"
 #include "../core/runtime_stats.h"
 #include "../drivers/plc_driver.h"
+#include "../drivers/device_info.h"
+#include "../drivers/discovery.h"
 #include "bytecode.h"
 #include "layout.h"
 #include "font.h"
@@ -48,9 +50,10 @@ typedef struct {
     const hmi_security_ctx_t     *sec;
     const hmi_watchdog_t         *wd;          /* UI-side watchdog: fieldbus liveness + failover latch */
     const hmi_fieldbus_stats_t   *fb;          /* measured loop timing */
-    const hmi_driver_stats_t     *plc;         /* Modbus / simulator link stats */
     const hmi_alarm_log_stats_t  *log;         /* persistent log stats */
-    const uint32_t *tokens_process;  uint8_t ntok_process;   /* SCREEN_PROCESS_OVERVIEW manifest */
+    const hmi_device_info_t      *devices;     /* present devices, display order (process screen) */
+    uint8_t                       ndev;
+    const hmi_discovery_stats_t  *disc;        /* discovery statistics (may be NULL) */
     const uint32_t *tokens_host;     uint8_t ntok_host;      /* SCREEN_HOST_TELEMETRY manifest */
     uint8_t  active_screen;
     bool     ui_wd_alive;          /* fieldbus-side view of the UI heartbeat (from the snapshot) */

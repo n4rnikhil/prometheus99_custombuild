@@ -1,64 +1,120 @@
 /**
  * @file test_modbus_live.c
- * @brief Drive the Modbus TCP driver against a live server (tests/modbus_plc_sim.py)
+ * @brief Headless plug-and-play test: real discovery thread + device manager + Modbus TCP
  *
- *   python tests/modbus_plc_sim.py --port 1502 --outage-at 4 --outage-for 3 --run-for 14 &
- *   tests\test_modbus_live.exe 127.0.0.1:1502 12
+ *   start "" python tests/modbus_plc_sim.py --profile tank  --port 1502 --outage-at 6 --outage-for 3 --run-for 30
+ *   start "" python tests/modbus_plc_sim.py --profile meter --port 1504 --run-for 30
+ *   tests\test_modbus_live.exe 20
  *
- * Runs the driver at 1 kHz for N seconds, issues writes, and checks that values
- * arrive, writes take effect, an outage is detected and the link recovers.
+ * Checks: the tank PLC is discovered and attached with the tank-skid driver, the
+ * power meter is NOT attached (not a PLC), a valve command reaches the PLC, the
+ * outage takes the device offline and it recovers when the PLC comes back.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <windows.h>
-#include "../include/drivers/driver_modbus.h"
+#include "../include/drivers/device_manager.h"
+#include "../include/drivers/discovery.h"
 #include "../include/hal/timer.h"
+
+static volatile long g_run = 1;
+static hmi_device_candidate_t g_q[8];
+static volatile LONG g_head, g_tail;
+static hmi_device_info_t g_pub[HMI_MAX_DEVICES];
+static volatile LONG g_pub_lock;
+
+static bool attached(const char *host, uint16_t port, uint8_t unit)
+{
+    char ep[24];
+    snprintf(ep, sizeof(ep), "%s:%u", host, (unsigned)port);
+    while (InterlockedExchange(&g_pub_lock, 1)) Sleep(0);
+    bool hit = false;
+    for (int i = 0; i < HMI_MAX_DEVICES; i++)
+        if (g_pub[i].state && g_pub[i].unit_id == unit && strcmp(g_pub[i].endpoint, ep) == 0) hit = true;
+    InterlockedExchange(&g_pub_lock, 0);
+    return hit;
+}
+
+static void found(const hmi_device_candidate_t *c)
+{
+    if ((uint32_t)(g_head - g_tail) >= 8) return;
+    g_q[(uint32_t)g_head % 8] = *c;
+    InterlockedIncrement(&g_head);
+}
+
+static DWORD WINAPI disc_thread(LPVOID p)
+{
+    (void)p;
+    hmi_discovery_run(&g_run, attached, found);
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
-    const char *ep = argc > 1 ? argv[1] : "127.0.0.1:1502";
-    int seconds = argc > 2 ? atoi(argv[2]) : 10;
-    const hmi_plc_driver_t *d = hmi_driver_modbus_get();
+    int seconds = argc > 1 ? atoi(argv[1]) : 20;
     static hmi_tag_table_t tags;
-
+    static hmi_alarm_supervisor_t al;
     hmi_timer_init();
     hmi_tag_registry_reset();
-    hmi_tag_register_meta(d->tag_metadata, d->tag_count);
     hmi_tags_init(&tags);
-    d->init();
-    if (!d->connect(ep)) { printf("connect() rejected endpoint\n"); return 2; }
+    hmi_alarms_init(&al);
+    hmi_devmgr_init(0);                          /* never remove: we want to see the recovery */
+    hmi_discovery_add_defaults();
+    HANDLE th = CreateThread(NULL, 0, disc_thread, NULL, 0, NULL);
 
-    hmi_driver_stats_t st;
-    uint32_t start = hmi_timer_get_ms();
-    bool saw_up = false, saw_down_after_up = false, recovered = false, valve_written = false, valve_seen = false;
-    int last_print = -1;
+    bool tank_up = false, meter_attached = false, wrote = false, valve_seen = false, offline = false, recovered = false;
+    int tank_slot = -1;
+    uint32_t start = hmi_timer_get_ms(), last_print = 0;
     while ((uint32_t)(hmi_timer_get_ms() - start) < (uint32_t)seconds * 1000u) {
         uint32_t now = hmi_timer_get_ms();
-        d->poll_cyclic(&tags, now);
-        d->get_stats(&st);
-        bool up = st.link_state == HMI_LINK_UP && tags.tags[SCHNEIDER_TAG_TANK_LEVEL].quality == QUALITY_GOOD;
-        if (up && !saw_up) saw_up = true;
-        if (saw_up && tags.tags[SCHNEIDER_TAG_COMM_LOSS].value) saw_down_after_up = true;
-        if (saw_down_after_up && up) recovered = true;
-        if (up && !valve_written && (uint32_t)(now - start) > 1500u) {
-            valve_written = d->write_register(MB_HR_VALVE_POS, 33);
+        while (g_tail != g_head) { hmi_devmgr_attach(&g_q[(uint32_t)g_tail % 8], &tags, &al, now); InterlockedIncrement(&g_tail); }
+        hmi_devmgr_poll(&tags, &al, now);
+        hmi_alarms_evaluate(&al, &tags, now);
+        while (InterlockedExchange(&g_pub_lock, 1)) Sleep(0);
+        hmi_devmgr_publish(g_pub, now);
+        InterlockedExchange(&g_pub_lock, 0);
+
+        for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+            const hmi_device_info_t *d = &g_pub[i];
+            if (!d->state) continue;
+            if (strstr(d->endpoint, ":1504")) meter_attached = true;
+            if (d->profile == &g_profile_tank_skid && strstr(d->endpoint, ":1502")) {
+                tank_slot = i;
+                if (d->state == HMI_DEV_ONLINE) { if (offline) recovered = true; tank_up = true; }
+                if (d->state == HMI_DEV_OFFLINE && tank_up) offline = true;
+            }
         }
-        if (valve_written && tags.tags[SCHNEIDER_TAG_VALVE_POS].value == 33 && tags.tags[SCHNEIDER_TAG_VALVE_POS].quality == QUALITY_GOOD) valve_seen = true;
-        int sec = (int)((now - start) / 1000u);
-        if (sec != last_print) {
-            last_print = sec;
-            printf("t=%2ds link=%d q=%d level=%d valve=%d req=%lu ok=%lu to=%lu ex=%lu perr=%lu conn=%lu rtt=%luus\n",
-                   sec, st.link_state, tags.tags[0].quality, tags.tags[0].value, tags.tags[2].value,
-                   (unsigned long)st.requests_sent, (unsigned long)st.responses_ok, (unsigned long)st.timeouts,
-                   (unsigned long)st.exceptions, (unsigned long)st.protocol_errors, (unsigned long)st.reconnects,
-                   (unsigned long)st.last_rtt_us);
+        if (tank_up && !wrote && tank_slot >= 0 && (uint32_t)(now - start) > 3000u) {
+            hmi_devmgr_action((uint8_t)tank_slot, 1, &tags, &al, now);     /* valve 65 -> 25 % */
+            wrote = true;
+        }
+        if (wrote && tank_slot >= 0 && tags.tags[HMI_DEV_TAG(tank_slot, 2)].value == 25 &&
+            tags.tags[HMI_DEV_TAG(tank_slot, 2)].quality == QUALITY_GOOD) valve_seen = true;
+
+        if ((uint32_t)(now - last_print) >= 1000u) {
+            last_print = now;
+            hmi_discovery_stats_t ds;
+            hmi_discovery_get_stats(&ds);
+            printf("t=%2lus", (unsigned long)((now - start) / 1000u));
+            for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+                if (g_pub[i].state) printf("  [%s %s st%u ok%lu]", g_pub[i].label, g_pub[i].endpoint,
+                                           (unsigned)g_pub[i].state, (unsigned long)g_pub[i].responses);
+            }
+            printf("  disc: sweeps %lu found %lu ignored %lu\n", (unsigned long)ds.sweeps, (unsigned long)ds.found, (unsigned long)ds.ignored);
             fflush(stdout);
         }
         Sleep(1);
     }
-    d->disconnect();
-    printf("saw_up=%d write_accepted=%d write_seen=%d outage_detected=%d recovered=%d\n",
-           saw_up, valve_written, valve_seen, saw_down_after_up, recovered);
-    return (saw_up && valve_seen) ? 0 : 1;
+    g_run = 0;
+    WaitForSingleObject(th, 5000);
+    hmi_devmgr_shutdown();
+    printf("tank_attached=%d meter_ignored=%d valve_write_seen=%d outage_detected=%d recovered=%d\n",
+           tank_up, !meter_attached, valve_seen, offline, recovered);
+    for (uint8_t i = 0; i < hmi_alarms_journal_count(&al); i++) {
+        const hmi_alarm_record_t *r = hmi_alarms_journal_newest(&al, i);
+        printf("  journal: %s\n", r->message);
+    }
+    return (tank_up && !meter_attached && valve_seen && offline && recovered) ? 0 : 1;
 }

@@ -8,11 +8,20 @@
 #include <stdio.h>
 
 /* O(1) registry indexed by tag id. Filled before worker threads start, read-only afterwards. */
-static const hmi_tag_meta_t *s_meta_by_id[HMI_MAX_TAGS];
+static const hmi_tag_meta_t * volatile s_meta_by_id[HMI_MAX_TAGS];
+
+static void publish_ptr(const hmi_tag_meta_t * volatile *slot, const hmi_tag_meta_t *p)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(slot, p, __ATOMIC_RELEASE);
+#else
+    *slot = p;          /* aligned pointer stores are atomic on every supported CPU */
+#endif
+}
 
 void hmi_tag_registry_reset(void)
 {
-    memset((void *)s_meta_by_id, 0, sizeof(s_meta_by_id));
+    for (int i = 0; i < HMI_MAX_TAGS; i++) publish_ptr(&s_meta_by_id[i], NULL);
 }
 
 bool hmi_tag_register_meta(const hmi_tag_meta_t *meta_list, uint8_t count)
@@ -25,7 +34,7 @@ bool hmi_tag_register_meta(const hmi_tag_meta_t *meta_list, uint8_t count)
             ok = false;
             continue;
         }
-        s_meta_by_id[id] = &meta_list[i];
+        publish_ptr(&s_meta_by_id[id], &meta_list[i]);
     }
     return ok;
 }
@@ -33,7 +42,16 @@ bool hmi_tag_register_meta(const hmi_tag_meta_t *meta_list, uint8_t count)
 const hmi_tag_meta_t* hmi_tag_get_meta(uint8_t tag_id)
 {
     if (tag_id >= HMI_MAX_TAGS) return NULL;
+#if defined(__GNUC__) || defined(__clang__)
+    return __atomic_load_n(&s_meta_by_id[tag_id], __ATOMIC_ACQUIRE);
+#else
     return s_meta_by_id[tag_id];
+#endif
+}
+
+void hmi_tag_bind_meta(uint8_t tag_id, const hmi_tag_meta_t *meta)
+{
+    if (tag_id < HMI_MAX_TAGS) publish_ptr(&s_meta_by_id[tag_id], meta);
 }
 
 void hmi_tags_init(hmi_tag_table_t *table)
@@ -78,29 +96,37 @@ uint8_t hmi_tag_read_quality(const hmi_tag_table_t *table, uint8_t tag_id)
     return table->tags[tag_id].quality;
 }
 
-void hmi_tags_push_trend(hmi_tag_table_t *table, int16_t sample)
+void hmi_tags_push_trend(hmi_tag_table_t *table, uint8_t slot, int16_t sample)
 {
-    if (!table) return;
-    if (table->trend_head >= HMI_TREND_SAMPLES) table->trend_head = 0;
-    table->trend_samples[table->trend_head] = sample;
-    table->trend_head = (uint8_t)((table->trend_head + 1u) % HMI_TREND_SAMPLES);
-    if (table->trend_count < HMI_TREND_SAMPLES) {
-        table->trend_count++;
+    if (!table || slot >= HMI_MAX_DEVICES) return;
+    uint8_t head = table->trend_head[slot];
+    if (head >= HMI_TREND_SAMPLES) head = 0;
+    table->trend_samples[slot][head] = sample;
+    table->trend_head[slot] = (uint8_t)((head + 1u) % HMI_TREND_SAMPLES);
+    if (table->trend_count[slot] < HMI_TREND_SAMPLES) {
+        table->trend_count[slot]++;
     }
 }
 
-uint8_t hmi_tags_copy_trend(const hmi_tag_table_t *table, int16_t *out, uint8_t cap)
+void hmi_tags_clear_trend(hmi_tag_table_t *table, uint8_t slot)
 {
-    if (!table || !out || cap == 0) return 0;
-    uint8_t count = table->trend_count;
+    if (!table || slot >= HMI_MAX_DEVICES) return;
+    table->trend_head[slot] = 0;
+    table->trend_count[slot] = 0;
+}
+
+uint8_t hmi_tags_copy_trend(const hmi_tag_table_t *table, uint8_t slot, int16_t *out, uint8_t cap)
+{
+    if (!table || !out || cap == 0 || slot >= HMI_MAX_DEVICES) return 0;
+    uint8_t count = table->trend_count[slot];
     if (count > HMI_TREND_SAMPLES) count = HMI_TREND_SAMPLES;
-    uint8_t head = (uint8_t)(table->trend_head % HMI_TREND_SAMPLES);
+    uint8_t head = (uint8_t)(table->trend_head[slot] % HMI_TREND_SAMPLES);
     /* Oldest sample: head - count (mod N) */
     uint8_t start = (uint8_t)((head + HMI_TREND_SAMPLES - count) % HMI_TREND_SAMPLES);
     uint8_t skip = (count > cap) ? (uint8_t)(count - cap) : 0;   /* keep the newest cap samples */
     uint8_t n = 0;
     for (uint8_t i = skip; i < count; i++) {
-        out[n++] = table->trend_samples[(start + i) % HMI_TREND_SAMPLES];
+        out[n++] = table->trend_samples[slot][(start + i) % HMI_TREND_SAMPLES];
     }
     return n;
 }

@@ -82,4 +82,22 @@ bool mb_coil_get(const mb_response_t *rsp, uint16_t idx);
 
 const char* mb_status_name(mb_status_t st);
 
+/* --- FC43 / MEI 0x0E: Read Device Identification (basic objects) --- */
+#define MB_FC_ENCAPSULATED       0x2B
+#define MB_MEI_DEVICE_ID         0x0E
+
+typedef struct {
+    char vendor[32];      /* object 0x00 VendorName  */
+    char product[32];     /* object 0x01 ProductCode */
+    char revision[16];    /* object 0x02 MajorMinorRevision */
+} mb_device_id_t;
+
+/* Request for the basic identification objects. Returns 11 (bytes written) or 0. */
+size_t mb_encode_devid_request(uint16_t tid, uint8_t unit, uint8_t *out, size_t cap);
+
+/* Decode a complete FC43/0x0E response ADU. MB_RESP_EXCEPTION when the device
+ * does not support identification. Strings are NUL-terminated, non-printable
+ * bytes replaced by '?', and truncated to fit. */
+mb_status_t mb_decode_devid(const uint8_t *adu, size_t len, uint16_t tid, uint8_t unit, mb_device_id_t *out);
+
 #endif /* INDUSTRIAL_HMI_MODBUS_PROTO_H */

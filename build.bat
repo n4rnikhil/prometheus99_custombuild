@@ -10,9 +10,9 @@ REM    build.bat clean      remove build outputs
 REM ==========================================================================
 cd /d "%~dp0"
 
-set SRC=src\main.c src\core\sha256.c src\core\tags.c src\core\alarms.c src\core\alarm_log.c src\core\watchdog.c src\core\security.c src\core\crc32.c src\renderer\micro_renderer.c src\renderer\layout.c src\renderer\font_inter.c src\drivers\schneider_profile.c src\drivers\driver_modbus.c src\drivers\modbus_proto.c src\drivers\driver_host.c src\hal\timer.c src\hal\gesture.c src\hal\display_win32.c
+set SRC=src\main.c src\core\sha256.c src\core\tags.c src\core\alarms.c src\core\alarm_log.c src\core\watchdog.c src\core\security.c src\core\crc32.c src\renderer\micro_renderer.c src\renderer\layout.c src\renderer\font_inter.c src\drivers\device_profiles.c src\drivers\profiles\profile_tank_skid.c src\drivers\profiles\profile_drive.c src\drivers\profiles\profile_generic.c src\drivers\device_manager.c src\drivers\discovery.c src\drivers\modbus_proto.c src\drivers\driver_host.c src\hal\timer.c src\hal\gesture.c src\hal\display_win32.c
 set LIB_SRC=%SRC:src\main.c =%
-set PORTABLE_SRC=src\core\tags.c src\core\alarms.c src\core\security.c src\core\sha256.c src\core\crc32.c src\core\watchdog.c src\renderer\layout.c src\renderer\micro_renderer.c src\renderer\font_inter.c src\drivers\schneider_profile.c
+set PORTABLE_SRC=src\core\tags.c src\core\alarms.c src\core\security.c src\core\sha256.c src\core\crc32.c src\core\watchdog.c src\renderer\layout.c src\renderer\micro_renderer.c src\renderer\font_inter.c src\drivers\device_profiles.c src\drivers\profiles\profile_tank_skid.c src\drivers\profiles\profile_drive.c src\drivers\profiles\profile_generic.c
 set GCC_WARN=-std=c99 -Wall -Wextra -Wshadow -Werror
 set GCC_HARDEN=-fstack-protector-strong -static -Wl,--dynamicbase -Wl,--nxcompat -Wl,--high-entropy-va
 set GCC_LIBS=-luser32 -lgdi32 -lwinmm -lpsapi -lws2_32
@@ -51,17 +51,29 @@ if errorlevel 1 (
     echo [FAILED] test build
     exit /b 1
 )
-gcc %GCC_WARN% -O1 -I include tests\test_modbus_live.c src\drivers\driver_modbus.c src\drivers\schneider_profile.c src\drivers\modbus_proto.c src\core\tags.c src\hal\timer.c -lws2_32 -lwinmm -o tests\test_modbus_live.exe
+gcc %GCC_WARN% -O1 -I include tests\test_modbus_live.c src\drivers\device_manager.c src\drivers\discovery.c src\drivers\device_profiles.c src\drivers\profiles\profile_tank_skid.c src\drivers\profiles\profile_drive.c src\drivers\profiles\profile_generic.c src\drivers\modbus_proto.c src\core\tags.c src\core\alarms.c src\core\crc32.c src\hal\timer.c -lws2_32 -lwinmm -o tests\test_modbus_live.exe
 if errorlevel 1 (
     echo [FAILED] live test build
     exit /b 1
 )
+gcc %GCC_WARN% -O1 -g -I include tests\test_modbus_faults.c src\drivers\device_manager.c src\drivers\device_profiles.c src\drivers\profiles\profile_tank_skid.c src\drivers\profiles\profile_drive.c src\drivers\profiles\profile_generic.c src\drivers\modbus_proto.c src\core\tags.c src\core\alarms.c src\core\crc32.c src\hal\timer.c -lws2_32 -lwinmm -o tests\test_modbus_faults.exe
+if errorlevel 1 (
+    echo [FAILED] fault-injection test build
+    exit /b 1
+)
 .\tests\test_core.exe
 if errorlevel 1 (
-    echo [FAILED] unit tests
+    echo [FAILED] unit tests - or Windows Smart App Control blocked the fresh test exe:
+    echo          if no test output appeared above, run tests\test_core.exe again in a few seconds
     exit /b 1
 )
 echo [PASSED] unit tests
+.\tests\test_modbus_faults.exe
+if errorlevel 1 (
+    echo [FAILED] Modbus fault-injection tests - or Smart App Control blocked the fresh test exe
+    exit /b 1
+)
+echo [PASSED] Modbus fault-injection tests
 exit /b 0
 
 :snapshot

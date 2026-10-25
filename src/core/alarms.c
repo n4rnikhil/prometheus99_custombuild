@@ -7,6 +7,7 @@
 #include "../../include/core/alarms.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 void hmi_alarms_init(hmi_alarm_supervisor_t *sup)
 {
@@ -93,6 +94,18 @@ const hmi_alarm_record_t* hmi_alarms_journal_by_seq(const hmi_alarm_supervisor_t
     return NULL;
 }
 
+void hmi_alarms_clear_range(hmi_alarm_supervisor_t *sup, uint8_t first_tag, uint8_t count)
+{
+    if (!sup) return;
+    for (uint16_t i = first_tag; i < (uint16_t)first_tag + count && i < HMI_MAX_TAGS; i++) {
+        memset(&sup->points[i], 0, sizeof(sup->points[i]));
+    }
+    if (sup->current_action.active && sup->current_action.tag_id >= first_tag &&
+        sup->current_action.tag_id < (uint16_t)first_tag + count) {
+        sup->current_action.active = false;     /* rebuilt by the next evaluate */
+    }
+}
+
 void hmi_alarms_silence_horn(hmi_alarm_supervisor_t *sup)
 {
     if (!sup) return;
@@ -124,6 +137,25 @@ uint16_t hmi_alarms_acknowledge_all(hmi_alarm_supervisor_t *sup, uint32_t now_ms
     return count;
 }
 
+/* Journal text: deliberately cut to the record size */
+static void msgf(char *out, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
+}
+
+/* "Tank skid 2: Tank 01 level" for device tags, plain name otherwise */
+static const char* point_label(const hmi_tag_meta_t *meta)
+{
+    static char buf[64];
+    if (!meta) return "Process value";
+    if (!meta->group) return meta->name;
+    snprintf(buf, sizeof(buf), "%s: %s", meta->group, meta->name);
+    return buf;
+}
+
 static void fmt_point(char *out, size_t cap, const hmi_tag_meta_t *meta, int16_t val)
 {
     char num[16];
@@ -135,26 +167,26 @@ static void fmt_point(char *out, size_t cap, const hmi_tag_meta_t *meta, int16_t
 static void build_guidance(hmi_emergency_action_t *act, uint8_t tag_id, uint8_t sev, uint8_t state, int16_t val)
 {
     const hmi_tag_meta_t *meta = hmi_tag_get_meta(tag_id);
-    const char *name = meta ? meta->name : "PROCESS VALUE";
+    const char *name = point_label(meta);
     act->active = true;
     act->tag_id = tag_id;
     act->severity = sev;
     act->state = state;
 
     if (meta && meta->type == TAG_TYPE_DIGITAL) {
-        snprintf(act->title, sizeof(act->title), "%s%s", name,
+        msgf(act->title, sizeof(act->title), "%s%s", name,
                  state == ALARM_PT_RTN_UNACK ? " cleared - acknowledge" : " active");
     } else {
         char v[24], lim[24];
         fmt_point(v, sizeof(v), meta, val);
         int16_t limit = meta ? (sev >= ALARM_SEV_CRITICAL ? meta->trip_high : meta->warn_high) : 0;
         fmt_point(lim, sizeof(lim), meta, limit);
-        snprintf(act->title, sizeof(act->title), "%s %s  %s  (limit %s)", name,
+        msgf(act->title, sizeof(act->title), "%s %s  %s  (limit %s)", name,
                  sev >= ALARM_SEV_CRITICAL ? "high-high" : "high", v, lim);
     }
-    snprintf(act->action_step1, sizeof(act->action_step1), "1. %s",
+    msgf(act->action_step1, sizeof(act->action_step1), "1. %s",
              (meta && meta->action1) ? meta->action1 : "Check the field device and its wiring");
-    snprintf(act->action_step2, sizeof(act->action_step2), "2. %s",
+    msgf(act->action_step2, sizeof(act->action_step2), "2. %s",
              (meta && meta->action2) ? meta->action2 : "Acknowledge once the cause is understood");
 }
 
@@ -209,10 +241,10 @@ void hmi_alarms_evaluate(hmi_alarm_supervisor_t *sup, const hmi_tag_table_t *tag
                 pt->since_ms = now_ms;
                 sup->horn_silenced = false;
 
-                char msg[41];
+                char msg[57];
                 char v[24]; fmt_point(v, sizeof(v), meta, val);
-                if (meta->type == TAG_TYPE_DIGITAL) snprintf(msg, sizeof(msg), "%s active", meta->name);
-                else snprintf(msg, sizeof(msg), "%s %s %s", meta->name, cond_sev >= ALARM_SEV_CRITICAL ? "HH" : "H", v);
+                if (meta->type == TAG_TYPE_DIGITAL) msgf(msg, sizeof(msg), "%s active", point_label(meta));
+                else msgf(msg, sizeof(msg), "%s %s %s", point_label(meta), cond_sev >= ALARM_SEV_CRITICAL ? "HH" : "H", v);
                 hmi_alarms_log_event(sup, now_ms, id, cond_sev, pt->state, msg);
             }
         } else if (prev_state == ALARM_PT_UNACK) {
@@ -221,15 +253,15 @@ void hmi_alarms_evaluate(hmi_alarm_supervisor_t *sup, const hmi_tag_table_t *tag
                     pt->peak_severity = cond_sev;
                     pt->trip_value = val;
                     sup->horn_silenced = false;
-                    char msg[41];
+                    char msg[57];
                     char v[24]; fmt_point(v, sizeof(v), meta, val);
-                    snprintf(msg, sizeof(msg), "%s HH %s", meta->name, v);
+                    msgf(msg, sizeof(msg), "%s HH %s", point_label(meta), v);
                     hmi_alarms_log_event(sup, now_ms, id, cond_sev, pt->state, msg);
                 }
             } else {
                 pt->state = ALARM_PT_RTN_UNACK;
-                char msg[41];
-                snprintf(msg, sizeof(msg), "%s back to normal", meta->name);
+                char msg[57];
+                msgf(msg, sizeof(msg), "%s back to normal", point_label(meta));
                 hmi_alarms_log_event(sup, now_ms, id, pt->peak_severity, pt->state, msg);
             }
         } else if (prev_state == ALARM_PT_ACKED) {
@@ -239,16 +271,16 @@ void hmi_alarms_evaluate(hmi_alarm_supervisor_t *sup, const hmi_tag_table_t *tag
                     pt->peak_severity = cond_sev;
                     pt->trip_value = val;
                     sup->horn_silenced = false;
-                    char msg[41];
+                    char msg[57];
                     char v[24]; fmt_point(v, sizeof(v), meta, val);
-                    snprintf(msg, sizeof(msg), "%s HH %s (re-alarm)", meta->name, v);
+                    msgf(msg, sizeof(msg), "%s HH %s (re-alarm)", point_label(meta), v);
                     hmi_alarms_log_event(sup, now_ms, id, cond_sev, pt->state, msg);
                 }
             } else {
                 pt->state = ALARM_PT_NORMAL;
                 pt->peak_severity = ALARM_SEV_NONE;
-                char msg[41];
-                snprintf(msg, sizeof(msg), "%s cleared", meta->name);
+                char msg[57];
+                msgf(msg, sizeof(msg), "%s cleared", point_label(meta));
                 hmi_alarms_log_event(sup, now_ms, id, ALARM_SEV_INFO, pt->state, msg);
             }
         } else if (prev_state == ALARM_PT_RTN_UNACK) {
@@ -257,9 +289,9 @@ void hmi_alarms_evaluate(hmi_alarm_supervisor_t *sup, const hmi_tag_table_t *tag
                 pt->peak_severity = cond_sev;
                 pt->trip_value = val;
                 sup->horn_silenced = false;
-                char msg[41];
+                char msg[57];
                 char v[24]; fmt_point(v, sizeof(v), meta, val);
-                snprintf(msg, sizeof(msg), "%s %s (re-alarm)", meta->name, v);
+                msgf(msg, sizeof(msg), "%s %s (re-alarm)", point_label(meta), v);
                 hmi_alarms_log_event(sup, now_ms, id, cond_sev, pt->state, msg);
             }
         }

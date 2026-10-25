@@ -68,6 +68,10 @@ int32_t mb_adu_length(const uint8_t *buf, size_t len)
 mb_status_t mb_decode_response(const mb_request_t *req, const uint8_t *adu, size_t len, mb_response_t *out)
 {
     if (!req || !adu || !out) return MB_ERR_ARG;
+    /* The reply is decoded into fixed-size buffers (regs[], coil_bytes[]): only a request that
+     * mb_encode_request would have produced may be decoded, whatever the device sent back. */
+    if (req->fc == MB_FC_READ_COILS && (req->qty_or_value < 1 || req->qty_or_value > MB_MAX_READ_COILS)) return MB_ERR_ARG;
+    if (req->fc == MB_FC_READ_HOLDING && (req->qty_or_value < 1 || req->qty_or_value > MB_MAX_READ_REGS)) return MB_ERR_ARG;
     if (len < 8) return MB_ERR_LEN;
 
     uint16_t tid = (uint16_t)(((uint16_t)adu[0] << 8) | adu[1]);
@@ -156,4 +160,63 @@ const char* mb_status_name(mb_status_t st)
         case MB_ERR_ARG:   return "ERR_ARG";
         default:           return "UNKNOWN";
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* FC43 / MEI 0x0E  Read Device Identification                               */
+/* ------------------------------------------------------------------------- */
+
+size_t mb_encode_devid_request(uint16_t tid, uint8_t unit, uint8_t *out, size_t cap)
+{
+    if (!out || cap < 11) return 0;
+    out[0] = (uint8_t)(tid >> 8);
+    out[1] = (uint8_t)(tid & 0xFF);
+    out[2] = 0;
+    out[3] = 0;
+    out[4] = 0;
+    out[5] = 5;                      /* unit + 4 PDU bytes */
+    out[6] = unit;
+    out[7] = MB_FC_ENCAPSULATED;
+    out[8] = MB_MEI_DEVICE_ID;
+    out[9] = 0x01;                   /* read device id code: basic */
+    out[10] = 0x00;                  /* start at object 0 */
+    return 11;
+}
+
+static void copy_obj(char *dst, size_t cap, const uint8_t *src, size_t len)
+{
+    size_t n = len < cap - 1 ? len : cap - 1;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t c = src[i];
+        dst[i] = (c >= 32 && c <= 126) ? (char)c : '?';
+    }
+    dst[n] = '\0';
+}
+
+mb_status_t mb_decode_devid(const uint8_t *adu, size_t len, uint16_t tid, uint8_t unit, mb_device_id_t *out)
+{
+    if (!adu || !out) return MB_ERR_ARG;
+    memset(out, 0, sizeof(*out));
+    if (len < 9) return MB_ERR_LEN;
+    if ((uint16_t)(((uint16_t)adu[0] << 8) | adu[1]) != tid) return MB_ERR_TID;
+    if (adu[2] != 0 || adu[3] != 0) return MB_ERR_PROTO;
+    if ((size_t)((((size_t)adu[4]) << 8 | adu[5]) + 6) != len) return MB_ERR_PROTO;
+    if (adu[6] != unit) return MB_ERR_UNIT;
+    if (adu[7] == (MB_FC_ENCAPSULATED | MB_EXCEPTION_FLAG)) return MB_RESP_EXCEPTION;
+    if (adu[7] != MB_FC_ENCAPSULATED) return MB_ERR_FC;
+    /* 2B 0E code conformity more next count {id len value}... */
+    if (len < 14 || adu[8] != MB_MEI_DEVICE_ID) return MB_ERR_LEN;
+    uint8_t count = adu[13];
+    size_t pos = 14;
+    for (uint8_t i = 0; i < count; i++) {
+        if (pos + 2 > len) return MB_ERR_LEN;
+        uint8_t id = adu[pos], olen = adu[pos + 1];
+        pos += 2;
+        if (pos + olen > len) return MB_ERR_LEN;
+        if (id == 0x00) copy_obj(out->vendor, sizeof(out->vendor), adu + pos, olen);
+        else if (id == 0x01) copy_obj(out->product, sizeof(out->product), adu + pos, olen);
+        else if (id == 0x02) copy_obj(out->revision, sizeof(out->revision), adu + pos, olen);
+        pos += olen;
+    }
+    return MB_RESP_OK;
 }

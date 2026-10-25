@@ -55,13 +55,27 @@
 #define HMI_MODBUS_BACKOFF_MIN_MS   1000
 #define HMI_MODBUS_BACKOFF_MAX_MS   8000
 #define HMI_MODBUS_WRITE_QUEUE      8      /* pending operator writes */
+#define HMI_MODBUS_EXC_OFFLINE      3      /* consecutive read exceptions before a device is declared OFFLINE */
 
 /* --- Persistent alarm log --- */
 #define HMI_ALARM_LOG_PATH          "alarms.log"
 #define HMI_ALARM_LOG_MAX_BYTES     (1024u * 1024u)  /* rotate to alarms.log.1 beyond this */
 
 /* --- Capacities (statically bounded) --- */
-#define HMI_MAX_TAGS                64     /* 64 x 8-byte tags = 512 bytes */
+/* Tag id map: 0..31 runtime (8..11 host telemetry, 13 HMI watchdog),
+ * then HMI_MAX_DEVICES blocks of HMI_DEVICE_TAG_SPAN tags, one per plugged-in PLC. */
+#define HMI_MAX_DEVICES             4      /* PLCs on the dashboard at once */
+#define HMI_DEVICE_TAG_BASE         32
+#define HMI_DEVICE_TAG_SPAN         24
+#define HMI_MAX_TAGS                (HMI_DEVICE_TAG_BASE + HMI_MAX_DEVICES * HMI_DEVICE_TAG_SPAN)  /* 128 x 8 B = 1 KB */
+#define HMI_DEV_TAG(slot, rel)      ((uint8_t)(HMI_DEVICE_TAG_BASE + (slot) * HMI_DEVICE_TAG_SPAN + (rel)))
+
+/* --- Plug and play --- */
+#define HMI_DISCOVERY_PERIOD_MS     3000   /* how often the discovery thread looks for new PLCs */
+#define HMI_DISCOVERY_CONNECT_MS    300    /* probe connect timeout */
+#define HMI_DISCOVERY_REPLY_MS      600    /* probe identification reply timeout */
+#define HMI_DEVICE_REMOVE_MS        10000  /* offline this long -> removed from the dashboard (0 = never) */
+#define HMI_DEVICE_SLOT_COOLDOWN_MS 1500   /* a freed slot is not reused before this */
 #define HMI_MAX_WIDGETS_PER_SCREEN  24
 #define HMI_MAX_SCREENS             5
 #define HMI_TREND_SAMPLES           60     /* 60 s at 1 Hz */

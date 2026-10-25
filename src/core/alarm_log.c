@@ -20,6 +20,10 @@ static uint32_t              s_last_written_seq;
 static uint32_t              s_chain = HMI_ALARM_LOG_GENESIS;
 static hmi_alarm_log_stats_t s_stats;
 
+/* Longest record body (before ",<crc>") that hmi_alarm_log_format_line() can produce: it formats
+ * into a 256-byte buffer. Keep in sync with `char body[256]` below. */
+#define HMI_ALARM_LOG_MAX_BODY 255u
+
 #define HEADER_PREFIX "# industrial_hmi alarm log v2;chain="
 #define HEADER_SUFFIX ";seq,utc,uptime_ms,tag,severity,state,message,crc32c\r\n"
 
@@ -97,6 +101,9 @@ bool hmi_alarm_log_verify_line(const char *line, size_t len, uint32_t *chain)
     }
 
     if (len < 10 || line[len - 9] != ',') return false;
+    /* The writer never emits a body longer than this; chained_crc() would silently CRC only a
+     * prefix of a longer one, so an over-long line must not verify. */
+    if (len - 9 > HMI_ALARM_LOG_MAX_BODY) return false;
     uint32_t stored;
     if (!parse_hex8(line + len - 8, &stored)) return false;
     if (chained_crc(*chain, line, len - 9) != stored) return false;

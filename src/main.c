@@ -14,8 +14,17 @@
  *                    events (role changes, access denials, ...) through a
  *                    single-producer/single-consumer ring.
  *
+ * Plug and play
+ *   A discovery thread (low priority) looks for PLCs; the fieldbus thread attaches
+ *   each one to a free device slot with the matching driver module, polls it, and
+ *   removes it from the dashboard after it has been offline for --remove-after-ms.
+ *
  * Command line
- *   --plc <ip[:port][/unit]>   use Modbus TCP instead of the built-in simulator
+ *   --plc <ip[:port][/unit]>   a PLC address to watch (attached even if it cannot identify itself)
+ *   --scan <spec>              extra discovery range, e.g. 192.168.1.0/24 or 10.0.0.5:502-510
+ *   --no-discovery             only the --plc addresses / simulator, no scanning
+ *   --sim                      add the built-in tank-skid simulator as a device
+ *   --remove-after-ms <n>      offline devices leave the dashboard after n ms (0 = never)
  *   --log <path>               alarm log file (default alarms.log next to the exe)
  *   --no-log                   disable the persistent alarm log
  *   --exit-after-ms <n>        close automatically after n ms (tests / measure.bat)
@@ -42,7 +51,8 @@
 #include "../include/core/runtime_stats.h"
 #include "../include/renderer/micro_renderer.h"
 #include "../include/renderer/layout.h"
-#include "../include/drivers/driver_modbus.h"
+#include "../include/drivers/device_manager.h"
+#include "../include/drivers/discovery.h"
 #include "../include/drivers/driver_host.h"
 #include "../include/hal/timer.h"
 #include "../include/hal/display.h"
@@ -62,7 +72,7 @@ typedef struct {
     hmi_alarm_supervisor_t alarms;
     hmi_watchdog_t         fb_watchdog;   /* fieldbus-side: supervises the UI heartbeat */
     hmi_fieldbus_stats_t   fb_stats;
-    hmi_driver_stats_t     plc_stats;
+    hmi_device_info_t      devices[HMI_MAX_DEVICES];
 } hmi_shared_state_t;
 
 static hmi_shared_state_t g_shared;       /* written only by the fieldbus thread */
@@ -79,11 +89,16 @@ static volatile LONG g_running = 1;
 #define CMD_BIT_SILENCE      (1L << 1)
 #define CMD_BIT_ESTOP        (1L << 2)
 #define CMD_BIT_ESTOP_RESET  (1L << 3)
-#define CMD_BIT_PUMP_TOGGLE  (1L << 4)
-#define CMD_BIT_VALVE_TOGGLE (1L << 5)
 #define CMD_BIT_INJECT_FAULT (1L << 6)
 #define CMD_BIT_WD_RESET     (1L << 7)
 static volatile LONG g_cmd_bits;
+static volatile LONG g_dev_cmd[HMI_MAX_DEVICES];   /* per device slot: bit n = run profile action n */
+
+/* discovery -> fieldbus: found devices (SPSC ring) */
+#define CAND_RING 8
+static hmi_device_candidate_t g_cand[CAND_RING];
+static volatile LONG g_cand_head;   /* written by the discovery thread */
+static volatile LONG g_cand_tail;   /* written by the fieldbus thread */
 
 /* UI -> fieldbus audit events (SPSC ring: UI produces, fieldbus consumes) */
 #define UI_EVENT_RING 16
@@ -96,17 +111,19 @@ static volatile LONG g_ui_ev_head;   /* written by UI */
 static volatile LONG g_ui_ev_tail;   /* written by fieldbus */
 static volatile LONG g_ui_ev_dropped;
 
-/* Drivers (set in WinMain before the fieldbus thread starts; read-only afterwards) */
-static const hmi_plc_driver_t *g_modbus_driver;
+/* Host telemetry driver (set before the fieldbus thread starts; read-only afterwards) */
 static const hmi_plc_driver_t *g_host_driver;
 
 /* System alarm points owned by the runtime itself */
 #define SYS_TAG_WATCHDOG 13
 static const hmi_tag_meta_t s_system_meta[] = {
     { SYS_TAG_WATCHDOG, TAG_TYPE_DIGITAL, "HMI watchdog failover", "", 0, 1, 0, 0, 0, ALARM_SEV_CRITICAL,
-      "A control loop stalled; check the HMI host for overload", "Maintenance: reset the failover latch in Settings" },
+      "A control loop stalled; check the HMI host for overload", "Maintenance: reset the failover latch in Settings", NULL },
 };
-static char g_plc_endpoint[64];
+static bool     g_with_sim;
+static bool     g_discovery_on = true;
+static bool     g_have_plc_arg;
+static uint32_t g_remove_after_ms = HMI_DEVICE_REMOVE_MS;
 
 /* ------------------------------------------------------------------------- */
 /* UI-thread state                                                            */
@@ -133,7 +150,20 @@ static int                   g_set_pin_role = -1;
 static char                  g_set_pin_value[HMI_PIN_MAX_LEN + 1];
 static uint32_t              g_ui_max_frame_ms;
 static uint32_t              g_ui_wd_faults_seen;
+static hmi_device_info_t     g_dev_view[HMI_MAX_DEVICES];   /* present devices, slot order */
+static uint8_t               g_ndev;
+static hmi_discovery_stats_t g_disc_stats;
 
+/* Per-frame bookkeeping, shared by the main loop and the modal-loop timer (UI thread only) */
+static uint32_t              g_ui_start_ms;
+static uint32_t              g_ui_last_frame_ms;
+static uint32_t              g_ui_last_beep_ms;
+static uint32_t              g_ui_last_trim_ms;
+static uint32_t              g_ui_fps_window_ms;
+static uint32_t              g_ui_fps_frames;
+static int                   g_ui_modal_depth;   /* > 0 while Windows runs a drag / resize / menu loop */
+
+#define UI_MODAL_TIMER_ID 1u
 #define TOAST_DURATION_MS 3000u
 
 /* ------------------------------------------------------------------------- */
@@ -229,12 +259,13 @@ static void meter_tick(loop_meter_t *m, hmi_fieldbus_stats_t *st, uint64_t now_u
 static void fb_handle_commands(LONG bits, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms,
                                hmi_watchdog_t *wd, uint32_t now_ms, bool *stall_requested)
 {
-    const hmi_plc_driver_t *plc = g_modbus_driver;
-
     if (bits & CMD_BIT_ESTOP) {
-        bool ok = plc && plc->write_coil && plc->write_coil(MB_COIL_ESTOP, true);
-        hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_ESTOP_ACTIVE, ALARM_SEV_ESTOP, ALARM_PT_NORMAL,
-                             ok ? "E-stop commanded by operator" : "E-stop write failed: use hardwired E-stop");
+        hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_ESTOP, ALARM_PT_NORMAL,
+                             "E-stop commanded by operator");
+        if (hmi_devmgr_estop(true, tags, alarms, now_ms) == 0) {
+            hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_CRITICAL, ALARM_PT_NORMAL,
+                                 "No device took the E-stop: use hardwired");
+        }
     }
     if (bits & CMD_BIT_ACK) {
         uint16_t n = hmi_alarms_acknowledge_all(alarms, now_ms);
@@ -247,47 +278,9 @@ static void fb_handle_commands(LONG bits, hmi_tag_table_t *tags, hmi_alarm_super
         hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, ALARM_PT_NORMAL, "Horn silenced");
     }
     if (bits & CMD_BIT_ESTOP_RESET) {
-        const hmi_alarm_point_t *pt = &alarms->points[SCHNEIDER_TAG_ESTOP_ACTIVE];
-        if (pt->state == ALARM_PT_UNACK || pt->state == ALARM_PT_RTN_UNACK) {
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_ESTOP_ACTIVE, ALARM_SEV_WARNING, pt->state,
-                                 "E-stop reset refused: acknowledge first");
-        } else if (hmi_tag_read_value(tags, SCHNEIDER_TAG_ESTOP_ACTIVE) == 0) {
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_ESTOP_ACTIVE, ALARM_SEV_INFO, pt->state,
-                                 "E-stop reset: not tripped");
-        } else {
-            bool ok = plc && plc->write_coil && plc->write_coil(MB_COIL_ESTOP, false);
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_ESTOP_ACTIVE, ALARM_SEV_INFO, pt->state,
-                                 ok ? "E-stop reset commanded" : "E-stop reset write failed");
-        }
-    }
-    if (bits & CMD_BIT_PUMP_TOGGLE) {
-        bool running = hmi_tag_read_value(tags, SCHNEIDER_TAG_PUMP_RUNNING) != 0;
-        bool estop = hmi_tag_read_value(tags, SCHNEIDER_TAG_ESTOP_ACTIVE) != 0;
-        if (!running && estop) {
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_PUMP_RUNNING, ALARM_SEV_WARNING, ALARM_PT_NORMAL,
-                                 "Pump start blocked: E-stop active");
-        } else if (hmi_tag_read_quality(tags, SCHNEIDER_TAG_PUMP_RUNNING) != QUALITY_GOOD &&
-                   hmi_tag_read_quality(tags, SCHNEIDER_TAG_PUMP_RUNNING) != QUALITY_SIMULATED) {
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_PUMP_RUNNING, ALARM_SEV_WARNING, ALARM_PT_NORMAL,
-                                 "Pump command blocked: status unknown");
-        } else {
-            bool ok = plc && plc->write_coil && plc->write_coil(MB_COIL_PUMP_A, !running);
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_PUMP_RUNNING, ALARM_SEV_INFO, ALARM_PT_NORMAL,
-                                 ok ? (running ? "Pump A stop commanded" : "Pump A start commanded")
-                                    : "Pump A write failed");
-        }
-    }
-    if (bits & CMD_BIT_VALVE_TOGGLE) {
-        uint8_t q = hmi_tag_read_quality(tags, SCHNEIDER_TAG_VALVE_POS);
-        if (q != QUALITY_GOOD && q != QUALITY_SIMULATED) {
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_VALVE_POS, ALARM_SEV_WARNING, ALARM_PT_NORMAL,
-                                 "Valve command blocked: position unknown");
-        } else {
-            int16_t target = hmi_valve_toggle_target(hmi_tag_read_value(tags, SCHNEIDER_TAG_VALVE_POS));
-            bool ok = plc && plc->write_register && plc->write_register(MB_HR_VALVE_POS, target);
-            char msg[41];
-            snprintf(msg, sizeof(msg), ok ? "Valve V-101 move to %d %%" : "Valve V-101 write failed (%d %%)", (int)target);
-            hmi_alarms_log_event(alarms, now_ms, SCHNEIDER_TAG_VALVE_POS, ALARM_SEV_INFO, ALARM_PT_NORMAL, msg);
+        if (hmi_devmgr_estop(false, tags, alarms, now_ms) == 0) {
+            hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, ALARM_PT_NORMAL,
+                                 "E-stop reset: nothing to reset");
         }
     }
     if (bits & CMD_BIT_WD_RESET) {
@@ -298,19 +291,71 @@ static void fb_handle_commands(LONG bits, hmi_tag_table_t *tags, hmi_alarm_super
                              "Watchdog test: fieldbus stalls 750 ms");
         *stall_requested = true;
     }
+    for (uint8_t slot = 0; slot < HMI_MAX_DEVICES; slot++) {
+        LONG a = InterlockedExchange(&g_dev_cmd[slot], 0);
+        for (uint8_t i = 0; a && i < HMI_MAX_ACTIONS; i++) {
+            if (a & (1L << i)) hmi_devmgr_action(slot, i, tags, alarms, now_ms);
+        }
+    }
+}
+
+/* Discovery thread -> fieldbus thread */
+static void discovery_found(const hmi_device_candidate_t *c)
+{
+    LONG head = g_cand_head;
+    LONG tail = InterlockedCompareExchange(&g_cand_tail, 0, 0);
+    if ((uint32_t)(head - tail) >= CAND_RING) return;          /* full: it will be found again next sweep */
+    g_cand[(uint32_t)head % CAND_RING] = *c;
+    InterlockedExchange(&g_cand_head, head + 1);
+}
+
+static void fb_attach_found(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
+{
+    LONG tail = g_cand_tail;
+    LONG head = InterlockedCompareExchange(&g_cand_head, 0, 0);
+    while (tail != head) {
+        hmi_devmgr_attach(&g_cand[(uint32_t)tail % CAND_RING], tags, alarms, now_ms);
+        tail++;
+        InterlockedExchange(&g_cand_tail, tail);
+    }
+}
+
+/* Called by the discovery thread: is this address already on the dashboard? */
+static bool discovery_attached(const char *host, uint16_t port, uint8_t unit)
+{
+    static hmi_device_info_t devs[HMI_MAX_DEVICES];
+    uint32_t seq;
+    do {
+        seq = hmi_seqlock_read_begin(&g_seqlock);
+        memcpy(devs, g_shared.devices, sizeof(devs));
+    } while (hmi_seqlock_read_retry(&g_seqlock, seq));
+    char ep[24];
+    snprintf(ep, sizeof(ep), "%s:%u", host, (unsigned)port);
+    for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+        if (devs[i].state != HMI_DEV_EMPTY && devs[i].transport == HMI_TRANSPORT_TCP &&
+            devs[i].unit_id == unit && strcmp(devs[i].endpoint, ep) == 0) return true;
+    }
+    return false;
+}
+
+static DWORD WINAPI DiscoveryThreadProc(LPVOID param)
+{
+    (void)param;
+    hmi_discovery_run(&g_running, discovery_attached, discovery_found);
+    return 0;
 }
 
 static void fb_publish(const hmi_tag_table_t *tags, const hmi_alarm_supervisor_t *alarms,
-                       const hmi_watchdog_t *wd, const hmi_fieldbus_stats_t *st)
+                       const hmi_watchdog_t *wd, const hmi_fieldbus_stats_t *st, uint32_t now_ms)
 {
+    static hmi_device_info_t devs[HMI_MAX_DEVICES];
+    hmi_devmgr_publish(devs, now_ms);
     hmi_seqlock_write_begin(&g_seqlock);
     g_shared.tags        = *tags;
     g_shared.alarms      = *alarms;
     g_shared.fb_watchdog = *wd;
     g_shared.fb_stats    = *st;
-    if (g_modbus_driver && g_modbus_driver->get_stats) {
-        g_modbus_driver->get_stats(&g_shared.plc_stats);
-    }
+    memcpy(g_shared.devices, devs, sizeof(devs));
     hmi_seqlock_write_end(&g_seqlock);
 }
 
@@ -337,11 +382,10 @@ static DWORD WINAPI FieldbusThreadProc(LPVOID param)
     hmi_pacer_init(&pacer, HMI_FIELDBUS_PERIOD_US);
     st.high_res_timer = pacer.high_res;
 
-    if (g_modbus_driver && g_modbus_driver->connect) {
-        g_modbus_driver->connect(g_plc_endpoint[0] ? g_plc_endpoint : NULL);
-    }
+    hmi_devmgr_init(g_remove_after_ms);
     hmi_alarms_log_event(&alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, ALARM_PT_NORMAL,
-                         g_plc_endpoint[0] ? "HMI started (Modbus TCP)" : "HMI started (simulator)");
+                         "HMI started: plug-and-play");
+    if (g_with_sim) hmi_devmgr_attach_simulator(&tags, &alarms, now_ms);
 
     uint32_t last_trend_ms = now_ms - 1000u;
     uint32_t last_wd_ms = now_ms;
@@ -368,16 +412,23 @@ static DWORD WINAPI FieldbusThreadProc(LPVOID param)
         if (bits) fb_handle_commands(bits, &tags, &alarms, &wd, now_ms, &stall);
 
         /* 3. Cyclic I/O */
-        if (g_modbus_driver && g_modbus_driver->poll_cyclic) g_modbus_driver->poll_cyclic(&tags, now_ms);
+        fb_attach_found(&tags, &alarms, now_ms);
+        hmi_devmgr_poll(&tags, &alarms, now_ms);
         if (g_host_driver && g_host_driver->poll_cyclic)     g_host_driver->poll_cyclic(&tags, now_ms);
 
-        /* 4. 1 Hz trend of tank level (wrap-safe) */
+        /* 4. 1 Hz trend: one per device, of the tag its driver nominates (wrap-safe) */
         if ((uint32_t)(now_ms - last_trend_ms) >= 1000u) {
             last_trend_ms += 1000u;
             if ((uint32_t)(now_ms - last_trend_ms) >= 1000u) last_trend_ms = now_ms;   /* after a stall */
-            uint8_t tq = hmi_tag_read_quality(&tags, SCHNEIDER_TAG_TANK_LEVEL);
-            hmi_tags_push_trend(&tags, (tq == QUALITY_GOOD || tq == QUALITY_SIMULATED)
-                                       ? hmi_tag_read_value(&tags, SCHNEIDER_TAG_TANK_LEVEL) : HMI_TREND_GAP);
+            static hmi_device_info_t devs[HMI_MAX_DEVICES];
+            hmi_devmgr_publish(devs, now_ms);
+            for (uint8_t d = 0; d < HMI_MAX_DEVICES; d++) {
+                if (!hmi_device_present(&devs[d]) || devs[d].profile->trend_tag == HMI_REL_NONE) continue;
+                uint8_t id = HMI_DEV_TAG(d, devs[d].profile->trend_tag);
+                uint8_t tq = hmi_tag_read_quality(&tags, id);
+                hmi_tags_push_trend(&tags, d, (tq == QUALITY_GOOD || tq == QUALITY_SIMULATED)
+                                              ? hmi_tag_read_value(&tags, id) : HMI_TREND_GAP);
+            }
         }
 
         /* 5. Alarms */
@@ -400,7 +451,7 @@ static DWORD WINAPI FieldbusThreadProc(LPVOID param)
         st.publish_ms = now_ms;
         st.pacer_overruns = pacer.overruns;
         st.snapshot_crc = hmi_crc32c((const uint8_t *)&tags, sizeof(tags));
-        fb_publish(&tags, &alarms, &wd, &st);
+        fb_publish(&tags, &alarms, &wd, &st, now_ms);
 
         if (stall) {
             /* Deliberate fault: stop heartbeating so the UI-side watchdog must catch it. */
@@ -410,7 +461,7 @@ static DWORD WINAPI FieldbusThreadProc(LPVOID param)
         hmi_pacer_wait(&pacer);
     }
 
-    if (g_modbus_driver && g_modbus_driver->disconnect) g_modbus_driver->disconnect();
+    hmi_devmgr_shutdown();
     hmi_pacer_close(&pacer);
     return 0;
 }
@@ -556,15 +607,42 @@ static void ui_watchdog_reset(uint32_t now_ms)
 static const uint32_t* ui_active_tokens(uint8_t *count)
 {
     *count = 0;
-    if (g_active_screen == SCREEN_PROCESS_OVERVIEW && g_modbus_driver) {
-        *count = g_modbus_driver->widget_count;
-        return g_modbus_driver->ui_bytecode;
-    }
     if (g_active_screen == SCREEN_HOST_TELEMETRY && g_host_driver) {
         *count = g_host_driver->widget_count;
         return g_host_driver->ui_bytecode;
     }
     return NULL;
+}
+
+/* A button on a device panel: find its driver action, check RBAC, queue it. */
+static void ui_device_action(uint8_t abs_tag, uint32_t now_ms)
+{
+    if (abs_tag < HMI_DEVICE_TAG_BASE) return;
+    uint8_t slot = (uint8_t)((abs_tag - HMI_DEVICE_TAG_BASE) / HMI_DEVICE_TAG_SPAN);
+    uint8_t rel  = (uint8_t)((abs_tag - HMI_DEVICE_TAG_BASE) % HMI_DEVICE_TAG_SPAN);
+    if (slot >= HMI_MAX_DEVICES || !hmi_device_present(&g_snap.devices[slot])) return;
+    const hmi_device_profile_t *p = g_snap.devices[slot].profile;
+    int idx = hmi_profile_action_index(p, rel);
+    if (idx < 0) return;
+    hmi_command_t cmd = (hmi_command_t)p->actions[idx].command;
+    if (!hmi_security_authorize(&g_security, cmd, now_ms)) {
+        ui_request(cmd, 0, now_ms);              /* reports the denial */
+        return;
+    }
+    InterlockedOr(&g_dev_cmd[slot], 1L << idx);
+}
+
+/* Keyboard shortcut: action n of the first online device that has one */
+static void ui_first_device_action(uint8_t n, uint32_t now_ms)
+{
+    for (uint8_t d = 0; d < g_ndev; d++) {
+        const hmi_device_profile_t *p = g_dev_view[d].profile;
+        if (g_dev_view[d].state == HMI_DEV_ONLINE && p && n < p->n_actions) {
+            ui_device_action(HMI_DEV_TAG(g_dev_view[d].slot, p->actions[n].rel_tag), now_ms);
+            return;
+        }
+    }
+    ui_toast("No connected device has that control", now_ms);
 }
 
 static bool ui_banner_active(void)
@@ -594,8 +672,7 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
         case HMI_HIT_SET_WD_TEST:   ui_request(HMI_CMD_INJECT_FAULT, CMD_BIT_INJECT_FAULT, now_ms); break;
         case HMI_HIT_SET_WD_RESET:  ui_watchdog_reset(now_ms); break;
         case HMI_HIT_WIDGET_BUTTON:
-            if (hit->param == SCHNEIDER_TAG_PUMP_RUNNING)   ui_request(HMI_CMD_PUMP_TOGGLE, CMD_BIT_PUMP_TOGGLE, now_ms);
-            else if (hit->param == SCHNEIDER_TAG_VALVE_POS) ui_request(HMI_CMD_VALVE_TOGGLE, CMD_BIT_VALVE_TOGGLE, now_ms);
+            ui_device_action(hit->param, now_ms);
             break;
         case HMI_HIT_NONE:
         default:
@@ -631,8 +708,8 @@ static void ui_handle_key(WPARAM vk, uint32_t now_ms)
         case VK_SPACE:
         case 'A':       ui_request(HMI_CMD_ACK_ALARMS, CMD_BIT_ACK, now_ms); break;
         case 'S':       ui_request(HMI_CMD_SILENCE_HORN, CMD_BIT_SILENCE, now_ms); break;
-        case 'P':       ui_request(HMI_CMD_PUMP_TOGGLE, CMD_BIT_PUMP_TOGGLE, now_ms); break;
-        case 'V':       ui_request(HMI_CMD_VALVE_TOGGLE, CMD_BIT_VALVE_TOGGLE, now_ms); break;
+        case 'P':       ui_first_device_action(0, now_ms); break;
+        case 'V':       ui_first_device_action(1, now_ms); break;
 
         case 'X':       ui_request(HMI_CMD_ESTOP_RESET, CMD_BIT_ESTOP_RESET, now_ms); break;
         case 'C':
@@ -664,6 +741,11 @@ static void ui_take_snapshot(void)
         uint32_t crc = hmi_crc32c((const uint8_t *)&g_snap.tags, sizeof(g_snap.tags));
         if (crc != g_snap.fb_stats.snapshot_crc) g_crc_mismatches++;
     }
+
+    g_ndev = 0;
+    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
+        if (hmi_device_present(&g_snap.devices[i])) g_dev_view[g_ndev++] = g_snap.devices[i];
+    }
 }
 
 static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
@@ -677,9 +759,11 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
     v->sec    = &g_security;
     v->wd     = &g_ui_wd;
     v->fb     = g_have_snapshot ? &g_snap.fb_stats : NULL;
-    v->plc    = g_have_snapshot ? &g_snap.plc_stats : NULL;
     v->log    = &log_stats;
-    if (g_modbus_driver) { v->tokens_process = g_modbus_driver->ui_bytecode; v->ntok_process = g_modbus_driver->widget_count; }
+    v->devices = g_dev_view;
+    v->ndev    = g_ndev;
+    hmi_discovery_get_stats(&g_disc_stats);
+    v->disc    = &g_disc_stats;
     if (g_host_driver)   { v->tokens_host = g_host_driver->ui_bytecode;      v->ntok_host = g_host_driver->widget_count; }
     v->active_screen   = g_active_screen;
     v->ui_wd_alive     = g_have_snapshot ? g_snap.fb_watchdog.ui_alive : true;
@@ -714,6 +798,83 @@ static void ui_paint(HDC hdc)
         hal_display_present_band(hdc, hmi_renderer_get_band_buffer(&g_renderer),
                                  g_renderer.current_band_y, rows, g_renderer.screen_w, palette);
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* UI: one frame of housekeeping                                              */
+/* ------------------------------------------------------------------------- */
+/* Heartbeat, snapshot, watchdog / RBAC supervision, horn, audit-log sync and a
+ * repaint request. Called by the main loop every HMI_UI_FRAME_PERIOD_MS and, while
+ * Windows owns the message loop (window drag, resize, system menu), by a WM_TIMER.
+ * Without the timer the UI heartbeat stops during a drag and the fieldbus-side
+ * watchdog raises a false CRITICAL "UI loop stalled" failover (and the audit-log
+ * sync pauses). */
+static void ui_frame(uint32_t now_ms)
+{
+    uint32_t since = now_ms - g_ui_last_frame_ms;
+    if (since > g_ui_max_frame_ms && g_ui_fps_frames > 2) g_ui_max_frame_ms = since;
+    g_ui_last_frame_ms = now_ms;
+    g_ui_fps_frames++;
+    if ((uint32_t)(now_ms - g_ui_fps_window_ms) >= 1000u) {
+        g_ui_frame_hz = g_ui_fps_frames;
+        g_ui_fps_frames = 0;
+        g_ui_fps_window_ms = now_ms;
+    }
+
+    /* Heartbeat + snapshot */
+    InterlockedExchange(&g_hb_ui_ms, (LONG)now_ms);
+    ui_take_snapshot();
+
+    /* Supervise the fieldbus loop from this (independent) thread */
+    hmi_watchdog_ping_ui(&g_ui_wd, now_ms);
+    hmi_watchdog_ping_fieldbus(&g_ui_wd, (uint32_t)InterlockedCompareExchange(&g_hb_fieldbus_ms, 0, 0));
+    if (hmi_watchdog_evaluate(&g_ui_wd, now_ms)) {
+        g_ui_wd_faults_seen++;
+        ui_post_event(ALARM_SEV_CRITICAL, "Watchdog: fieldbus loop stalled");
+        ui_toast("Watchdog tripped: fieldbus loop stalled, data frozen", now_ms);
+    }
+
+    /* RBAC inactivity logout */
+    if (hmi_security_check_timeout(&g_security, now_ms)) {
+        ui_post_event(ALARM_SEV_INFO, "Auto-logout: role set to Viewer");
+        ui_toast("Inactivity: role dropped to Viewer", now_ms);
+    }
+
+    /* Horn: 1 s pulses while unacknowledged alarms exist */
+    if (g_have_snapshot && g_snap.alarms.horn_sounding && (uint32_t)(now_ms - g_ui_last_beep_ms) >= 1000u) {
+        g_ui_last_beep_ms = now_ms;
+        MessageBeep(MB_ICONHAND);
+    }
+
+    /* Persistent audit log */
+    if (g_have_snapshot) hmi_alarm_log_sync(&g_snap.alarms);
+
+    /* Working-set trim every 10 s */
+    if ((uint32_t)(now_ms - g_ui_last_trim_ms) >= 10000u) {
+        g_ui_last_trim_ms = now_ms;
+        hal_display_trim_memory();
+    }
+
+    if (g_display.hwnd) {
+        InvalidateRect(g_display.hwnd, NULL, FALSE);
+        UpdateWindow(g_display.hwnd);
+    }
+
+    if (g_exit_after_ms && (uint32_t)(now_ms - g_ui_start_ms) >= g_exit_after_ms && g_display.hwnd) {
+        PostMessageA(g_display.hwnd, WM_CLOSE, 0, 0);
+    }
+}
+
+/* Windows runs its own loop while the user drags or resizes the window or opens the
+ * system menu; keep the frame running from a timer for as long as that lasts. */
+static void ui_modal_loop_begin(HWND hwnd)
+{
+    if (g_ui_modal_depth++ == 0) SetTimer(hwnd, UI_MODAL_TIMER_ID, HMI_UI_FRAME_PERIOD_MS, NULL);
+}
+
+static void ui_modal_loop_end(HWND hwnd)
+{
+    if (g_ui_modal_depth > 0 && --g_ui_modal_depth == 0) KillTimer(hwnd, UI_MODAL_TIMER_ID);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -778,7 +939,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 uint8_t ntok = 0;
                 const uint32_t *tok = ui_active_tokens(&ntok);
                 hmi_hit_t hit = hmi_layout_hit_test(g_renderer.screen_w, g_renderer.screen_h, g_active_screen,
-                                                    ui_banner_active(), g_modal, tok, ntok, tx, ty);
+                                                    ui_banner_active(), g_modal, tok, ntok,
+                                                    g_dev_view, g_ndev, tx, ty);
                 ui_dispatch_hit(&hit, now_ms);
             }
             InvalidateRect(hwnd, NULL, FALSE);
@@ -798,11 +960,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        /* Windows runs its own message loop for window drag / resize and the system menu: keep the
+         * UI frame (heartbeat, supervision, audit-log sync) alive from a timer meanwhile. */
+        case WM_ENTERSIZEMOVE:
+        case WM_ENTERMENULOOP:
+            ui_modal_loop_begin(hwnd);
+            return 0;
+
+        case WM_EXITSIZEMOVE:
+        case WM_EXITMENULOOP:
+            ui_modal_loop_end(hwnd);
+            return 0;
+
+        case WM_TIMER:
+            if (wParam == UI_MODAL_TIMER_ID && g_ui_modal_depth > 0) ui_frame(hmi_timer_get_ms());
+            return 0;
+
         case WM_CLOSE:
             DestroyWindow(hwnd);
             return 0;
 
         case WM_DESTROY:
+            g_ui_modal_depth = 0;
             InterlockedExchange(&g_running, 0);
             g_display.hwnd = NULL;
             PostQuitMessage(0);
@@ -927,7 +1106,29 @@ static int parse_args(int argc, char **argv)
         const char *a = argv[i];
         const char *next = (i + 1 < argc) ? argv[i + 1] : NULL;
         if (strcmp(a, "--plc") == 0 && next) {
-            copy_str(g_plc_endpoint, sizeof(g_plc_endpoint), next); i++;
+            if (!hmi_discovery_add(next, true)) {
+                char out[160];
+                snprintf(out, sizeof(out), "bad --plc address: %.100s (use ip[:port][/uN])\r\n", next);
+                console_print(out);
+                return 64;
+            }
+            g_have_plc_arg = true;
+            i++;
+        } else if (strcmp(a, "--scan") == 0 && next) {
+            if (!hmi_discovery_add(next, false)) {
+                char out[200];
+                snprintf(out, sizeof(out), "bad --scan range: %.100s (e.g. 192.168.1.0/24 or 10.0.0.5:502-510; "
+                                           "at most %d addresses in total)\r\n", next, HMI_DISCOVERY_MAX_TARGETS);
+                console_print(out);
+                return 64;
+            }
+            i++;
+        } else if (strcmp(a, "--sim") == 0) {
+            g_with_sim = true;
+        } else if (strcmp(a, "--no-discovery") == 0) {
+            g_discovery_on = false;
+        } else if (strcmp(a, "--remove-after-ms") == 0 && next) {
+            g_remove_after_ms = (uint32_t)strtoul(next, NULL, 10); i++;
         } else if (strcmp(a, "--log") == 0 && next) {
             copy_str(g_log_path, sizeof(g_log_path), next); i++;
         } else if (strcmp(a, "--no-log") == 0) {
@@ -980,17 +1181,25 @@ static void write_report(void)
     hmi_alarm_log_stats_t ls;
     hmi_alarm_log_get_stats(&ls);
     const hmi_fieldbus_stats_t *fb = &g_snap.fb_stats;
-    const hmi_driver_stats_t *pl = &g_snap.plc_stats;
-    char buf[1400];
+    char devs[400];
+    size_t dl = 0;
+    devs[0] = '\0';
+    for (int d = 0; d < HMI_MAX_DEVICES; d++) {
+        const hmi_device_info_t *dv = &g_snap.devices[d];
+        int k = snprintf(devs + dl, sizeof(devs) - dl, "device%d=%s|%s|%s|state%u|ok%lu|to%lu\r\n", d,
+                         dv->state ? dv->label : "-", dv->state ? dv->endpoint : "-",
+                         dv->profile ? dv->profile->key : "-", (unsigned)dv->state,
+                         (unsigned long)dv->responses, (unsigned long)dv->timeouts);
+        if (k > 0 && (size_t)k < sizeof(devs) - dl) dl += (size_t)k;
+    }
+    char buf[1800];
     int n = snprintf(buf, sizeof(buf),
         "fieldbus_loop_hz=%lu\r\nfieldbus_period_avg_us=%lu\r\nfieldbus_period_min_us=%lu\r\n"
         "fieldbus_period_max_us=%lu\r\nfieldbus_late_count=%lu\r\nfieldbus_loop_count=%lu\r\n"
         "fieldbus_high_res_timer=%d\r\npacer_overruns=%lu\r\nui_frame_hz=%lu\r\nui_max_frame_ms=%lu\r\n"
         "seqlock_retries=%lu\r\ncrc_mismatches=%lu\r\nui_watchdog_faults=%lu\r\n"
         "ui_wd_fieldbus_alive=%d\r\nfb_wd_ui_alive=%d\r\nfb_wd_fault_count=%lu\r\n"
-        "plc_mode=%u\r\nplc_link=%u\r\nplc_endpoint=%s\r\nplc_requests=%lu\r\nplc_responses_ok=%lu\r\n"
-        "plc_timeouts=%lu\r\nplc_exceptions=%lu\r\nplc_protocol_errors=%lu\r\nplc_reconnects=%lu\r\n"
-        "plc_writes_ok=%lu\r\nplc_writes_failed=%lu\r\nplc_last_rtt_us=%lu\r\nplc_max_rtt_us=%lu\r\n"
+        "devices_present=%u\r\n%s"
         "alarm_latch=%d\r\nalarm_highest=%d\r\nalarm_active=%u\r\nalarm_unacked=%u\r\njournal_total=%lu\r\n"
         "log_open=%d\r\nlog_records_written=%lu\r\nlog_records_lost=%lu\r\nlog_write_errors=%lu\r\n"
         "role=%s\r\naccess_denied=%lu\r\nexe_size=%lu\r\nbuild=%s\r\n",
@@ -1000,10 +1209,7 @@ static void write_report(void)
         (unsigned long)g_ui_max_frame_ms, (unsigned long)g_seqlock_retries, (unsigned long)g_crc_mismatches,
         (unsigned long)g_ui_wd_faults_seen, g_ui_wd.fieldbus_alive ? 1 : 0, g_snap.fb_watchdog.ui_alive ? 1 : 0,
         (unsigned long)g_snap.fb_watchdog.fault_count,
-        (unsigned)pl->mode, (unsigned)pl->link_state, pl->endpoint, (unsigned long)pl->requests_sent,
-        (unsigned long)pl->responses_ok, (unsigned long)pl->timeouts, (unsigned long)pl->exceptions,
-        (unsigned long)pl->protocol_errors, (unsigned long)pl->reconnects, (unsigned long)pl->writes_ok,
-        (unsigned long)pl->writes_failed, (unsigned long)pl->last_rtt_us, (unsigned long)pl->max_rtt_us,
+        (unsigned)g_ndev, devs,
         (int)g_snap.alarms.latch_state, (int)g_snap.alarms.highest_severity,
         (unsigned)g_snap.alarms.active_count, (unsigned)g_snap.alarms.unacked_count,
         (unsigned long)g_snap.alarms.journal_total,
@@ -1041,6 +1247,23 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* Windows 11 throttles timers and CPU speed of background / minimised windows
+ * (EcoQoS). A control-room HMI must keep its timing, so opt out. Resolved at
+ * run time: older Windows versions simply do not have the call. */
+static void disable_power_throttling(void)
+{
+    typedef struct { ULONG Version, ControlMask, StateMask; } throttling_state_t;
+    typedef BOOL (WINAPI *set_info_fn)(HANDLE, int, LPVOID, DWORD);
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    set_info_fn fn = k32 ? (set_info_fn)(void (*)(void))GetProcAddress(k32, "SetProcessInformation") : NULL;
+    if (!fn) return;
+    throttling_state_t st;
+    st.Version = 1;                    /* PROCESS_POWER_THROTTLING_CURRENT_VERSION */
+    st.ControlMask = 0x1u | 0x4u;      /* EXECUTION_SPEED | IGNORE_TIMER_RESOLUTION */
+    st.StateMask = 0;                  /* 0 = throttling OFF for the controlled features */
+    fn(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &st, (DWORD)sizeof(st));
+}
+
 /* ------------------------------------------------------------------------- */
 /* Entry point                                                                */
 /* ------------------------------------------------------------------------- */
@@ -1050,6 +1273,7 @@ static int hmi_run(HINSTANCE hInstance, int argc, char **argv)
     int rc = parse_args(argc, argv);
     if (rc >= 0) return rc;
 
+    disable_power_throttling();
     hmi_timer_init();
     uint32_t now_ms = hmi_timer_get_ms();
 
@@ -1064,14 +1288,10 @@ static int hmi_run(HINSTANCE hInstance, int argc, char **argv)
     hmi_seqlock_init(&g_seqlock);
 
     /* Drivers and tag metadata: registered once, before any worker thread exists. */
-    g_modbus_driver = hmi_driver_modbus_get();
+    /* Device tag blocks are bound at runtime by the device manager as PLCs come and go. */
     g_host_driver   = hmi_driver_host_get();
     hmi_tag_registry_reset();
     bool meta_ok = true;
-    if (g_modbus_driver) {
-        meta_ok &= hmi_tag_register_meta(g_modbus_driver->tag_metadata, g_modbus_driver->tag_count);
-        if (g_modbus_driver->init) g_modbus_driver->init();
-    }
     if (g_host_driver) {
         meta_ok &= hmi_tag_register_meta(g_host_driver->tag_metadata, g_host_driver->tag_count);
         if (g_host_driver->init) g_host_driver->init();
@@ -1091,8 +1311,7 @@ static int hmi_run(HINSTANCE hInstance, int argc, char **argv)
     hmi_renderer_init(&g_renderer, HMI_DISPLAY_WIDTH_DEFAULT, HMI_DISPLAY_HEIGHT_DEFAULT);
 
     char title[160];
-    snprintf(title, sizeof(title), "Industrial HMI - Modicon M340/M580 - %s",
-             g_plc_endpoint[0] ? g_plc_endpoint : "SIMULATOR");
+    snprintf(title, sizeof(title), "Prometheus HMI - plug-and-play PLC runtime");
     if (!hal_display_init(&g_display, hInstance, HMI_DISPLAY_WIDTH_DEFAULT, HMI_DISPLAY_HEIGHT_DEFAULT, title, WndProc)) {
         hmi_timer_shutdown();
         return 1;
@@ -1111,14 +1330,24 @@ static int hmi_run(HINSTANCE hInstance, int argc, char **argv)
     }
     SetThreadPriority(fb_thread, THREAD_PRIORITY_TIME_CRITICAL);
 
+    /* Discovery: localhost demo ports unless the user configured PLC addresses */
+    HANDLE disc_thread = NULL;
+    if (g_discovery_on) {
+        if (!g_have_plc_arg) hmi_discovery_add_defaults();
+        disc_thread = CreateThread(NULL, 0, DiscoveryThreadProc, NULL, 0, NULL);
+        if (disc_thread) SetThreadPriority(disc_thread, THREAD_PRIORITY_BELOW_NORMAL);
+    } else if (g_have_plc_arg) {
+        disc_thread = CreateThread(NULL, 0, DiscoveryThreadProc, NULL, 0, NULL);   /* probes only the --plc addresses */
+    }
+
     hal_display_trim_memory();
 
-    uint32_t start_ms = hmi_timer_get_ms();
-    uint32_t last_frame_ms = start_ms - HMI_UI_FRAME_PERIOD_MS;
-    uint32_t last_beep_ms = start_ms;
-    uint32_t last_trim_ms = start_ms;
-    uint32_t fps_window_ms = start_ms;
-    uint32_t fps_frames = 0;
+    g_ui_start_ms = hmi_timer_get_ms();
+    g_ui_last_frame_ms = g_ui_start_ms - HMI_UI_FRAME_PERIOD_MS;
+    g_ui_last_beep_ms = g_ui_start_ms;
+    g_ui_last_trim_ms = g_ui_start_ms;
+    g_ui_fps_window_ms = g_ui_start_ms;
+    g_ui_fps_frames = 0;
     MSG msg;
 
     while (InterlockedCompareExchange(&g_running, 0, 0)) {
@@ -1133,63 +1362,10 @@ static int hmi_run(HINSTANCE hInstance, int argc, char **argv)
         if (!InterlockedCompareExchange(&g_running, 0, 0)) break;
 
         now_ms = hmi_timer_get_ms();
-        uint32_t since = now_ms - last_frame_ms;
-        if (since >= HMI_UI_FRAME_PERIOD_MS) {
-            if (since > g_ui_max_frame_ms && fps_frames > 2) g_ui_max_frame_ms = since;
-            last_frame_ms = now_ms;
-            fps_frames++;
-            if ((uint32_t)(now_ms - fps_window_ms) >= 1000u) {
-                g_ui_frame_hz = fps_frames;
-                fps_frames = 0;
-                fps_window_ms = now_ms;
-            }
-
-            /* Heartbeat + snapshot */
-            InterlockedExchange(&g_hb_ui_ms, (LONG)now_ms);
-            ui_take_snapshot();
-
-            /* Supervise the fieldbus loop from this (independent) thread */
-            hmi_watchdog_ping_ui(&g_ui_wd, now_ms);
-            hmi_watchdog_ping_fieldbus(&g_ui_wd, (uint32_t)InterlockedCompareExchange(&g_hb_fieldbus_ms, 0, 0));
-            if (hmi_watchdog_evaluate(&g_ui_wd, now_ms)) {
-                g_ui_wd_faults_seen++;
-                ui_post_event(ALARM_SEV_CRITICAL, "Watchdog: fieldbus loop stalled");
-                ui_toast("Watchdog tripped: fieldbus loop stalled, data frozen", now_ms);
-            }
-
-            /* RBAC inactivity logout */
-            if (hmi_security_check_timeout(&g_security, now_ms)) {
-                ui_post_event(ALARM_SEV_INFO, "Auto-logout: role set to Viewer");
-                ui_toast("Inactivity: role dropped to Viewer", now_ms);
-            }
-
-            /* Horn: 1 s pulses while unacknowledged alarms exist */
-            if (g_have_snapshot && g_snap.alarms.horn_sounding && (uint32_t)(now_ms - last_beep_ms) >= 1000u) {
-                last_beep_ms = now_ms;
-                MessageBeep(MB_ICONHAND);
-            }
-
-            /* Persistent audit log */
-            if (g_have_snapshot) hmi_alarm_log_sync(&g_snap.alarms);
-
-            /* Working-set trim every 10 s */
-            if ((uint32_t)(now_ms - last_trim_ms) >= 10000u) {
-                last_trim_ms = now_ms;
-                hal_display_trim_memory();
-            }
-
-            if (g_display.hwnd) {
-                InvalidateRect(g_display.hwnd, NULL, FALSE);
-                UpdateWindow(g_display.hwnd);
-            }
-
-            if (g_exit_after_ms && (uint32_t)(now_ms - start_ms) >= g_exit_after_ms && g_display.hwnd) {
-                PostMessageA(g_display.hwnd, WM_CLOSE, 0, 0);
-            }
-        }
+        if ((uint32_t)(now_ms - g_ui_last_frame_ms) >= HMI_UI_FRAME_PERIOD_MS) ui_frame(now_ms);
 
         /* Sleep until the next frame or until input arrives */
-        uint32_t elapsed = hmi_timer_get_ms() - last_frame_ms;
+        uint32_t elapsed = hmi_timer_get_ms() - g_ui_last_frame_ms;
         DWORD wait = (elapsed >= HMI_UI_FRAME_PERIOD_MS) ? 0 : (DWORD)(HMI_UI_FRAME_PERIOD_MS - elapsed);
         MsgWaitForMultipleObjects(0, NULL, FALSE, wait, QS_ALLINPUT);
     }
@@ -1197,6 +1373,10 @@ static int hmi_run(HINSTANCE hInstance, int argc, char **argv)
     InterlockedExchange(&g_running, 0);
     WaitForSingleObject(fb_thread, 3000);
     CloseHandle(fb_thread);
+    if (disc_thread) {
+        WaitForSingleObject(disc_thread, 3000);
+        CloseHandle(disc_thread);
+    }
 
     /* Flush the journal events produced during shutdown, then close the log. */
     ui_take_snapshot();

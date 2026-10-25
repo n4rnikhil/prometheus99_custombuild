@@ -48,7 +48,7 @@ typedef struct {
     uint8_t  tag_id;         /* 0xFF = system event */
     uint8_t  severity;       /* hmi_alarm_sev_t */
     uint8_t  state;          /* hmi_alarm_point_state_t after the event */
-    char     message[41];    /* ASCII, NUL-terminated */
+    char     message[57];    /* ASCII, NUL-terminated */
 } hmi_alarm_record_t;
 
 #define HMI_ALARM_TAG_SYSTEM 0xFFu
@@ -92,6 +92,10 @@ void hmi_alarms_evaluate(hmi_alarm_supervisor_t *sup, const hmi_tag_table_t *tag
 
 /* Acknowledge every UNACK / RTN_UNACK point. Returns the number of points acknowledged. */
 uint16_t hmi_alarms_acknowledge_all(hmi_alarm_supervisor_t *sup, uint32_t now_ms);
+
+/* Forget the alarm points of a removed device (tags first_tag .. first_tag+count-1).
+ * The journal keeps their history; the summary is rebuilt by the next evaluate. */
+void hmi_alarms_clear_range(hmi_alarm_supervisor_t *sup, uint8_t first_tag, uint8_t count);
 
 /* Silence the horn without acknowledging (a new annunciation re-arms it). */
 void hmi_alarms_silence_horn(hmi_alarm_supervisor_t *sup);

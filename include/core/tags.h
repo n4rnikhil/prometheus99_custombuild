@@ -52,14 +52,15 @@ typedef struct {
     uint8_t        digital_alarm_sev; /* DIGITAL tags: hmi_alarm_sev_t raised while value != 0 (0 = none) */
     const char    *action1;       /* operator guidance line 1 on alarm (NULL = generic) */
     const char    *action2;       /* operator guidance line 2 on alarm (NULL = generic) */
+    const char    *group;         /* owning device label, e.g. "Tank skid 2" (NULL = none); prefixed in alarm text */
 } hmi_tag_meta_t;
 
 /* --- Tag table + 60 s trend (trend is for the tank level tag) --- */
 typedef struct {
     hmi_tag_t tags[HMI_MAX_TAGS];
-    int16_t   trend_samples[HMI_TREND_SAMPLES];
-    uint8_t   trend_head;        /* index of the next write */
-    uint8_t   trend_count;       /* number of valid samples (<= HMI_TREND_SAMPLES) */
+    int16_t   trend_samples[HMI_MAX_DEVICES][HMI_TREND_SAMPLES];   /* one 60 s trend per device slot */
+    uint8_t   trend_head[HMI_MAX_DEVICES];   /* index of the next write */
+    uint8_t   trend_count[HMI_MAX_DEVICES];  /* number of valid samples (<= HMI_TREND_SAMPLES) */
     uint16_t  global_dirty_mask; /* reserved */
 } hmi_tag_table_t;
 
@@ -70,6 +71,9 @@ typedef struct {
 void hmi_tag_registry_reset(void);
 bool hmi_tag_register_meta(const hmi_tag_meta_t *meta_list, uint8_t count); /* false: NULL, id >= HMI_MAX_TAGS, or duplicate id (nothing registered for that entry) */
 const hmi_tag_meta_t* hmi_tag_get_meta(uint8_t tag_id);                     /* NULL if unregistered */
+/* Runtime binding for plug-and-play devices (fieldbus thread only). The pointer is
+ * published with release ordering, so a reader that sees it also sees the data. */
+void hmi_tag_bind_meta(uint8_t tag_id, const hmi_tag_meta_t *meta);
 
 /* --- Table --- */
 void hmi_tags_init(hmi_tag_table_t *table);   /* zero, every tag QUALITY_COMM_FAULT until first write, decimals from registry */
@@ -82,9 +86,10 @@ uint8_t hmi_tag_read_quality(const hmi_tag_table_t *table, uint8_t tag_id);
 
 /* --- Trend --- */
 #define HMI_TREND_GAP INT16_MIN   /* sample recorded while the value was not valid */
-void hmi_tags_push_trend(hmi_tag_table_t *table, int16_t sample);
+void hmi_tags_push_trend(hmi_tag_table_t *table, uint8_t slot, int16_t sample);
+void hmi_tags_clear_trend(hmi_tag_table_t *table, uint8_t slot);
 /* Copy the trend oldest -> newest into out[0..cap). Returns the number copied. */
-uint8_t hmi_tags_copy_trend(const hmi_tag_table_t *table, int16_t *out, uint8_t cap);
+uint8_t hmi_tags_copy_trend(const hmi_tag_table_t *table, uint8_t slot, int16_t *out, uint8_t cap);
 
 /* --- Formatting helper (shared by renderer and alarm text) ---
  * Formats a scaled integer: (842, 1) -> "84.2", (-5, 1) -> "-0.5", (1450, 0) -> "1450".

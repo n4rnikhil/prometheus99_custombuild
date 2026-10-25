@@ -12,10 +12,10 @@
 
 static const hmi_tag_meta_t s_host_meta[HOST_TAG_COUNT] = {
     /* id                   type            name               unit  min  max    warn   trip   dec dig  action1                          action2 */
-    { HOST_TAG_CPU_LOAD,     TAG_TYPE_ANALOG, "CPU load",       "%",  0,   100,   85,    97,    0,  0,   "Check for runaway processes",    "HMI loop timing may degrade" },
-    { HOST_TAG_RAM_LOAD,     TAG_TYPE_ANALOG, "Memory in use",  "%",  0,   100,   92,    98,    0,  0,   "Close non-essential programs",   "The host may start paging" },
-    { HOST_TAG_PROC_PRIV_KB, TAG_TYPE_ANALOG, "HMI private memory", "KB", 0,   16384, 0,     0,     0,  0,   NULL,                             NULL },
-    { HOST_TAG_PROC_WS_KB,   TAG_TYPE_ANALOG, "HMI working set", "KB", 0,   16384, 0,     0,     0,  0,   NULL,                             NULL },
+    { HOST_TAG_CPU_LOAD,     TAG_TYPE_ANALOG, "CPU load",       "%",  0,   100,   85,    97,    0,  0,   "Check for runaway processes",    "HMI loop timing may degrade", NULL },
+    { HOST_TAG_RAM_LOAD,     TAG_TYPE_ANALOG, "Memory in use",  "%",  0,   100,   92,    98,    0,  0,   "Close non-essential programs",   "The host may start paging", NULL },
+    { HOST_TAG_PROC_PRIV_KB, TAG_TYPE_ANALOG, "HMI private memory", "KB", 0,   16384, 0,     0,     0,  0,   NULL,                             NULL, NULL },
+    { HOST_TAG_PROC_WS_KB,   TAG_TYPE_ANALOG, "HMI working set", "KB", 0,   16384, 0,     0,     0,  0,   NULL,                             NULL, NULL },
 };
 
 static const uint32_t s_host_manifest[] = {

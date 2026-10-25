@@ -1,14 +1,47 @@
-# build outputs (industrial_hmi.exe itself is tracked as the release artefact)
+# Build outputs (industrial_hmi.exe itself is tracked as release artefact)
 tests/*.exe
 tools/*.exe
 *.o
 *.obj
+*.pdb
+*.ilk
+*.idb
+*.map
+*.res
 snapshot_*.bmp
 
-# runtime files written next to the exe
+# Runtime-generated persistent state & logs
 alarms.log
-alarms.log.1
-alarms.log.damaged
+alarms.log.*
 crash.log
+crash.log.*
 security.vault
-security.vault.tmp
+security.vault.*
+*.log
+
+# Test & benchmark artifacts
+report*.txt
+measure_output.txt
+*.tmp
+*.bak
+
+# Python caches (from tests/ simulators)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local tooling & AI analysis caches
+graphify-out/
+.agents/
+.gemini/
+
+# IDE & OS metadata
+.vscode/
+.vs/
+.idea/
+*.suo
+*.user
+Thumbs.db
+Desktop.ini
+.DS_Store

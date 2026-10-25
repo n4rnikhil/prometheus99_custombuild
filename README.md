@@ -1,64 +1,119 @@
 # Prometheus Industrial HMI
 
-A lightweight HMI runtime for Schneider Modicon M340/M580 PLCs, written in pure C99.
-It talks Modbus TCP and runs on Windows today. The rendering and logic core has no
-OS dependencies, so it can move to Linux framebuffers and microcontrollers.
+A lightweight, **plug-and-play** HMI runtime for PLCs, written in pure C99.
+Connect a PLC to the network and it appears on the dashboard with the right
+screen. Disconnect it and it goes offline, raises an alarm, then leaves the dashboard.
 
-![Process overview](docs/img/process.png)
+![Two PLCs plugged in](docs/img/dashboard_two_plcs.png)
 
 | | Measured on the dev laptop (Windows 11, `measure.bat`) |
 |---|---|
-| Executable | **160 KB**, statically linked, no DLLs beyond Windows itself |
-| RAM | **3.6 MB** working set, **1.7 MB** private |
+| Executable | **212 KB**, statically linked, no DLLs beyond Windows itself |
+| RAM | **5.6 MB** working set (including Windows networking), **1.9 MB** private |
 | Frame buffer | one **19,200-byte** band buffer, reused for every band of every frame |
 | Heap | no `malloc`/`free` in application code (the C runtime's start-up code imports them) |
-| Fieldbus loop | **1,000 Hz**, average period 1,000 µs, worst case about 1.6 ms |
-| UI | 30 fps; anti-aliased Inter text and shapes through a 16-colour palette |
-| Modbus TCP | about 1 ms round trip to a local PLC simulator; auto-reconnect after a link loss |
-| Tests | 3,373 unit checks (UBSan traps), live Modbus outage test, cppcheck clean, `-Werror` clean |
+| Fieldbus loop | **1,000 Hz**, worst period about 2.4 ms |
+| UI | 30 fps; anti-aliased Inter text through a 16-colour palette |
+| Detection | a new PLC appears within about 3 s (one FC43 request); non-PLC devices are ignored |
+| Tests | 4,371 unit checks (UBSan traps), live plug-and-play test, cppcheck clean, `-Werror` clean at -O0…-O3 |
 
 ---
 
 ## Quick start
 
 ```bat
-build.bat test          :: build industrial_hmi.exe and run the unit tests
-industrial_hmi.exe      :: start with the built-in process simulator
-measure.bat             :: 8-second runtime audit (RAM, loop rate, jitter, log check)
+build.bat test       :: build industrial_hmi.exe and run the unit tests
+demo.bat             :: plug-and-play demo: plug in PLCs one by one (needs Python 3)
+industrial_hmi.exe   :: start empty and search for PLCs
+industrial_hmi.exe --sim   :: no hardware and no Python: built-in simulated tank-skid PLC
 ```
 
 Requirements: MinGW-w64 GCC on `PATH` (MSVC also works from a Developer Prompt).
 
-> **Smart App Control.** Windows 11's Smart App Control can block a freshly
+> **Smart App Control.** Windows 11's Smart App Control may block a freshly
 > compiled, unsigned exe ("An Application Control policy has blocked this file").
-> It decides per build, so one build may run and the next may not. Fixes, in order of
-> preference: sign the exe with a trusted code-signing certificate, or run it on a
-> machine where Smart App Control is off (it is normally off on managed or
-> embedded devices). `measure.bat` reports this case explicitly.
+> It decides per build, so one build may run and the next may not. The real fix is
+> to sign the exe with a trusted code-signing certificate. Managed and embedded
+> Windows devices normally have it turned off.
 
-### Connect a real PLC
+---
 
-```bat
-industrial_hmi.exe --plc 192.168.1.50          :: port 502, unit 1
-industrial_hmi.exe --plc 192.168.1.50:502/3    :: unit id 3
+## Plug and play
+
+```
+ network ──► Discovery thread (low priority, every 3 s)
+              1. TCP connect to each target (32 at a time, non-blocking)
+              2. Modbus FC43 "Read Device Identification" → vendor + product code
+              3. a matching driver module that is a PLC/drive?  yes → report it
+                                                                 no  → ignore for 60 s
+           ──► Fieldbus thread (1 kHz)
+              4. attach to a free slot: bind the driver's tags, alarms and screens
+              5. poll it (non-blocking Modbus TCP), raise alarms, accept commands
+              6. link lost → OFFLINE (critical alarm, keeps reconnecting)
+                 back within 10 s → ONLINE again; otherwise removed from the dashboard
+           ──► UI thread: the process screen splits itself between the devices
 ```
 
-No PLC to hand? `python tests\modbus_plc_sim.py --port 1502` starts a Modbus TCP
-server that behaves like the plant. Then run `industrial_hmi.exe --plc 127.0.0.1:1502`.
-Add `--outage-at 10 --outage-for 5` to watch the HMI ride through a link loss.
+* **Only PLCs are attached.** A device found by scanning must identify itself as a model
+  that has a driver module. Today that means Modicon M340/M580 CPUs (`BMX…`, `BME…`) and
+  Altivar drives (`ATV…`). Power meters, gateways and anonymous Modbus devices are
+  ignored, probed once, and then left alone for a minute.
+* **Explicit addresses.** `--plc 192.168.1.50` watches that address even if the device
+  can't identify itself; it gets the generic driver, which shows holding registers 0–7.
+* **Where it looks.** By default it checks localhost (ports 502 and 1502–1509, for the
+  simulators). Giving `--plc` addresses replaces that default. To scan a plant network, opt in with `--scan 192.168.1.0/24`. Sweeping
+  networks uninvited is bad practice on OT networks (IEC 62443), so it is never automatic.
+* **Up to 4 devices** at once. The dashboard uses 1 full panel, 2 side by side, or a 2×2 grid,
+  and switches each driver to its compact layout when its panel gets small.
+* **Removal is not silent.** An unplugged PLC first shows *Offline – removing in N s* and
+  raises a critical comm-loss alarm. Its removal is recorded in the alarm log.
+  `--remove-after-ms 0` keeps offline devices on screen for good.
 
-PLC data map (0-based Modbus addresses; on an M340/M580 `%MWn` is holding register n, `%Mn` is coil n):
+![One PLC](docs/img/process.png)
 
-| Address | Tag | Unit | Access |
+### Driver modules: the app stays small
+
+The core runtime knows nothing about any particular PLC. Each supported device type is
+one **driver module**: a self-contained file of `const` data (about 70 lines) that
+brings everything the HMI needs for that device:
+
+| In the module | Example (Modicon tank skid) |
+|---|---|
+| Identity match | vendor `schneider`, product `bmx\|bme\|m340\|m580` |
+| Tags + alarm limits + operator guidance | Tank 01 level (H 85 %, HH 95 %) … |
+| Modbus map | `%MW0..4` → 5 analog tags, `%M0..2` → 3 digital tags |
+| Buttons | toggle coil `%M0` "Start/Stop pump" (blocked while E-stop is active) … |
+| E-stop | coil `%M2` |
+| Screens | a 14-token full layout and an 8-token compact layout (4 bytes per widget) |
+
+Modules live in [src/drivers/profiles/](src/drivers/profiles/). On a microcontroller they
+sit in flash and cost no RAM until a device is attached. **Adding a PLC type** means
+copying a module, editing its tables, and listing it in `s_profiles[]` in
+[src/drivers/device_profiles.c](src/drivers/device_profiles.c). Tests check every module
+(tags in range, a comm-loss alarm, labels, both layouts).
+
+Built-in modules and their Modbus maps (0-based addresses; on an M340/M580 `%MWn` = holding register n, `%Mn` = coil n):
+
+| Module | Registers (FC03) | Coils (FC01) | Writes |
 |---|---|---|---|
-| %MW0 | Tank 01 level | 0.1 % | read |
-| %MW1 | Feed pump A speed | RPM | read |
-| %MW2 | Valve V-101 position | % | read / **write** (FC06) |
-| %MW3 | Line pressure | kPa | read |
-| %MW4 | Coolant temperature | °C | read |
-| %M0 | Pump A run | – | read / **write** (FC05) |
-| %M1 | Coolant pump B | – | read / write |
-| %M2 | E-stop latch | – | read / write (1 = trip, 0 = reset) |
+| Tank skid (M340/M580) | 0 level 0.1 %, 1 pump RPM, 2 valve %, 3 pressure kPa, 4 coolant °C | 0 pump A, 1 coolant pump B, 2 E-stop | `%M0` pump, `%M2` E-stop, `%MW2` valve |
+| Drive (ATV) | 0 output 0.1 Hz, 1 current 0.1 A, 2 speed setpoint 0.1 Hz, 3 drive °C | 0 run, 1 fault | `%M0` run, `%MW2` setpoint |
+| Generic | HR 0–7 shown as values | – | none |
+
+The drive module uses the register layout of the bundled simulator. A real Altivar uses
+its own addresses (RFR 3202, LCR 3204, CMD 8501…), so a production drive module would
+carry those.
+
+### Try it
+
+```bat
+python tests\modbus_plc_sim.py --profile tank  --port 1502   :: Modicon M340 tank skid
+python tests\modbus_plc_sim.py --profile drive --port 1503   :: Altivar ATV320
+python tests\modbus_plc_sim.py --profile meter --port 1504   :: PM5560 power meter: ignored
+python tests\modbus_plc_sim.py --profile anon  --port 1505   :: no FC43: ignored
+```
+
+Start the HMI, then start or stop these in any order and watch the dashboard follow.
 
 ---
 
@@ -69,32 +124,25 @@ The HMI starts as **Viewer**, which can monitor only. Tap the role chip (or pres
 | Role | Factory PIN | Can do |
 |---|---|---|
 | Viewer | none | watch; trip the E-STOP |
-| Operator | 1111 | acknowledge / silence alarms, start/stop pump, move valve, reset E-stop |
+| Operator | 1111 | acknowledge / silence alarms, start/stop equipment, setpoints, reset E-stop |
 | Maintenance | 2222 | + reset the watchdog failover latch |
 | Engineer | 3333 | + watchdog fault-injection test |
 
-**Change the factory PINs before real use** (Settings shows a warning until you do):
-
-```bat
-industrial_hmi.exe --set-pin operator 482913
-industrial_hmi.exe --set-pin engineer 77310455
-```
-
+Change the factory PINs before real use: `industrial_hmi.exe --set-pin operator 482913`.
 Three wrong PINs lock sign-in for 30 s. After 5 minutes without input the HMI drops back to Viewer.
 
 | Action | Touch / mouse | Keyboard |
 |---|---|---|
 | Switch screen | tab bar, or swipe left/right | `1`–`5`, `Tab`, arrows |
-| Emergency stop | red **E-STOP** (always visible, works over dialogs) | `E` |
+| Emergency stop (all devices that have one) | red **E-STOP** (always on screen, works over dialogs) | `E` |
 | Acknowledge / silence | banner button or Alarms screen | `Space`/`A`, `S` |
-| Pump / valve | buttons on the process cards | `P`, `V` |
+| Device buttons | on each device panel | `P` / `V` = first / second button of the first PLC |
 | Reset E-stop | Alarms screen (after acknowledging) | `X` |
 | Sign in / out | role chip, Settings | `L` |
 | Outdoor (light) theme | moon button, Settings | `T` |
 | Watchdog test / reset | Settings | `F` / `W` |
 
-Actions fire when you lift your finger, not when you press, so a swipe that starts on a
-button never operates it. Holding a key down sends one command, not a stream.
+Actions fire when you lift your finger, not when you press, so a swipe that starts on a button never operates it.
 
 ![Alarms](docs/img/alarms.png)
 
@@ -102,73 +150,56 @@ button never operates it. Holding a key down sends one command, not a stream.
 
 | Option | Meaning |
 |---|---|
-| `--plc <ip[:port][/unit]>` | Modbus TCP instead of the simulator (numeric IPv4 or `localhost`) |
-| `--log <file>` / `--no-log` | alarm audit log location (default `alarms.log` next to the exe) |
-| `--vault <file>` | PIN vault location (default `security.vault` next to the exe) |
-| `--set-pin <role> <pin>` | store a new 4–8 digit PIN, then exit |
+| `--plc <ip[:port][/uN]>` | watch this PLC address (repeatable); attached even without identification |
+| `--scan <range>` | extra discovery targets: `192.168.1.0/24`, `10.0.0.5:502-510`, … (repeatable) |
+| `--no-discovery` | no scanning; only `--plc` addresses (and `--sim`) |
+| `--sim` | add the built-in simulated tank-skid PLC |
+| `--remove-after-ms <n>` | offline devices leave the dashboard after n ms (default 10000, 0 = never) |
+| `--log <file>` / `--no-log` | alarm audit log (default `alarms.log` next to the exe) |
+| `--vault <file>`, `--set-pin <role> <pin>` | PIN vault location / change a PIN, then exit |
 | `--verify-log <file>` | check the log's hash chain; exit 0 = intact, 2 = tampered |
-| `--exit-after-ms <n>`, `--report <file>` | timed run with a measured-statistics report (used by `measure.bat`) |
+| `--exit-after-ms <n>`, `--report <file>` | timed run with a measured-statistics report (`measure.bat`) |
 
 ---
 
 ## How it works
 
 ```
-  PLC (Modbus TCP) ──► Fieldbus thread, 1 kHz ─────────────► seqlock ──► UI thread, 30 Hz
-                       drivers · ISA-18.2 alarms · trend         │         snapshot + CRC check
-                       watchdog for the UI loop                  │         renderer → band buffer → screen
-                       ◄── command bits / audit-event ring ──────┘         RBAC · PIN login · gestures
-                                                                           watchdog for the fieldbus loop
-                                                                           hash-chained alarm log
+  Discovery thread ──found PLC──► Fieldbus thread, 1 kHz ─────────► seqlock ──► UI thread, 30 Hz
+  (FC43 identification)            device manager: 4 slots,            │         snapshot + CRC check
+                                   one Modbus TCP state machine each   │         renderer → band buffer → screen
+                                   ISA-18.2 alarms · trends · watchdog │         RBAC · PIN login · gestures
+                                   ◄── command bits / audit-event ring ┘         watchdog · hash-chained log
 ```
 
-* **Two loops that watch each other.** Each thread publishes a heartbeat and supervises
-  the other's. Settings → *Test watchdog* stalls the fieldbus thread for 750 ms. The UI
-  trips, freezes the data as *stale*, and latches failover until Maintenance resets it.
-* **Lock-free hand-over.** The fieldbus thread publishes a complete snapshot through a
-  seqlock with C11-style fences (correct on ARM, not just x86). The UI checks a CRC32-C
-  of every snapshot it reads.
-* **ISA-18.2 alarms.** Every tag is an alarm point with its own latched state
-  (Unacknowledged → Acknowledged → Normal, or *Cleared, unacknowledged*). The points have
-  deadbands, re-annunciate on escalation, and E-stop outranks everything. Silence and
-  acknowledge are separate actions. Tags with bad quality freeze rather than falsely clear.
-* **Audit trail.** Every alarm transition, operator command, sign-in and access denial goes
-  into `alarms.log`. Each line's CRC covers the previous line's CRC, so editing, deleting
-  or reordering lines is detected (`--verify-log`). The chain continues across restarts
-  and log rotation.
-* **Device-described UI.** A driver ships a *profile*: tag metadata plus a manifest of
-  4-byte widget tokens. The whole process screen is 14 tokens (56 bytes,
-  `src/drivers/schneider_profile.c`). The renderer draws only what the manifest lists.
-* **Band renderer.** Frames are drawn one horizontal band at a time into a single
-  19,200-byte 4-bpp buffer (10 bands at 800×480) and streamed out. Anti-aliasing works
-  through a 16×16×4 palette blend table, so there's no extra colour depth and no
-  floating point in the pixel paths. Text uses the **Inter** typeface, pre-rendered at
-  build time into 26 KB of 2-bit glyphs (`tools/bake_fonts.py`), so there's no font engine.
-* **Responsive.** All geometry comes from one module (`layout.c`) that both drawing and
-  touch hit-testing use. It adapts from 640×400 up to 7680 px wide; narrow screens get a
-  compact header.
+* **Nothing blocks the 1 kHz loop.** Discovery runs in its own low-priority thread.
+  Every device slot's Modbus client is non-blocking, with one request in flight, a write
+  queue, timeouts and reconnect back-off.
+* **Two loops that watch each other.** Each thread supervises the other's heartbeat; a
+  stall latches a failover alarm (*Settings → Test watchdog* demonstrates it). The process
+  opts out of Windows power throttling, so timing holds when the window is in the background.
+* **ISA-18.2 alarms** per tag, with device names in the text ("Tank skid 2: Tank 01 level
+  HH 96.2 %"). They have deadbands, re-annunciation and E-stop priority, and keep silence
+  separate from acknowledge.
+* **Audit trail.** Sign-ins, denials, commands, alarms, devices found, offline and removed
+  all go to a hash-chained `alarms.log`; `--verify-log` detects edits.
+* **Band renderer.** Frames are drawn one band at a time into one 19,200-byte 4-bpp buffer,
+  with anti-aliasing through a palette blend table. Inter text is pre-rendered into 26 KB of
+  glyphs, so there's no font engine.
 
-### Portability and porting
+### Portability
 
-| Portable C99 (no OS headers) | Windows-specific (the platform layer) |
+| Portable C99 (no OS headers) | Windows platform layer |
 |---|---|
-| `core/` tags, alarms, security, sha256, crc32, watchdog | `main.c` (window, threads, CLI) |
-| `renderer/` layout, micro_renderer, font_inter | `hal/display_win32.c`, `hal/timer.c` |
-| `drivers/` modbus_proto, schneider_profile | `drivers/driver_modbus.c` (WinSock), `driver_host.c` |
-| `hal/gesture.c` | `core/alarm_log.c` (Win32 file API) |
+| core: tags, alarms, security, sha256, crc32, watchdog | `main.c`, `hal/display_win32.c`, `hal/timer.c` |
+| renderer: layout, micro_renderer, fonts | `drivers/device_manager.c`, `drivers/discovery.c` (sockets) |
+| drivers: modbus_proto, **all driver modules** | `drivers/driver_host.c`, `core/alarm_log.c` (files) |
 
-`build.bat snapshot` builds `tools/render_snapshot.c`, a complete port in about 150 lines
-that uses only `<stdio.h>`. It renders every screen to BMP files; the screenshots in this
-README come from it. A new target needs the same small surface:
-
-1. a **display sink**: copy each 4-bpp band to the panel (framebuffer `memcpy`, SPI/DMA transfer, …)
-2. a **millisecond clock** and a way to run the 1 kHz loop (thread, RTOS task, or timer interrupt)
-3. **touch/key events** fed into `hmi_gesture_*` and `hmi_layout_hit_test`
-4. a **socket** for Modbus TCP (`modbus_proto.c` already does the framing) and a **file**
-   for the alarm log and vault (or flash pages)
-
-The Linux framebuffer and microcontroller back-ends are not written yet. Everything they
-would call is in the portable column above.
+`build.bat snapshot` builds [tools/render_snapshot.c](tools/render_snapshot.c), a port that
+uses only `<stdio.h>` and renders the multi-PLC dashboard to BMP files (the screenshots here
+come from it). A Linux framebuffer or microcontroller port needs: a sink for each 4-bpp band, a
+millisecond clock and 1 kHz task, touch events, and BSD sockets (the device manager and
+discovery use the WinSock subset of the BSD API). Those back-ends aren't written yet.
 
 ---
 
@@ -176,41 +207,49 @@ would call is in the portable column above.
 
 | Standard | Implemented | Not implemented / limits |
 |---|---|---|
-| IEC 62443-4-2 | RBAC enforced on every command; PIN authentication (salted, iterated SHA-256, constant-time compare); lockout after 3 failures; inactivity logout; audit log of sign-ins and denials; PE hardening (ASLR, high-entropy VA, DEP, stack protector) | Role PINs, not personal user accounts; no TLS / Modbus security (plain Modbus TCP has none); the CRC chain detects tampering but is not a cryptographic signature |
-| ISA-18.2 / IEC 62682 | per-point latching, priorities, deadband, re-annunciation, silence ≠ acknowledge, journal + persistent log | no shelving / suppression, no alarm-flood analytics |
-| ISA-101 | grey-scale process graphics; colour only for abnormal states; consistent navigation | – |
-| IEC 61508 (SIL-*ready* design practices) | no dynamic memory; bounded loops; cross-supervising watchdogs with latched failover; snapshot CRC | **not certified**. The HMI E-STOP is a *request* to the PLC: a real plant still needs a hardwired, certified E-stop circuit |
+| IEC 62443-4-2 | RBAC on every command; PIN auth (salted iterated SHA-256, constant-time); lockout; inactivity logout; audit log; opt-in network scanning; PE hardening | role PINs, not personal accounts; plain Modbus TCP has no TLS; the log chain uses CRC, not a signature |
+| ISA-18.2 / IEC 62682 | per-point latching, priorities, deadband, re-annunciation, silence ≠ ack, journal + persistent log | no shelving / suppression |
+| ISA-101 | grey-scale graphics, colour only for abnormal states | – |
+| IEC 61508 (design practices only) | no dynamic memory; bounded loops; cross-supervising watchdogs; snapshot CRC | **not certified**. The HMI E-STOP is a *request*: plants still need a hardwired, certified E-stop |
 
 ---
 
 ## Tests
 
 ```bat
-build.bat test                                         :: 3,373 unit checks, UBSan traps
-python tests\modbus_plc_sim.py --port 1502 --outage-at 4 --outage-for 3 --run-for 14
-tests\test_modbus_live.exe 127.0.0.1:1502 12           :: values, write, outage, recovery
-industrial_hmi.exe --verify-log alarms.log
+build.bat test           :: 4,371 unit checks with UBSan traps
+:: headless plug-and-play test against real sockets:
+start python tests\modbus_plc_sim.py --profile tank  --port 1502 --outage-at 7 --outage-for 3 --run-for 24
+start python tests\modbus_plc_sim.py --profile meter --port 1504 --run-for 24
+tests\test_modbus_live.exe 18
 ```
 
 The unit tests cover:
 * CRC32-C and SHA-256 test vectors
-* tag scaling and the trend ring
+* tags and the per-device trends
 * every ISA-18.2 transition
-* RBAC, PIN login and lockout, and the vault
-* uint32 clock wrap and the watchdog edges
-* the Modbus codec, including 20,000 random frames
-* tap and swipe classification
-* layout and hit-tests at six screen sizes, with dialogs open and closed
-* rendering every screen at 13 sizes (1×1 up to 20000 px wide) with guard bytes around the band buffer
-* alarm-log tamper detection, overrun, restart and rotation
+* RBAC, PIN and vault
+* the Modbus and FC43 codecs, including 20,000 random frames
+* driver-module matching: a power meter is rejected
+* the device manager: attach, unique labels, actions, E-stop interlock, PLC-only policy
+* dashboard layout for 1–4 devices at six screen sizes, every button hit-tested
+* rendering at 13 sizes with buffer guard bytes
+* alarm-log tamper detection
+
+The live test confirms:
+* the tank PLC is found and attached with the right driver
+* the meter is ignored
+* a valve command reaches the PLC
+* the outage is detected and the PLC recovers by itself
 
 ## Layout
 
 ```
-build.bat / measure.bat      build, test, snapshot, runtime audit
-include/  src/               core · renderer · drivers · hal · main.c
+build.bat · measure.bat · demo.bat
+src/drivers/profiles/        driver modules (one per PLC / drive type)
+src/drivers/                 device_manager, discovery, modbus_proto, device_profiles (registry)
+src/core, src/renderer, src/hal, src/main.c
 tests/                       test_core.c, test_modbus_live.c, modbus_plc_sim.py
-tools/                       bake_fonts.py (Inter → C), render_snapshot.c (portable port)
-fonts/OFL.txt                Inter licence (SIL Open Font License 1.1)
-docs/img/                    screenshots rendered by the portable tool
+tools/                       bake_fonts.py, render_snapshot.c
+fonts/OFL.txt · docs/img/
 ```

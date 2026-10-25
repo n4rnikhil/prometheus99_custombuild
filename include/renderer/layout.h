@@ -17,6 +17,7 @@
 #define INDUSTRIAL_HMI_LAYOUT_H
 
 #include "../config.h"
+#include "../drivers/device_info.h"
 
 #define HMI_LAYOUT_MIN_W      640
 #define HMI_LAYOUT_MIN_H      400
@@ -103,10 +104,29 @@ hmi_rect_t hmi_layout_modal_cancel(int sw, int sh, uint8_t modal);
 hmi_rect_t hmi_layout_modal_role(int sw, int sh, int role);      /* role 0..3 */
 hmi_rect_t hmi_layout_modal_key(int sw, int sh, int key);        /* key 0..11, see HMI_KEY_* */
 
-/* Topmost interactive element at (x, y). tokens/ntok = manifest of the active
- * screen (may be NULL/0). Banner hits are only possible when banner_active.
- * modal = hmi_modal_t currently open (HMI_MODAL_NONE for none). */
+/* --- Plug-and-play dashboard ---
+ * The process screen is split into one panel per present device:
+ *   1 -> full area; 2 -> side by side (or stacked on tall screens);
+ *   3 -> three columns on wide screens, else 2 x 2; 4 -> 2 x 2.
+ * Each panel = a header row (device name, address, status) + a body that shows the
+ * profile's full manifest, or its compact manifest when the body is small. */
+#define HMI_LAYOUT_DEVICE_HEADER_H 34
+#define HMI_LAYOUT_COMPACT_W       620
+#define HMI_LAYOUT_COMPACT_H       260
+
+hmi_rect_t hmi_layout_device_panel(hmi_rect_t content, int ndev, int idx);
+hmi_rect_t hmi_layout_device_body(hmi_rect_t panel);
+bool       hmi_layout_device_compact(hmi_rect_t body);
+/* The manifest a device shows in a body of this size */
+const uint32_t* hmi_layout_device_manifest(const hmi_device_profile_t *p, hmi_rect_t body, uint8_t *count);
+
+/* Topmost interactive element at (x, y).
+ *   tokens/ntok : manifest of a fixed-manifest screen (telemetry), may be NULL/0
+ *   devs/ndev   : present devices in display order (process screen), may be NULL/0
+ *   modal       : hmi_modal_t currently open (HMI_MODAL_NONE for none)
+ * HMI_HIT_WIDGET_BUTTON returns the ABSOLUTE tag id of the button. */
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
-                              const uint32_t *tokens, uint8_t ntok, int x, int y);
+                              const uint32_t *tokens, uint8_t ntok,
+                              const hmi_device_info_t *devs, uint8_t ndev, int x, int y);
 
 #endif /* INDUSTRIAL_HMI_LAYOUT_H */

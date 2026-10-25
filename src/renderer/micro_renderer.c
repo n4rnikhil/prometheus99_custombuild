@@ -10,7 +10,6 @@
 
 #include "../../include/renderer/micro_renderer.h"
 #include "../../include/renderer/clut16.h"
-#include "../../include/drivers/driver_modbus.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -561,8 +560,10 @@ static void w_card(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t
     else if (!tag_value(v, tag, &val, &q)) { st = "No data"; col = C_RED; }
     else {
         uint8_t sev = point_sev(v, tag);
-        if (sev >= ALARM_SEV_CRITICAL) { st = "High-high"; col = C_RED; }
-        else if (sev == ALARM_SEV_WARNING) { st = "High"; col = C_ORANGE; }
+        const hmi_tag_meta_t *mm = hmi_tag_get_meta(tag);
+        bool dig = mm && mm->type == TAG_TYPE_DIGITAL;
+        if (sev >= ALARM_SEV_CRITICAL) { st = dig ? "Alarm" : "High-high"; col = C_RED; }
+        else if (sev == ALARM_SEV_WARNING) { st = dig ? "Alarm" : "High"; col = C_ORANGE; }
         else if (q == QUALITY_SIMULATED) { st = "Simulated"; col = C_TEAL; }
     }
     /* Narrow card: the title wins, the status shrinks to its dot */
@@ -672,33 +673,46 @@ static void w_pill(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t
     chip(r, p, dot, t, C_TEXT);
 }
 
-static void w_button(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
+static void w_button(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag,
+                     const hmi_device_info_t *dev, uint8_t rel)
 {
     if (!band_hits(r, b.y, b.h)) return;
     int16_t val; uint8_t q;
-    bool ok = tag_value(v, tag, &val, &q) && !v->data_stale;
-    char label[48];
+    bool ok = tag_value(v, tag, &val, &q) && !v->data_stale && dev && dev->state == HMI_DEV_ONLINE;
+    char label[56];
     btn_style_t st = BTN_PLAIN;
-    hmi_command_t cmd = HMI_CMD_PUMP_TOGGLE;
+    const hmi_device_action_t *a = dev ? hmi_profile_action(dev->profile, rel) : NULL;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
 
-    if (tag == SCHNEIDER_TAG_PUMP_RUNNING) {
-        bool estop = v->tags && v->tags->tags[SCHNEIDER_TAG_ESTOP_ACTIVE].value != 0;
-        if (ok && val) { snprintf(label, sizeof(label), "Stop pump"); st = BTN_DANGER; }
-        else { snprintf(label, sizeof(label), estop ? "Start blocked: E-stop" : "Start pump"); st = estop ? BTN_DISABLED : BTN_PRIMARY; }
-    } else if (tag == SCHNEIDER_TAG_VALVE_POS) {
-        cmd = HMI_CMD_VALVE_TOGGLE;
-        snprintf(label, sizeof(label), "Move valve to %d %%", ok ? (int)hmi_valve_toggle_target(val) : 85);
-    } else {
+    if (!a) {
         nice_name(label, sizeof(label), m ? m->name : "Action");
+        st = BTN_DISABLED;
+    } else if (a->kind == HMI_ACT_TOGGLE_COIL) {
+        bool on = ok && val != 0;
+        bool blocked = !on && a->block_tag != HMI_REL_NONE && v->tags &&
+                       v->tags->tags[HMI_DEV_TAG(dev->slot, a->block_tag)].value != 0;
+        if (blocked) {
+            const hmi_tag_meta_t *bm = hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, a->block_tag));
+            snprintf(label, sizeof(label), "Blocked: %s", bm ? bm->name : "interlock");
+            st = BTN_DISABLED;
+        } else {
+            snprintf(label, sizeof(label), "%s", on ? a->label_on : a->label_off);
+            st = on ? BTN_DANGER : BTN_PRIMARY;
+        }
+    } else {
+        char num[16], tv[24];
+        int16_t target = hmi_action_reg_target(a, ok ? val : a->threshold);
+        hmi_format_scaled(num, sizeof(num), target, m ? m->decimals : 0);
+        snprintf(tv, sizeof(tv), "%s %s", num, (m && m->unit) ? m->unit : "");
+        snprintf(label, sizeof(label), (ok && val > a->threshold) ? a->label_on : a->label_off, tv);
     }
-    if (!ok || !role_allows(v, cmd)) st = BTN_DISABLED;
+    if (!ok || (a && !role_allows(v, (hmi_command_t)a->command))) st = BTN_DISABLED;
     int h = b.h < HMI_LAYOUT_BUTTON_H ? b.h : HMI_LAYOUT_BUTTON_H;
     hmi_rect_t bb = { b.x, b.y + (b.h - h) / 2, b.w, h };
     button(r, bb, label, st);
 }
 
-static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
+static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag, uint8_t slot)
 {
     if (!band_hits(r, b.y, b.h)) return;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
@@ -721,7 +735,7 @@ static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_
     }
 
     int16_t samples[HMI_TREND_SAMPLES];
-    uint8_t n = v->tags ? hmi_tags_copy_trend(v->tags, samples, HMI_TREND_SAMPLES) : 0;
+    uint8_t n = v->tags ? hmi_tags_copy_trend(v->tags, slot, samples, HMI_TREND_SAMPLES) : 0;
     if (n < 2) {
         hmi_draw_text(r, &hmi_font_body, p.x + 4, p.y + p.h / 2 - 8, "Collecting data...", C_DIM);
         return;
@@ -803,31 +817,139 @@ static void w_pump(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t
     hmi_draw_circle(r, cx, cy, 5, col);
 }
 
-static void render_manifest(hmi_renderer_t *r, const hmi_view_t *v, const uint32_t *tok, uint8_t n, hmi_rect_t content)
+/* Card that stands for the whole device (manifest tag HMI_REL_DEVICE) */
+static void w_device_card(hmi_renderer_t *r, hmi_rect_t b, const hmi_device_info_t *dev)
+{
+    if (!band_hits(r, b.y, b.h)) return;
+    hmi_draw_round_frame(r, b.x, b.y, b.w, b.h, 14, C_CARD, C_LINE);
+    char t[64];
+    if (dev->product[0]) snprintf(t, sizeof(t), "%s", dev->product);
+    else snprintf(t, sizeof(t), "%s registers", dev->profile ? dev->profile->name : "Device");
+    text_fit(r, &hmi_font_title, b.x + 16, b.y + 12, b.w - 32, t, C_TEXT);
+}
+
+/* Draw a manifest. dev == NULL: token tags are absolute (fixed screens).
+ * dev != NULL: token tags are relative to the device's tag block. */
+static void render_manifest(hmi_renderer_t *r, const hmi_view_t *v, const uint32_t *tok, uint8_t n,
+                            hmi_rect_t content, const hmi_device_info_t *dev)
 {
     if (!tok) return;
-    int hero_font = 0;                       /* one hero size per screen, set by the tightest widget */
+    int hero_font = 0;                       /* one hero size per manifest, set by the tightest widget */
     for (uint8_t i = 0; i < n; i++) {
         if (hmi_token_get_type(tok[i]) != WIDGET_HERO_DIGIT) continue;
-        int f = hero_fit(hmi_layout_token_rect(tok[i], content), v, hmi_token_get_tag(tok[i]));
+        uint8_t t = hmi_token_get_tag(tok[i]);
+        if (dev) t = HMI_DEV_TAG(dev->slot, t);
+        int f = hero_fit(hmi_layout_token_rect(tok[i], content), v, t);
         if (f > hero_font) hero_font = f;
     }
     for (uint8_t i = 0; i < n; i++) {
         hmi_rect_t b = hmi_layout_token_rect(tok[i], content);
         if (!band_hits(r, b.y - 4, b.h + 8)) continue;    /* bounding-box culling per band */
-        uint8_t tag = hmi_token_get_tag(tok[i]);
+        uint8_t rel = hmi_token_get_tag(tok[i]);
+        uint8_t type = hmi_token_get_type(tok[i]);
+        if (dev && rel == HMI_REL_DEVICE) {
+            if (type == WIDGET_CONTAINER_CARD) w_device_card(r, b, dev);
+            continue;
+        }
+        if (dev && rel >= HMI_DEVICE_TAG_SPAN) continue;
+        uint8_t tag = dev ? HMI_DEV_TAG(dev->slot, rel) : rel;
         if (tag >= HMI_MAX_TAGS) continue;
-        switch (hmi_token_get_type(tok[i])) {
+        switch (type) {
             case WIDGET_CONTAINER_CARD: w_card(r, b, v, tag);   break;
             case WIDGET_HERO_DIGIT:     w_hero(r, b, v, tag, hero_font); break;
             case WIDGET_ANALOG_BAR:     w_bar(r, b, v, tag);    break;
             case WIDGET_STATUS_PILL:    w_pill(r, b, v, tag);   break;
-            case WIDGET_ACTION_BUTTON:  w_button(r, b, v, tag); break;
-            case WIDGET_TREND_SPARK:    w_trend(r, b, v, tag);  break;
+            case WIDGET_ACTION_BUTTON:  w_button(r, b, v, tag, dev, rel); break;
+            case WIDGET_TREND_SPARK:    w_trend(r, b, v, tag, dev ? dev->slot : 0); break;
             case WIDGET_TANK:           w_tank(r, b, v, tag);   break;
             case WIDGET_PUMP:           w_pump(r, b, v, tag);   break;
             default: break;
         }
+    }
+}
+
+/* ========================================================================= */
+/* Plug-and-play dashboard                                                    */
+/* ========================================================================= */
+
+static void device_status(const hmi_device_info_t *d, char *out, size_t cap, uint8_t *col)
+{
+    switch (d->state) {
+        case HMI_DEV_ONLINE:     snprintf(out, cap, d->transport == HMI_TRANSPORT_SIM ? "Simulated" : "Online"); *col = C_GREEN; break;
+        case HMI_DEV_CONNECTING: snprintf(out, cap, "Connecting"); *col = C_ORANGE; break;
+        case HMI_DEV_OFFLINE:
+            if (d->remove_in_ms) snprintf(out, cap, "Offline - removing in %lu s", (unsigned long)((d->remove_in_ms + 999u) / 1000u));
+            else snprintf(out, cap, "Offline - reconnecting");
+            *col = C_RED;
+            break;
+        default: snprintf(out, cap, "Empty"); *col = C_DIM; break;
+    }
+}
+
+static void device_header(hmi_renderer_t *r, hmi_rect_t p, const hmi_device_info_t *d)
+{
+    if (!band_hits(r, p.y, HMI_LAYOUT_DEVICE_HEADER_H)) return;
+    char st[40], sub[80];
+    uint8_t col;
+    device_status(d, st, sizeof(st), &col);
+    int stw = hmi_text_width(&hmi_font_body_b, st);
+    int right = p.x + p.w - 4;
+    text_right(r, &hmi_font_body_b, right, p.y + 7, st, col);
+
+    hmi_draw_circle(r, p.x + 7, p.y + 15, 5, col);
+    int x = hmi_draw_text(r, &hmi_font_title, p.x + 20, p.y + 5, d->label, C_TEXT);
+    if (d->product[0]) snprintf(sub, sizeof(sub), "%s  -  %s", d->endpoint, d->product);
+    else snprintf(sub, sizeof(sub), "%s", d->endpoint);
+    text_fit(r, &hmi_font_caption, x + 10, p.y + 9, right - stw - 16 - (x + 10), sub, C_MUTED);
+}
+
+static void render_empty_dashboard(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t c)
+{
+    if (!band_hits(r, c.y, c.h)) return;
+    int cx = c.x + c.w / 2, cy = c.y + c.h / 2 - 30;
+    /* radar: rings + a sweep that turns with time */
+    for (int k = 3; k >= 1; k--) {
+        hmi_draw_circle(r, cx, cy, 14 * k + 1, C_LINE);
+        hmi_draw_circle(r, cx, cy, 14 * k - 1, C_BG);
+    }
+    int a = (int)((v->now_ms / 60u) & 31u);
+    hmi_draw_line(r, cx, cy, cx + (icos(a) * 40) / 256, cy + (isin(a) * 40) / 256, 3, C_BLUE);
+    hmi_draw_circle(r, cx, cy, 4, C_BLUE);
+
+    hmi_rect_t t1 = { c.x, cy + 54, c.w, 28 };
+    text_center(r, &hmi_font_headline, t1, "Searching for PLCs", C_TEXT);
+    char line[96];
+    if (v->disc && v->disc->sweeps)
+        snprintf(line, sizeof(line), "Checking %lu address(es) every %u s - plug a PLC into the network",
+                 (unsigned long)v->disc->targets, (unsigned)(HMI_DISCOVERY_PERIOD_MS / 1000u));
+    else
+        snprintf(line, sizeof(line), "Plug a PLC into the network; it appears here automatically");
+    hmi_rect_t t2 = { c.x, cy + 84, c.w, 18 };
+    text_center(r, &hmi_font_body, t2, line, C_MUTED);
+    hmi_rect_t t3 = { c.x, cy + 104, c.w, 16 };
+    char drv[96];
+    size_t n = (size_t)snprintf(drv, sizeof(drv), "Driver modules:");
+    for (uint8_t i = 0; i < hmi_profile_count() && n < sizeof(drv); i++) {
+        const hmi_device_profile_t *p = hmi_profile_at(i);
+        if (!p->auto_attach) continue;                      /* only modules that attach on their own */
+        int k = snprintf(drv + n, sizeof(drv) - n, "%s %s", n > 16 ? "," : "", p->name);
+        if (k > 0) n += (size_t)k;
+    }
+    text_center(r, &hmi_font_caption, t3, drv, C_DIM);
+}
+
+static void render_devices(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t c)
+{
+    if (!v->devices || v->ndev == 0) { render_empty_dashboard(r, v, c); return; }
+    for (uint8_t d = 0; d < v->ndev; d++) {
+        const hmi_device_info_t *dev = &v->devices[d];
+        hmi_rect_t p = hmi_layout_device_panel(c, v->ndev, d);
+        if (!band_hits(r, p.y, p.h)) continue;
+        device_header(r, p, dev);
+        hmi_rect_t body = hmi_layout_device_body(p);
+        uint8_t nt = 0;
+        const uint32_t *tk = hmi_layout_device_manifest(dev->profile, body, &nt);
+        render_manifest(r, v, tk, nt, body, dev);
     }
 }
 
@@ -853,8 +975,14 @@ static void render_header(hmi_renderer_t *r, const hmi_view_t *v)
     int avail = theme.x - 8 - 56;
     text_fit(r, &hmi_font_title, 56, 9, avail, "Prometheus HMI", C_TEXT);
     char sub[96];
-    if (v->plc && v->plc->mode == HMI_DRV_MODE_MODBUS_TCP) snprintf(sub, sizeof(sub), "Modicon M580  -  %s", v->plc->endpoint);
-    else snprintf(sub, sizeof(sub), "Modicon M580  -  Simulator");
+    unsigned online = 0, offline = 0;
+    for (uint8_t i = 0; v->devices && i < v->ndev; i++) {
+        if (v->devices[i].state == HMI_DEV_ONLINE) online++;
+        else if (v->devices[i].state == HMI_DEV_OFFLINE) offline++;
+    }
+    if (!v->ndev) snprintf(sub, sizeof(sub), "Searching for PLCs...");
+    else if (offline) snprintf(sub, sizeof(sub), "%u online, %u offline", online, offline);
+    else snprintf(sub, sizeof(sub), "%u device%s online", online, online == 1 ? "" : "s");
     text_fit(r, &hmi_font_caption, 56, 30, avail, sub, C_MUTED);
 
     /* Theme toggle (moon) */
@@ -871,7 +999,10 @@ static void render_header(hmi_renderer_t *r, const hmi_view_t *v)
     else if (v->wd && !v->wd->fieldbus_alive)   { ht = "Watchdog trip";  hc = C_RED; }
     else if (!v->ui_wd_alive)                   { ht = "UI stalled";     hc = C_ORANGE; }
     else if (v->wd && v->wd->failover_active)   { ht = "Failover latch"; hc = C_ORANGE; }
-    else if (v->plc && v->plc->link_state != HMI_LINK_UP) { ht = "PLC offline"; hc = C_RED; }
+    else {
+        for (uint8_t i = 0; v->devices && i < v->ndev; i++)
+            if (v->devices[i].state == HMI_DEV_OFFLINE) { ht = "PLC offline"; hc = C_RED; }
+    }
     chip(r, hmi_layout_health_pill(sw, sh), hc, ht, C_TEXT);
 
     /* Alarm summary */
@@ -1071,59 +1202,71 @@ static void render_diagnostics(hmi_renderer_t *r, const hmi_view_t *v, bool bann
         if (rows-- > 0) { kv_row(r, x, y, w, "Seqlock retries", b1, C_TEXT); }
     }
 
-    /* PLC link */
-    card(r, c2, "PLC link");
+    /* Devices */
+    card(r, c2, "Devices");
     if (band_hits(r, c2.y, c2.h)) {
         int x = c2.x + 16, w = c2.w - 32, y = c2.y + 42;
-        int rows = (c2.h - 50) / rh;
-        const hmi_driver_stats_t *p = v->plc;
-        if (p) {
-            static const char * const ls[3] = { "Down", "Connecting", "Up" };
-            uint8_t lc = p->link_state == HMI_LINK_UP ? C_GREEN : p->link_state == HMI_LINK_CONNECTING ? C_ORANGE : C_RED;
-            if (rows-- > 0) { kv_row(r, x, y, w, "Mode", p->mode == HMI_DRV_MODE_MODBUS_TCP ? "Modbus TCP" : "Simulator", C_TEXT); y += rh; }
-            if (rows-- > 0) { kv_row(r, x, y, w, "Endpoint", p->endpoint, C_TEXT); y += rh; }
-            if (rows-- > 0) { kv_row(r, x, y, w, "Link", ls[p->link_state < 3 ? p->link_state : 0], lc); y += rh; }
-            snprintf(b1, sizeof(b1), "%lu / %lu", (unsigned long)p->responses_ok, (unsigned long)p->requests_sent);
-            if (rows-- > 0) { kv_row(r, x, y, w, "Replies / requests", b1, C_TEXT); y += rh; }
-            snprintf(b1, sizeof(b1), "%lu", (unsigned long)p->timeouts);
-            if (rows-- > 0) { kv_row(r, x, y, w, "Timeouts", b1, p->timeouts ? C_ORANGE : C_TEXT); y += rh; }
-            snprintf(b1, sizeof(b1), "%lu / %lu", (unsigned long)p->exceptions, (unsigned long)p->protocol_errors);
-            if (rows-- > 0) { kv_row(r, x, y, w, "Exceptions / errors", b1, (p->exceptions || p->protocol_errors) ? C_ORANGE : C_TEXT); y += rh; }
-            snprintf(b1, sizeof(b1), "%lu", (unsigned long)p->reconnects);
-            if (rows-- > 0) { kv_row(r, x, y, w, "Connections", b1, C_TEXT); y += rh; }
-            snprintf(b1, sizeof(b1), "%lu / %lu us", (unsigned long)p->last_rtt_us, (unsigned long)p->max_rtt_us);
-            if (rows-- > 0) { kv_row(r, x, y, w, "RTT last / max", b1, C_TEXT); y += rh; }
-            snprintf(b1, sizeof(b1), "%lu / %lu", (unsigned long)p->writes_ok, (unsigned long)p->writes_failed);
-            if (rows-- > 0) { kv_row(r, x, y, w, "Writes ok / failed", b1, p->writes_failed ? C_ORANGE : C_TEXT); }
+        if (!v->ndev) hmi_draw_text(r, &hmi_font_body, x, y, "No PLC connected", C_MUTED);
+        for (uint8_t d = 0; v->devices && d < v->ndev && y + 38 <= c2.y + c2.h - 24; d++) {
+            const hmi_device_info_t *dv = &v->devices[d];
+            char st[40];
+            uint8_t col;
+            device_status(dv, st, sizeof(st), &col);
+            hmi_draw_circle(r, x + 4, y + 8, 4, col);
+            text_fit(r, &hmi_font_body_b, x + 14, y, w - 14 - 70, dv->label, C_TEXT);
+            if (dv->transport == HMI_TRANSPORT_TCP) {
+                snprintf(b1, sizeof(b1), "%lu.%lu ms", (unsigned long)(dv->rtt_us / 1000u), (unsigned long)((dv->rtt_us / 100u) % 10u));
+                text_right(r, &hmi_font_body_b, x + w, y, b1, C_TEXT);
+                snprintf(b2, sizeof(b2), "%s  ok %lu/%lu  to %lu", dv->endpoint, (unsigned long)dv->responses,
+                         (unsigned long)dv->requests, (unsigned long)dv->timeouts);
+            } else {
+                snprintf(b2, sizeof(b2), "%s", st);
+            }
+            text_fit(r, &hmi_font_caption, x + 14, y + 18, w - 14, b2, C_MUTED);
+            y += 40;
+        }
+        if (v->disc && band_hits(r, c2.y + c2.h - 26, 20)) {
+            snprintf(b1, sizeof(b1), "Discovery: %lu targets, sweep %lu ms",
+                     (unsigned long)v->disc->targets, (unsigned long)v->disc->last_sweep_ms);
+            text_fit(r, &hmi_font_caption, x, c2.y + c2.h - 24, w, b1, C_DIM);
         }
     }
 
-    /* Register map */
+    /* Register map of the first device: straight from its driver profile */
+    const hmi_device_info_t *d0 = (v->devices && v->ndev) ? &v->devices[0] : NULL;
     card(r, c3, "Register map");
     if (band_hits(r, c3.y, c3.h)) {
         int x = c3.x + 16, w = c3.w - 32, y = c3.y + 44;
-        int cx1 = x, cx2 = x + w * 18 / 100, cx3 = x + w * 72 / 100, cx4 = x + w;
-        hmi_draw_text(r, &hmi_font_caption, cx1, y, "ADDR", C_DIM);
-        hmi_draw_text(r, &hmi_font_caption, cx2, y, "TAG", C_DIM);
-        text_right(r, &hmi_font_caption, cx3 + w * 10 / 100, y, "VALUE", C_DIM);
-        text_right(r, &hmi_font_caption, cx4, y, "RAW", C_DIM);
-        y += 18;
-        separator(r, x, y - 3, w);
-        static const uint8_t ids[] = { 0, 1, 2, 3, 4, 5, 6, 7, 12 };
-        static const char * const addr[] = { "%MW0", "%MW1", "%MW2", "%MW3", "%MW4", "%M0", "%M1", "%M2", "LINK" };
-        for (unsigned i = 0; i < sizeof(ids) && y + 18 <= c3.y + c3.h - 8; i++) {
-            const hmi_tag_meta_t *m = hmi_tag_get_meta(ids[i]);
-            if (!m) continue;
-            int16_t val; uint8_t q;
-            bool ok = tag_value(v, ids[i], &val, &q);
-            nice_name(b1, sizeof(b1), m->name);
-            hmi_draw_text(r, &hmi_font_body, cx1, y, addr[i], C_MUTED);
-            text_fit(r, &hmi_font_body, cx2, y, cx3 - cx2 - 40, b1, C_TEXT);
-            fmt_value(b2, sizeof(b2), v, ids[i]);
-            text_right(r, &hmi_font_body_b, cx3 + w * 10 / 100, y, b2, ok ? C_TEXT : C_RED);
-            snprintf(b2, sizeof(b2), "%04X", (unsigned)(uint16_t)val);
-            text_right(r, &hmi_font_body, cx4, y, b2, ok ? C_MUTED : C_RED);
-            y += 20;
+        int cx1 = x, cx2 = x + w * 20 / 100, cx3 = x + w * 74 / 100, cx4 = x + w;
+        if (!d0 || !d0->profile) {
+            hmi_draw_text(r, &hmi_font_body, x, y, "No PLC connected", C_MUTED);
+        } else {
+            hmi_draw_text(r, &hmi_font_caption, cx1, y, "ADDR", C_DIM);
+            hmi_draw_text(r, &hmi_font_caption, cx2, y, d0->label, C_DIM);
+            text_right(r, &hmi_font_caption, cx3 + w * 8 / 100, y, "VALUE", C_DIM);
+            text_right(r, &hmi_font_caption, cx4, y, "RAW", C_DIM);
+            y += 18;
+            separator(r, x, y - 3, w);
+            const hmi_device_profile_t *p = d0->profile;
+            for (int blk = 0; blk < 2; blk++) {
+                const hmi_block_map_t *bm = blk == 0 ? &p->regs : &p->coils;
+                for (uint8_t i = 0; i < bm->count && y + 18 <= c3.y + c3.h - 8; i++) {
+                    uint8_t rel = bm->rel_tags[i];
+                    if (rel == HMI_REL_NONE) continue;
+                    uint8_t id = HMI_DEV_TAG(d0->slot, rel);
+                    const hmi_tag_meta_t *m = hmi_tag_get_meta(id);
+                    int16_t val; uint8_t q;
+                    bool ok = tag_value(v, id, &val, &q);
+                    snprintf(b1, sizeof(b1), blk == 0 ? "%%MW%u" : "%%M%u", (unsigned)(bm->start + i));
+                    hmi_draw_text(r, &hmi_font_body, cx1, y, b1, C_MUTED);
+                    text_fit(r, &hmi_font_body, cx2, y, cx3 - cx2 - 36, m ? m->name : "-", C_TEXT);
+                    fmt_value(b2, sizeof(b2), v, id);
+                    text_right(r, &hmi_font_body_b, cx3 + w * 8 / 100, y, b2, ok ? C_TEXT : C_RED);
+                    snprintf(b2, sizeof(b2), "%04X", (unsigned)(uint16_t)val);
+                    text_right(r, &hmi_font_body, cx4, y, b2, ok ? C_MUTED : C_RED);
+                    y += 20;
+                }
+            }
         }
     }
 }
@@ -1138,7 +1281,11 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
     screen_title(r, v, "Alarms", (sw >= 900) ? b1 : NULL);
 
     bool can_ack = role_allows(v, HMI_CMD_ACK_ALARMS);
-    bool estop = v->tags && v->tags->tags[SCHNEIDER_TAG_ESTOP_ACTIVE].value != 0;
+    bool estop = false;
+    for (uint8_t d = 0; v->devices && v->tags && d < v->ndev; d++) {
+        const hmi_device_profile_t *p = v->devices[d].profile;
+        if (p && p->estop_tag != HMI_REL_NONE && v->tags->tags[HMI_DEV_TAG(v->devices[d].slot, p->estop_tag)].value) estop = true;
+    }
     button(r, hmi_layout_screen_button(sw, sh, banner, HMI_HIT_ALARM_ACK), "Acknowledge all",
            (can_ack && al && al->unacked_count) ? BTN_PRIMARY : BTN_DISABLED);
     button(r, hmi_layout_screen_button(sw, sh, banner, HMI_HIT_ALARM_SILENCE), "Silence horn",
@@ -1171,7 +1318,8 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
                 uint8_t sc = sev_color(pt->peak_severity);
                 hmi_draw_circle(r, x + 5, y + 8, 4, sc);
                 hmi_draw_text(r, &hmi_font_body_b, x + 16, y, sev_label(pt->peak_severity), sc);
-                nice_name(b1, sizeof(b1), m ? m->name : "Tag");
+                if (m && m->group) snprintf(b1, sizeof(b1), "%s: %s", m->group, m->name);
+                else nice_name(b1, sizeof(b1), m ? m->name : "Tag");
                 text_fit(r, &hmi_font_body, col_name, y, col_val - col_name - 70, b1, C_TEXT);
                 fmt_value(b2, sizeof(b2), v, (uint8_t)i);
                 if (m && m->type == TAG_TYPE_ANALOG) {
@@ -1402,8 +1550,8 @@ void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t 
     hmi_rect_t content = hmi_layout_content(r->screen_w, r->screen_h, banner);
 
     switch (v->active_screen) {
-        case SCREEN_PROCESS_OVERVIEW: render_manifest(r, v, v->tokens_process, v->ntok_process, content); break;
-        case SCREEN_HOST_TELEMETRY:   render_manifest(r, v, v->tokens_host, v->ntok_host, content); break;
+        case SCREEN_PROCESS_OVERVIEW: render_devices(r, v, content); break;
+        case SCREEN_HOST_TELEMETRY:   render_manifest(r, v, v->tokens_host, v->ntok_host, content, NULL); break;
         case SCREEN_FIELD_DIAGNOSTICS: render_diagnostics(r, v, banner); break;
         case SCREEN_ALARM_MATRIX:      render_alarms(r, v, banner); break;
         case SCREEN_SECURITY_SETTINGS: render_settings(r, v, banner); break;

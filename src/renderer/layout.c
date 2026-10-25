@@ -229,6 +229,42 @@ hmi_rect_t hmi_layout_modal_key(int sw, int sh, int key)
     return mk(m.x + 16 + col * (kw + MODAL_GAP), ky + row * (MODAL_ROW_H + MODAL_GAP), kw, MODAL_ROW_H);
 }
 
+/* ---------------- Plug-and-play dashboard ---------------- */
+
+hmi_rect_t hmi_layout_device_panel(hmi_rect_t c, int n, int idx)
+{
+    if (n <= 0 || idx < 0 || idx >= n) return mk(0, 0, 0, 0);
+    int cols = 1, rows = 1;
+    if (n == 2) { if (c.w * 5 >= c.h * 6) cols = 2; else rows = 2; }
+    else if (n == 3) { if (c.w >= 1100) cols = 3; else { cols = 2; rows = 2; } }
+    else if (n >= 4) { cols = 2; rows = 2; }
+    int col = idx % cols, row = idx / cols;
+    int g = HMI_LAYOUT_GAP;
+    int x0 = c.x + (col * (c.w + g)) / cols;
+    int x1 = c.x + ((col + 1) * (c.w + g)) / cols - g;
+    int y0 = c.y + (row * (c.h + g)) / rows;
+    int y1 = c.y + ((row + 1) * (c.h + g)) / rows - g;
+    return mk(x0, y0, x1 - x0, y1 - y0);
+}
+
+hmi_rect_t hmi_layout_device_body(hmi_rect_t p)
+{
+    return mk(p.x, p.y + HMI_LAYOUT_DEVICE_HEADER_H, p.w, p.h - HMI_LAYOUT_DEVICE_HEADER_H);
+}
+
+bool hmi_layout_device_compact(hmi_rect_t body)
+{
+    return body.w < HMI_LAYOUT_COMPACT_W || body.h < HMI_LAYOUT_COMPACT_H;
+}
+
+const uint32_t* hmi_layout_device_manifest(const hmi_device_profile_t *p, hmi_rect_t body, uint8_t *count)
+{
+    if (!p) { if (count) *count = 0; return NULL; }
+    bool compact = hmi_layout_device_compact(body) && p->ui_compact;
+    if (count) *count = compact ? p->n_compact : p->n_full;
+    return compact ? p->ui_compact : p->ui_full;
+}
+
 /* ---------------- Hit test ---------------- */
 
 static bool hit(hmi_rect_t r, int x, int y)
@@ -244,7 +280,8 @@ static hmi_hit_t result(hmi_hit_kind_t k, uint8_t param, hmi_rect_t r)
 }
 
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
-                              const uint32_t *tokens, uint8_t ntok, int x, int y)
+                              const uint32_t *tokens, uint8_t ntok,
+                              const hmi_device_info_t *devs, uint8_t ndev, int x, int y)
 {
     /* The E-STOP is reachable even while a dialog is open */
     {
@@ -307,7 +344,25 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
         if (hit(r, x, y)) return result(btns[i], 0, r);
     }
 
-    /* Manifest buttons */
+    /* Device panels (process screen) */
+    if (screen == SCREEN_PROCESS_OVERVIEW && devs) {
+        hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
+        for (uint8_t d = 0; d < ndev; d++) {
+            hmi_rect_t body = hmi_layout_device_body(hmi_layout_device_panel(c, ndev, d));
+            uint8_t nt = 0;
+            const uint32_t *tk = hmi_layout_device_manifest(devs[d].profile, body, &nt);
+            for (uint8_t i = 0; tk && i < nt; i++) {
+                if (hmi_token_get_type(tk[i]) != WIDGET_ACTION_BUTTON) continue;
+                uint8_t rel = hmi_token_get_tag(tk[i]);
+                if (rel >= HMI_DEVICE_TAG_SPAN) continue;
+                hmi_rect_t r = hmi_layout_token_rect(tk[i], body);
+                if (hit(r, x, y)) return result(HMI_HIT_WIDGET_BUTTON, HMI_DEV_TAG(devs[d].slot, rel), r);
+            }
+        }
+        return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
+    }
+
+    /* Fixed-manifest buttons */
     if (tokens) {
         hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
         for (uint8_t i = 0; i < ntok; i++) {
