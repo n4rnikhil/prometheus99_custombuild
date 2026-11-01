@@ -81,8 +81,9 @@ been checked against its device.
 
 ## Before the runtime touches a real machine
 
-1. Set every role's site PIN: `industrial_hmi --set-pin operator` (and maintenance, engineer).
-   Do not copy `--allow-factory-pins` from the bench configuration.
+1. Set every role's site PIN, as the account the HMI runs under:
+   `industrial_hmi --set-pin operator` (and maintenance, engineer). Do not copy
+   `--allow-factory-pins` from the bench configuration (a commissioned panel refuses it anyway).
 2. Keep `hmi.key` and `security.vault` on the panel PC only, readable by the HMI account.
 3. Put the PCs, panels, PLCs and drives on their own control network. Modbus TCP has no
    authentication: anyone on that network can write to the PLCs directly, with or without this HMI.

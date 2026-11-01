@@ -53,7 +53,7 @@ static const sim_type_info_t s_types[SIM_TYPE_COUNT] = {
         E("Control mode",          HW | LB, 6, 1, "Manual|Auto"),
         C("Feed pump A",           HW | LB, 0, BIT(2) | BIT(4)),
         C("Coolant pump B",        HW | LB, 1, BIT(2)),
-        C("E-stop",                HW | LB, 2, 0),
+        C("Stop latch",            HW | LB, 2, 0),
         C("Fault reset",           HW | LB | PL, 3, 0),
         C("Pump A overload",       LB, 4, 0) }, NO_REGS },
     [SIM_ATV340] = { "Altivar ATV340", "Altivar Machine ATV340", "Schneider Electric", "ATV340U07N4E", "V3.3",
@@ -82,7 +82,7 @@ static const sim_type_info_t s_types[SIM_TYPE_COUNT] = {
         C("Burner",                 HW | LB, 0, BIT(2) | BIT(3)),
         C("Flame",                  0, 1, 0),
         C("Low water trip",         LB, 2, 0),
-        C("E-stop",                 HW | LB, 3, 0),
+        C("Stop latch",             HW | LB, 3, 0),
         C("Trip reset",             HW | LB | PL, 4, 0) }, NO_REGS },
     [SIM_PUMPS] = { "Pump station", "Siemens S7-1200", "Siemens", "6ES7 214-1AG40-0XB0", "V4.6", "HMI-PUMPS", true, true, 14, {
         R("Discharge pressure", "bar",  DV | LB, 0, 2, 20, 0, 1200),
@@ -351,7 +351,7 @@ static void step_tank(sim_plc_t *p)
     int16_t *h = p->hr;
     uint8_t *c = p->coils;
     if (c[3]) { c[4] = 0; c[3] = 0; }                               /* fault reset clears the overload trip */
-    if (c[2]) { c[0] = 0; c[1] = 0; }                               /* E-stop latched: pumps off */
+    if (c[2]) { c[0] = 0; c[1] = 0; }                               /* stop latch set: pumps off */
     if (c[4]) c[0] = 0;                                             /* overload trips pump A */
     if (h[6] == 1 && !c[2] && !c[4]) {                              /* Auto: hold the level at its setpoint */
         if (h[0] < h[5] - 20) c[0] = 1;

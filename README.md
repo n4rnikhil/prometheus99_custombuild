@@ -122,6 +122,16 @@ device over Modbus. It depends on this software, the network and each PLC progra
 never replace the hardwired emergency stop that ISO 13850 and IEC 60204-1 require on the
 machine. It is labelled STOP ALL, not E-STOP, for that reason.
 
+## Upgrading an installation from Build-5 or earlier
+
+1. Stop the HMI and keep a copy of `alarms.log` and `security.vault`.
+2. Install the new build. On its first start it creates `hmi.key`; the old log is moved to
+   `alarms.log.v2` (still checkable with `--verify-log`, as integrity only) and a new signed log starts.
+3. The old vault is unsigned and is refused: every role is locked until its PIN is set again.
+   Run, **as the account the HMI runs under**:
+   `industrial_hmi --set-pin operator`, then `maintenance`, then `engineer`.
+4. Remove `--allow-factory-pins` from any site `hmi.cfg` (it is refused on a commissioned panel anyway).
+
 ## Standards
 
 The design follows the standards below. **Nothing is certified**, and this is not a safety system:
@@ -129,8 +139,8 @@ no IEC 61508 / IEC 62061 / ISO 13849 claim is made.
 
 | Standard | What the runtime does | Not done |
 |---|---|---|
-| ISA-101 (HMI design) | dark low-glare display, alarm colours reserved for alarm priorities, faceplates, the same control behaviour on every device, every value shown with its quality, an outdoor high-contrast theme | normal states (Running, Online, System OK) are shown in green, which ISA-101 high-performance practice keeps grey; no site HMI philosophy / style guide |
-| ISA-18.2 / IEC 62682 (alarms) | per-point state machine (unack, acked, return-to-normal unack), priorities, horn with silence, operator guidance for the top alarm, comm-loss alarms, journal sized for floods, event time-stamps | per-alarm acknowledge (only "acknowledge all"), shelving, out-of-service, alarm rationalisation database |
-| ISO 13850 / IEC 60204-1 (stop functions) | STOP ALL never gated; stop-latch reset needs a role and an explicit confirmation and never restarts anything | STOP ALL is a software stop, not an emergency stop (see above) |
-| IEC 62443-4-2 (security, component) | roles with least privilege, auto-logout, PIN lockout, keyed PIN hashes, site PINs required before control (CR 1.5), audit log signed with HMAC-SHA256 under a per-device key (CR 2.8, 3.9), secret files limited to the HMI account | Modbus TCP has no authentication or encryption: segment the control network (IEC 62443-3-3 zones and conduits); no per-person accounts; no remote log forwarding |
+| ISA-101 (HMI design) | dark low-glare display; normal and running states in neutral greys (running brighter than stopped), colour kept for alarms and abnormal states; faceplates; the same control behaviour on every device; every value shown with its quality; an outdoor high-contrast theme | no site HMI philosophy / style guide; not reviewed with operators |
+| ISA-18.2 / IEC 62682 (alarms) | per-point state machine (unack, acked, return-to-normal unack), priorities, per-alarm and acknowledge-all, horn with silence, operator guidance for the top alarm, comm-loss alarms, journal sized for floods, event time-stamps | shelving, out-of-service, alarm rationalisation database (master alarm database) |
+| ISO 13850 / IEC 60204-1 (stop functions) | STOP ALL never gated; the PLC stop latch is named as such on every screen; stop-latch reset needs a role, an acknowledged alarm and an explicit confirmation, and never restarts anything | STOP ALL is a software stop, not an emergency stop (see above) |
+| IEC 62443-4-2 (security, component) | roles with least privilege, auto-logout, PIN lockout, keyed PIN hashes, site PINs required before control and bench mode refused once commissioned (CR 1.5), audit log signed with HMAC-SHA256 (CR 2.8, 3.9), one key per purpose derived with HKDF from a per-device key, secret files limited to the HMI account (POSIX 0600 with owner hand-off; Windows protected DACL) | Modbus TCP has no authentication or encryption: segment the control network (IEC 62443-3-3 zones and conduits); no per-person accounts; no remote log forwarding; PIN lockout is not kept across restarts |
 | Modbus Application Protocol v1.1b3, Messaging on TCP/IP v1.0b | client for FC 01, 03, 05, 06, 43/14; strict frame checks; fault-injection tested | FC 02, 04, 15, 16 (no current driver module needs them) |

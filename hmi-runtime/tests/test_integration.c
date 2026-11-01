@@ -240,14 +240,14 @@ static void test_tank_scenario(void)
     hmi_devmgr_action(0, A_MODE, 0, &g_t, &g_al, 1900);                  /* back to Manual */
     run(1900, 2000);
 
-    /* E-stop trips every device that has one, and blocks restart */
+    /* STOP ALL sets the stop latch of every device that has one, and blocks restart */
     CHECK(hmi_devmgr_estop(true, &g_t, &g_al, 2000) == 2);
     run(2000, 2200);
     CHECK(tag(0, ESTOP) == 1 && tag(0, PUMP_A) == 0);
     hmi_devmgr_action(0, A_START, 0, &g_t, &g_al, 2200);               /* start pump -> blocked by the HMI */
     run(2200, 2400);
-    CHECK(tag(0, PUMP_A) == 0 && journal_has("blocked by Emergency stop"));
-    /* reset refused while the E-stop alarm is unacknowledged, accepted after ack */
+    CHECK(tag(0, PUMP_A) == 0 && journal_has("blocked by Stop latch"));
+    /* reset refused while the stop-latch alarm is unacknowledged, accepted after ack */
     hmi_alarms_evaluate(&g_al, &g_t, 2400);
     CHECK(hmi_devmgr_estop(false, &g_t, &g_al, 2400) == 0);
     hmi_alarms_acknowledge_all(&g_al, 2401);

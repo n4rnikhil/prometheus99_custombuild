@@ -9,7 +9,7 @@
  * Map (%MWn = holding register n, %Mn = coil n):
  *   %MW0 level 0.1 %   %MW1 pump A rpm   %MW2 valve %   %MW3 pressure kPa   %MW4 coolant C
  *   %MW5 level setpoint 0.1 %   %MW6 mode (0 Manual, 1 Auto: the PLC runs pump A to hold the level)
- *   %M0 pump A   %M1 coolant pump B   %M2 E-stop   %M3 fault reset (pulse)   %M4 pump A overload
+ *   %M0 pump A   %M1 coolant pump B   %M2 stop latch (set by the hardwired E-stop chain or by STOP ALL)   %M3 fault reset (pulse)   %M4 pump A overload
  */
 
 #include "devices/device_profile.h"
@@ -32,7 +32,7 @@ static const hmi_tag_meta_t s_meta[] = {
     { TK_MODE,     TAG_TYPE_ANALOG,  "Control mode",   "",    0,    1,    0,    0, 0, 0,                  NULL, NULL, NULL },
     { TK_PUMP_A,   TAG_TYPE_DIGITAL, "Pump A",         "",    0,    1,    0,    0, 0, 0,                  NULL, NULL, NULL },
     { TK_PUMP_B,   TAG_TYPE_DIGITAL, "Coolant pump B", "",    0,    1,    0,    0, 0, 0,                  NULL, NULL, NULL },
-    { TK_ESTOP,    TAG_TYPE_DIGITAL, "Emergency stop", "",    0,    1,    0,    0, 0, ALARM_SEV_ESTOP,    "Make the plant safe before resetting",    "Acknowledge, then press Reset E-stop", NULL },
+    { TK_ESTOP,    TAG_TYPE_DIGITAL, "Stop latch", "",        0,    1,    0,    0, 0, ALARM_SEV_ESTOP,    "Hardwired E-stop pressed? Release it at the machine", "Acknowledge, then Reset stop on Alarms", NULL },
     { TK_TRIP,     TAG_TYPE_DIGITAL, "Pump A overload","",    0,    1,    0,    0, 0, ALARM_SEV_WARNING,  "Check pump A motor and its thermal relay", "Press Reset once the cause is cleared", NULL },
     { TK_COMM,     TAG_TYPE_DIGITAL, "PLC comm loss",  "",    0,    1,    0,    0, 0, ALARM_SEV_CRITICAL, "Check the Ethernet cable and PLC power",  "Verify the PLC address and port", NULL },
 };

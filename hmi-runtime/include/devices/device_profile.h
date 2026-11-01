@@ -144,7 +144,9 @@ typedef struct {
 
     uint8_t  comm_tag;            /* rel digital tag the manager sets while the link is down (CRITICAL alarm) */
     uint8_t  estop_tag;           /* rel tag showing the E-stop state, HMI_REL_NONE = no E-stop */
-    uint16_t estop_coil;          /* coil written by the HMI E-STOP (1 = trip, 0 = reset); 0xFFFF = none */
+    uint16_t estop_coil;          /* the program's stop latch: STOP ALL writes 1, Reset stop writes 0; 0xFFFF = none.
+                                   * The hardwired E-stop chain also sets it inside the PLC; the HMI never
+                                   * replaces that chain. */
     uint8_t  trend_tag;           /* rel tag sampled into this slot's 60 s trend; HMI_REL_NONE = none */
 
     const uint32_t *ui_full;      /* manifest for a large panel */

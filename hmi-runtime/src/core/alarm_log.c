@@ -31,6 +31,9 @@ static uint8_t               s_key[HMI_DEVICE_KEY_LEN];
 static bool                  s_have_key;
 static char                  s_key_id[9] = "NONE";
 static char                  s_note[160];
+static bool                  s_sync_pending;       /* written to the OS, not yet forced to the medium */
+static bool                  s_sync_urgent;        /* a stop / critical record is waiting */
+static uint32_t              s_last_sync_ms;
 
 /* Longest record body (before ",<mac>") that hmi_alarm_log_format_line() can produce: it formats
  * into a 256-byte buffer. Keep in sync with `char body[256]` below. */
@@ -428,13 +431,28 @@ static void append_record(const hmi_alarm_record_t *rec)
         memcpy(s_chain, mac, sizeof(mac));
         s_stats.chain_tail = hex_u32(mac);
         s_stats.records_written++;
+        s_sync_pending = true;
+        if (rec->severity >= ALARM_SEV_CRITICAL) s_sync_urgent = true;
     }
+}
+
+/* Bounded durability: see HMI_ALARM_LOG_SYNC_MS. */
+static void sync_policy(void)
+{
+    if (!s_file || !s_sync_pending) return;
+    uint32_t now = hmi_timer_get_ms();
+    if (!s_sync_urgent && (uint32_t)(now - s_last_sync_ms) < HMI_ALARM_LOG_SYNC_MS) return;
+    if (!hal_file_sync(s_file)) s_stats.write_errors++;
+    else s_stats.medium_syncs++;
+    s_last_sync_ms = now;
+    s_sync_pending = false;
+    s_sync_urgent = false;
 }
 
 void hmi_alarm_log_sync(const hmi_alarm_supervisor_t *snap)
 {
     if (!snap || !s_file) return;
-    if (snap->journal_total == s_last_written_seq) return;
+    if (snap->journal_total == s_last_written_seq) { sync_policy(); return; }
     if (snap->journal_total < s_last_written_seq) s_last_written_seq = 0;   /* supervisor restarted */
 
     uint32_t oldest = (snap->journal_total > snap->journal_count) ? snap->journal_total - snap->journal_count + 1u : 1u;
@@ -456,8 +474,8 @@ void hmi_alarm_log_sync(const hmi_alarm_supervisor_t *snap)
         if (rec) append_record(rec);
         s_last_written_seq = seq;
     }
-    /* Audit records must survive a power cut: push them to the medium after every batch. */
-    if (!hal_file_sync(s_file)) s_stats.write_errors++;
+    if (!hal_file_flush(s_file)) s_stats.write_errors++;   /* to the OS now: survives a runtime crash */
+    sync_policy();                                          /* to the medium: bounded rate */
 }
 
 void hmi_alarm_log_close(void)
@@ -467,6 +485,8 @@ void hmi_alarm_log_close(void)
         hal_file_close(s_file);
         s_file = NULL;
     }
+    s_sync_pending = false;
+    s_sync_urgent = false;
     s_stats.open = false;
 }
 

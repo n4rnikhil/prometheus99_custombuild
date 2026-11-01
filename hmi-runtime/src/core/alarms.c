@@ -137,6 +137,26 @@ uint16_t hmi_alarms_acknowledge_all(hmi_alarm_supervisor_t *sup, uint32_t now_ms
     return count;
 }
 
+bool hmi_alarms_acknowledge_point(hmi_alarm_supervisor_t *sup, uint8_t tag_id, uint32_t now_ms)
+{
+    if (!sup || tag_id >= HMI_MAX_TAGS) return false;
+    hmi_alarm_point_t *pt = &sup->points[tag_id];
+    if (pt->state == ALARM_PT_UNACK) {
+        pt->state = ALARM_PT_ACKED;
+    } else if (pt->state == ALARM_PT_RTN_UNACK) {
+        pt->state = ALARM_PT_NORMAL;
+        pt->peak_severity = ALARM_SEV_NONE;
+    } else {
+        return false;
+    }
+    pt->since_ms = now_ms;
+    bool any_unacked = false;
+    for (uint8_t i = 0; i < HMI_MAX_TAGS; i++)
+        if (sup->points[i].state == ALARM_PT_UNACK || sup->points[i].state == ALARM_PT_RTN_UNACK) any_unacked = true;
+    if (!any_unacked) { sup->horn_sounding = false; sup->horn_silenced = false; }
+    return true;
+}
+
 /* Journal text: deliberately cut to the record size */
 static void msgf(char *out, size_t cap, const char *fmt, ...)
 {

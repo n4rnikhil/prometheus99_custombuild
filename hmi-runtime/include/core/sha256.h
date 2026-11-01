@@ -34,6 +34,11 @@ void hmi_hmac_sha256_update(hmi_hmac_sha256_t *c, const void *data, size_t len);
 void hmi_hmac_sha256_final(hmi_hmac_sha256_t *c, uint8_t out[32]);
 void hmi_hmac_sha256(const void *key, size_t key_len, const void *data, size_t len, uint8_t out[32]);
 
+/* HKDF-SHA256 (RFC 5869): extract with salt (may be NULL), then expand to out_len bytes
+ * (at most 255 * 32). Used to derive one key per purpose from the device key. */
+void hmi_hkdf_sha256(const void *salt, size_t salt_len, const void *ikm, size_t ikm_len,
+                     const void *info, size_t info_len, uint8_t *out, size_t out_len);
+
 /* Constant-time comparison of two n-byte buffers: true if equal. */
 bool hmi_ct_equal(const void *a, const void *b, size_t n);
 

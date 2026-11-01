@@ -108,6 +108,10 @@ static hal_atomic_t g_running = 1;
 #define CMD_BIT_INJECT_FAULT (1 << 6)
 #define CMD_BIT_WD_RESET     (1 << 7)
 static hal_atomic_t g_cmd_bits;
+/* Per-alarm acknowledge requests, one bit per tag (UI sets, fieldbus drains): lock-free and no
+ * request is lost however fast the operator taps. */
+#define ACK_WORDS ((HMI_MAX_TAGS + 31) / 32)
+static hal_atomic_t g_ack_mask[ACK_WORDS];
 /* UI -> fieldbus device commands (SPSC ring: UI produces, fieldbus consumes) */
 #define DEV_CMD_RING 16
 typedef struct { uint8_t slot, action; int16_t value; } dev_cmd_t;
@@ -439,6 +443,20 @@ static void fieldbus_thread(void *param)
         bool stall = false;
         int32_t bits = hal_atomic_exchange(&g_cmd_bits, 0);
         if (bits) fb_handle_commands(bits, &tags, &alarms, &wd, now_ms, &stall);
+        for (int w = 0; w < ACK_WORDS; w++) {
+            uint32_t m = (uint32_t)hal_atomic_exchange(&g_ack_mask[w], 0);
+            for (int b = 0; m && b < 32; b++) {
+                if (!(m & (1u << b))) continue;
+                m &= ~(1u << b);
+                uint8_t tag = (uint8_t)(w * 32 + b);
+                if (!hmi_alarms_acknowledge_point(&alarms, tag, now_ms)) continue;
+                const hmi_tag_meta_t *meta = hmi_tag_get_meta(tag);
+                char msg[57];
+                snprintf(msg, sizeof(msg), "Operator acknowledged: %.20s %.12s",
+                         meta && meta->group ? meta->group : "", meta && meta->name ? meta->name : "alarm");
+                hmi_alarms_log_event(&alarms, now_ms, tag, ALARM_SEV_INFO, ALARM_PT_NORMAL, msg);
+            }
+        }
         fb_handle_device_commands(&tags, &alarms, now_ms);
 
         /* 3. Cyclic I/O */
@@ -749,7 +767,8 @@ static void ui_ask_confirm(const ui_cmd_t *c)
 static void ui_ask_confirm_system(hmi_command_t cmd, int32_t bit, const char *title, const char *detail,
                                   const char *ok, uint32_t now_ms)
 {
-    if (!hmi_security_authorize(&g_security, cmd, now_ms)) { ui_request(cmd, bit, now_ms); return; }  /* denial path */
+    /* Too low a role: ui_request() refuses, counts and reports it once. Checked again on confirm. */
+    if (g_security.current_role < hmi_security_required_role(cmd)) { ui_request(cmd, bit, now_ms); return; }
     snprintf(g_cf_title, sizeof(g_cf_title), "%s", title);
     snprintf(g_cf_detail, sizeof(g_cf_detail), "%s", detail);
     snprintf(g_cf_ok, sizeof(g_cf_ok), "%s", ok);
@@ -1011,6 +1030,32 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
     }
 }
 
+/* Alarms screen: an Ack button on one row acknowledges that alarm only (ISA-18.2). The rows are
+ * the same points, in the same order and geometry, as the renderer draws them. */
+static bool ui_alarm_row_tap(int x, int y, uint32_t now_ms)
+{
+    if (g_modal != HMI_MODAL_NONE || g_active_screen != SCREEN_ALARM_MATRIX || !g_have_snapshot) return false;
+    const hmi_alarm_supervisor_t *al = &g_snap.alarms;
+    int nact = 0;
+    for (int i = 0; i < HMI_MAX_TAGS; i++) if (al->points[i].state != ALARM_PT_NORMAL) nact++;
+    if (!nact) return false;
+    hmi_rect_t ca = hmi_layout_alarm_active_card(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active(), nact);
+    int rows = hmi_layout_alarm_rows(ca), row = 0;
+    for (int i = 0; i < HMI_MAX_TAGS && row < rows; i++) {
+        uint8_t st = al->points[i].state;
+        if (st == ALARM_PT_NORMAL) continue;
+        if (hmi_rect_contains(hmi_layout_alarm_row_ack(ca, row), x, y)) {
+            if (st != ALARM_PT_UNACK && st != ALARM_PT_RTN_UNACK) return true;   /* nothing to acknowledge */
+            ui_request(HMI_CMD_ACK_ALARMS, 0, now_ms);                         /* role check, denial report */
+            if (g_security.current_role >= hmi_security_required_role(HMI_CMD_ACK_ALARMS))
+                hal_atomic_or(&g_ack_mask[i / 32], (int32_t)(1u << (i % 32)));
+            return true;
+        }
+        row++;
+    }
+    return false;
+}
+
 static void ui_handle_key(uint16_t key, bool shift, uint32_t now_ms)
 {
     if (key == 'E') {                     /* STOP ALL works in every state, dialog or not */
@@ -1252,6 +1297,8 @@ void app_pointer_up(int x, int y)
         ui_navigate(1);
     } else if (g == GESTURE_SWIPE_RIGHT && g_modal == HMI_MODAL_NONE) {
         ui_navigate(-1);
+    } else if (g == GESTURE_TAP && ui_alarm_row_tap(tx, ty, now_ms)) {
+        /* handled: a per-alarm Ack button */
     } else if (g == GESTURE_TAP) {
         uint8_t ntok = 0;
         const uint32_t *tok = ui_active_tokens(&ntok);
@@ -1324,10 +1371,18 @@ static hmi_key_status_t device_key_setup(bool create, hmi_security_ctx_t *sec)
 {
     hmi_key_status_t st = hmi_device_key_load(g_key_path, create, g_device_key);
     bool ok = st == HMI_KEY_LOADED || st == HMI_KEY_CREATED;
-    if (!ok) hal_secure_zero(g_device_key, sizeof(g_device_key));
-    hmi_alarm_log_set_key(ok ? g_device_key : NULL);
-    if (sec) hmi_security_set_device_key(sec, ok ? g_device_key : NULL);
-    if (st == HMI_KEY_CREATED) hal_file_restrict(g_key_path);
+    uint8_t k[HMI_DEVICE_KEY_LEN];
+    if (ok) {                                   /* one key per purpose (HKDF), never the master itself */
+        hmi_device_key_derive(g_device_key, HMI_KEY_PURPOSE_AUDIT_LOG, k);
+        hmi_alarm_log_set_key(k);
+        hmi_device_key_derive(g_device_key, HMI_KEY_PURPOSE_CREDENTIALS, k);
+        if (sec) hmi_security_set_device_key(sec, k);
+        hal_secure_zero(k, sizeof(k));
+    } else {
+        hmi_alarm_log_set_key(NULL);
+        if (sec) hmi_security_set_device_key(sec, NULL);
+    }
+    hal_secure_zero(g_device_key, sizeof(g_device_key));   /* the master is not kept in memory */
     return st;
 }
 
@@ -1364,7 +1419,11 @@ static bool vault_save(const hmi_security_ctx_t *sec)
     snprintf(tmp, sizeof(tmp), "%.255s.tmp", g_vault_path);
     hal_file_t *f = hal_file_open(tmp, HAL_FILE_WRITE_NEW);
     if (!f) return false;
-    hal_file_restrict(tmp);
+    if (!hal_file_restrict(tmp, g_key_path)) {        /* the vault follows the key's owner and rights */
+        hal_file_close(f);
+        hal_file_remove(tmp);
+        return false;
+    }
     bool ok = hal_file_write(f, buf, sizeof(buf)) && hal_file_sync(f);
     hal_file_close(f);
     /* atomic replace: a power cut leaves either the old or the new vault, never half of one */
@@ -1723,6 +1782,15 @@ int app_init(void)
         hmi_security_load_default_pins(&g_security);
         ui_post_event(ALARM_SEV_WARNING, vault_problem(vault));
         ui_toast(vault_problem(vault), now_ms);
+    }
+    /* A commissioned panel (a signed vault with at least one site PIN) never goes back to bench
+     * mode, whatever hmi.cfg says: editing the config file must not re-open the factory PINs. */
+    bool commissioned = false;
+    if (vault == VAULT_LOADED)
+        for (int role = ROLE_OPERATOR; role <= ROLE_ENGINEER; role++) if (!g_security.factory[role]) commissioned = true;
+    if (g_allow_factory_pins && commissioned) {
+        g_allow_factory_pins = false;
+        ui_post_event(ALARM_SEV_WARNING, "Bench mode refused: site PINs exist");
     }
     g_security.allow_factory_pins = g_allow_factory_pins;
     if (g_allow_factory_pins && g_security.default_pins)

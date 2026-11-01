@@ -1,4 +1,9 @@
-# Build outputs (industrial_hmi.exe itself is tracked as release artefact)
+# Build outputs. Executables are never committed: a binary in git cannot be checked against the
+# source it claims to come from. Publish builds as releases, with checksums, from CI.
+*.exe
+industrial_hmi.exe
+plc_simulator.exe
+plc_simulator_cli.exe
 **/tests/*.exe
 **/tools/*.exe
 plc-simulator/plc_simulator_cli
@@ -18,6 +23,10 @@ crash.log
 crash.log.*
 security.vault
 security.vault.*
+hmi.key
+hmi.key.*
+*.damaged
+*.v2
 *.log
 
 # Test & benchmark artifacts

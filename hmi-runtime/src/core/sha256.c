@@ -140,6 +140,32 @@ void hmi_hmac_sha256(const void *key, size_t key_len, const void *data, size_t l
     hmi_hmac_sha256_final(&c, out);
 }
 
+void hmi_hkdf_sha256(const void *salt, size_t salt_len, const void *ikm, size_t ikm_len,
+                     const void *info, size_t info_len, uint8_t *out, size_t out_len)
+{
+    static const uint8_t zero_salt[32];
+    uint8_t prk[32], t[32];
+    if (!out || out_len == 0 || out_len > 255u * 32u) return;
+    if (!salt || salt_len == 0) { salt = zero_salt; salt_len = sizeof(zero_salt); }
+    hmi_hmac_sha256(salt, salt_len, ikm, ikm_len, prk);                     /* extract */
+    size_t done = 0;
+    for (uint8_t i = 1; done < out_len; i++) {                               /* expand */
+        hmi_hmac_sha256_t c;
+        hmi_hmac_sha256_init(&c, prk, sizeof(prk));
+        if (i > 1) hmi_hmac_sha256_update(&c, t, sizeof(t));
+        if (info_len) hmi_hmac_sha256_update(&c, info, info_len);
+        hmi_hmac_sha256_update(&c, &i, 1);
+        hmi_hmac_sha256_final(&c, t);
+        size_t k = out_len - done < sizeof(t) ? out_len - done : sizeof(t);
+        memcpy(out + done, t, k);
+        done += k;
+    }
+    volatile uint8_t *v = prk;
+    for (size_t i = 0; i < sizeof(prk); i++) v[i] = 0;
+    v = t;
+    for (size_t i = 0; i < sizeof(t); i++) v[i] = 0;
+}
+
 bool hmi_ct_equal(const void *a, const void *b, size_t n)
 {
     const volatile uint8_t *x = (const volatile uint8_t *)a;

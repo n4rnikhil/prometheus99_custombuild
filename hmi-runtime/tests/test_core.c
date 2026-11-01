@@ -30,6 +30,7 @@
 #include "hal/atomic.h"
 #include "hal/fs.h"
 #include "hal/sys.h"
+#include "hal/timer.h"
 #include "hal/net.h"
 #include "renderer/layout.h"
 #include "renderer/micro_renderer.h"
@@ -158,6 +159,57 @@ static void test_alarms(void)
     CHECK(hmi_alarms_journal_count(&s) == HMI_ALARM_JOURNAL_SIZE);
     CHECK(hmi_alarms_journal_by_seq(&s, s.journal_total) != NULL);
     CHECK(hmi_alarms_journal_by_seq(&s, 1) == NULL);
+}
+
+static void test_alarm_ack_point(void)
+{
+    hmi_tag_registry_reset();
+    static hmi_tag_table_t t; hmi_tags_init(&t);
+    static hmi_tag_meta_t m[2];
+    for (int i = 0; i < 2; i++) {
+        m[i].tag_id = (uint8_t)(40 + i); m[i].type = TAG_TYPE_DIGITAL; m[i].name = i ? "B" : "A";
+        m[i].digital_alarm_sev = ALARM_SEV_WARNING;
+    }
+    CHECK(hmi_tag_register_meta(m, 2));
+    static hmi_alarm_supervisor_t s; hmi_alarms_init(&s);
+    hmi_tag_write_digital(&t, 40, true, QUALITY_GOOD);
+    hmi_tag_write_digital(&t, 41, true, QUALITY_GOOD);
+    hmi_alarms_evaluate(&s, &t, 1);
+    CHECK(s.points[40].state == ALARM_PT_UNACK && s.points[41].state == ALARM_PT_UNACK && s.horn_sounding);
+    /* acknowledging one leaves the other unacknowledged and the horn on */
+    CHECK(hmi_alarms_acknowledge_point(&s, 40, 2));
+    CHECK(s.points[40].state == ALARM_PT_ACKED && s.points[41].state == ALARM_PT_UNACK);
+    hmi_alarms_evaluate(&s, &t, 3);
+    CHECK(s.horn_sounding && s.unacked_count == 1);
+    CHECK(!hmi_alarms_acknowledge_point(&s, 40, 4));            /* already acknowledged */
+    CHECK(!hmi_alarms_acknowledge_point(&s, 200, 4));           /* out of range */
+    /* returned to normal unacknowledged: ack clears it */
+    hmi_tag_write_digital(&t, 41, false, QUALITY_GOOD);
+    hmi_alarms_evaluate(&s, &t, 5);
+    CHECK(s.points[41].state == ALARM_PT_RTN_UNACK);
+    CHECK(hmi_alarms_acknowledge_point(&s, 41, 6) && s.points[41].state == ALARM_PT_NORMAL && !s.horn_sounding);
+    hmi_tag_registry_reset();
+}
+
+static void test_alarm_row_geometry(void)
+{
+    static const int sizes[][2] = { { 480, 272 }, { 800, 480 }, { 1024, 600 }, { 1280, 800 }, { 1920, 1080 } };
+    for (unsigned k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+        int sw = sizes[k][0], sh = sizes[k][1];
+        for (int banner = 0; banner < 2; banner++) {
+            for (int nact = 0; nact <= 8; nact++) {
+                hmi_rect_t ca = hmi_layout_alarm_active_card(sw, sh, banner != 0, nact);
+                hmi_rect_t body = hmi_layout_screen_body(sw, sh, banner != 0);
+                CHECK(ca.y >= body.y && ca.y + ca.h <= body.y + body.h);
+                int rows = hmi_layout_alarm_rows(ca);
+                for (int i = 0; i < rows; i++) {
+                    hmi_rect_t b = hmi_layout_alarm_row_ack(ca, i);
+                    CHECK(b.x >= ca.x && b.x + b.w <= ca.x + ca.w && b.y >= ca.y && b.y + b.h <= ca.y + ca.h);
+                    if (i) { hmi_rect_t p = hmi_layout_alarm_row_ack(ca, i - 1); CHECK(p.y + p.h <= b.y); }
+                }
+            }
+        }
+    }
 }
 
 static void test_security(void)
@@ -588,6 +640,33 @@ static void test_auth(void)
     CHECK(memcmp(h, t2, 32) == 0);
     CHECK(hmi_ct_equal(t1, t1, 32) && !hmi_ct_equal(t1, t2, 32));
 
+    /* HKDF-SHA256: RFC 5869 test case 1 (42-byte output, so two expand blocks) */
+    {
+        uint8_t ikm[22], salt5869[13], info5869[10], okm[42];
+        memset(ikm, 0x0b, sizeof(ikm));
+        for (int i = 0; i < 13; i++) salt5869[i] = (uint8_t)i;
+        for (int i = 0; i < 10; i++) info5869[i] = (uint8_t)(0xf0 + i);
+        static const uint8_t want[42] = {
+            0x3c,0xb2,0x5f,0x25,0xfa,0xac,0xd5,0x7a,0x90,0x43,0x4f,0x64,0xd0,0x36,0x2f,0x2a,
+            0x2d,0x2d,0x0a,0x90,0xcf,0x1a,0x5a,0x4c,0x5d,0xb0,0x2d,0x56,0xec,0xc4,0xc5,0xbf,
+            0x34,0x00,0x72,0x08,0xd5,0xb8,0x87,0x18,0x58,0x65 };
+        hmi_hkdf_sha256(salt5869, sizeof(salt5869), ikm, sizeof(ikm), info5869, sizeof(info5869), okm, sizeof(okm));
+        CHECK(memcmp(okm, want, sizeof(want)) == 0);
+        /* one key per purpose: different from each other and from the master */
+        uint8_t master[32], klog[32], kcred[32];
+        memset(master, 0x5a, sizeof(master));
+        hmi_device_key_derive(master, HMI_KEY_PURPOSE_AUDIT_LOG, klog);
+        hmi_device_key_derive(master, HMI_KEY_PURPOSE_CREDENTIALS, kcred);
+        CHECK(memcmp(klog, kcred, 32) != 0 && memcmp(klog, master, 32) != 0 && memcmp(kcred, master, 32) != 0);
+        uint8_t again[32];
+        hmi_device_key_derive(master, HMI_KEY_PURPOSE_AUDIT_LOG, again);
+        CHECK(memcmp(again, klog, 32) == 0);                               /* deterministic */
+        /* inside the credentials key, the PIN key and the vault key differ too */
+        static hmi_security_ctx_t kx; hmi_security_init(&kx);
+        hmi_security_set_device_key(&kx, kcred);
+        CHECK(memcmp(kx.pin_key, kx.vault_key, 32) != 0);
+    }
+
     hmi_security_ctx_t sec;
     hmi_security_init(&sec);
     CHECK(sec.current_role == ROLE_VIEWER && sec.default_pins);
@@ -900,6 +979,46 @@ static void test_alarm_log(void)
     hal_file_remove(path); hal_file_remove(p1);
 }
 
+static void test_log_sync_policy(void)
+{
+    const char *path = "hmi_test_sync.log";
+    hal_file_remove(path);
+    static const uint8_t key[HMI_DEVICE_KEY_LEN] = { 7 };
+    hmi_alarm_log_set_key(key);
+    static hmi_alarm_supervisor_t s; hmi_alarms_init(&s);
+    hmi_alarm_log_stats_t st;
+    CHECK(hmi_alarm_log_open(path, 1u << 20));
+    hmi_timer_sleep_ms(HMI_ALARM_LOG_SYNC_MS + 50u);         /* start outside any sync window */
+    hmi_alarms_log_event(&s, hmi_timer_get_ms(), HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "first");
+    hmi_alarm_log_sync(&s);
+    hmi_alarm_log_get_stats(&st);
+    uint32_t base = st.medium_syncs;
+    CHECK(base >= 1);
+    /* a burst of ordinary records inside the window: handed to the OS, not forced to the medium */
+    for (int i = 0; i < 5; i++) {
+        hmi_alarms_log_event(&s, hmi_timer_get_ms(), HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "burst");
+        hmi_alarm_log_sync(&s);
+    }
+    hmi_alarm_log_get_stats(&st);
+    CHECK(st.medium_syncs == base && st.records_written == 6);
+    /* a critical record is forced at once */
+    hmi_alarms_log_event(&s, hmi_timer_get_ms(), HMI_ALARM_TAG_SYSTEM, ALARM_SEV_CRITICAL, 0, "critical");
+    hmi_alarm_log_sync(&s);
+    hmi_alarm_log_get_stats(&st);
+    CHECK(st.medium_syncs == base + 1);
+    /* pending ordinary records are forced once the window has passed, even with nothing new */
+    hmi_alarms_log_event(&s, hmi_timer_get_ms(), HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "late");
+    hmi_alarm_log_sync(&s);
+    hmi_timer_sleep_ms(HMI_ALARM_LOG_SYNC_MS + 50u);
+    hmi_alarm_log_sync(&s);
+    hmi_alarm_log_get_stats(&st);
+    CHECK(st.medium_syncs == base + 2);
+    hmi_alarm_log_close();
+    uint32_t lines = 0, bad = 0, first = 0;
+    CHECK(hmi_alarm_log_verify_file(path, &lines, &bad, &first) && lines == 9);
+    hal_file_remove(path);
+}
+
 static void test_utc_format(void)
 {
     char b[32];
@@ -1080,6 +1199,8 @@ test_hal();
     test_tags_registry();
     test_alarms();
     test_security();
+    test_alarm_ack_point();
+    test_alarm_row_geometry();
     test_auth();
     test_watchdog();
     test_modbus();
@@ -1091,6 +1212,7 @@ test_hal();
     test_alarm_log();
     test_device_key();
     test_utc_format();
+    test_log_sync_policy();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

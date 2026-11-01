@@ -57,3 +57,17 @@ jobs:
         shell: cmd
         working-directory: hmi-runtime
         run: build.bat test
+      - name: Checksums for the release artefacts
+        shell: pwsh
+        run: |
+          $files = @("hmi-runtime/industrial_hmi.exe", "plc-simulator/plc_simulator.exe", "plc-simulator/plc_simulator_cli.exe")
+          Get-FileHash -Algorithm SHA256 $files | ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            hmi-runtime/industrial_hmi.exe
+            plc-simulator/plc_simulator.exe
+            plc-simulator/plc_simulator_cli.exe
+            SHA256SUMS.txt

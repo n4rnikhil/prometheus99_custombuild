@@ -58,9 +58,15 @@ hmi_key_status_t hmi_device_key_load(const char *path, bool create, uint8_t key[
     char tmp[300];
     int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     if (n <= 0 || (size_t)n >= sizeof(tmp)) { wipe(buf, sizeof(buf)); return HMI_KEY_WRITE_FAILED; }
+    char dir[300];                       /* the install folder: its owner is the HMI account */
+    memcpy(dir, path, strlen(path) + 1 < sizeof(dir) ? strlen(path) + 1 : sizeof(dir));
+    dir[sizeof(dir) - 1] = '\0';
+    char *cut = strrchr(dir, '/');
+    char *cut2 = strrchr(dir, '\\');
+    if (!cut || (cut2 && cut2 > cut)) cut = cut2;
+    if (cut) cut[1] = '\0'; else snprintf(dir, sizeof(dir), ".");
     f = hal_file_open(tmp, HAL_FILE_WRITE_NEW);
-    bool ok = f != NULL;
-    if (ok) hal_file_restrict(tmp);      /* before the secret is written */
+    bool ok = f != NULL && hal_file_restrict(tmp, dir);   /* before the secret is written */
     ok = ok && hal_file_write(f, buf, HMI_DEVICE_KEY_FILE_LEN) && hal_file_sync(f);
     hal_file_close(f);
     wipe(buf, sizeof(buf));
@@ -69,6 +75,14 @@ hmi_key_status_t hmi_device_key_load(const char *path, bool create, uint8_t key[
         return HMI_KEY_WRITE_FAILED;
     }
     return HMI_KEY_CREATED;
+}
+
+void hmi_device_key_derive(const uint8_t master[HMI_DEVICE_KEY_LEN], hmi_key_purpose_t purpose,
+                           uint8_t out[HMI_DEVICE_KEY_LEN])
+{
+    static const char *const info[] = { "industrial_hmi/v1/audit-log", "industrial_hmi/v1/credentials" };
+    const char *i = (purpose == HMI_KEY_PURPOSE_AUDIT_LOG) ? info[0] : info[1];
+    hmi_hkdf_sha256("industrial_hmi", 14, master, HMI_DEVICE_KEY_LEN, i, strlen(i), out, HMI_DEVICE_KEY_LEN);
 }
 
 void hmi_device_key_id(const uint8_t key[HMI_DEVICE_KEY_LEN], char out[9])

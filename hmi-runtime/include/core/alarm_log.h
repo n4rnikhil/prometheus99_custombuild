@@ -53,6 +53,7 @@ typedef struct {
     uint32_t rotations;
     uint32_t file_bytes;
     uint32_t chain_tail;        /* first 32 bits of the last mac written (display only) */
+    uint32_t medium_syncs;      /* forced writes to the medium (bounded by HMI_ALARM_LOG_SYNC_MS) */
 } hmi_alarm_log_stats_t;
 
 /* Key for signing and verifying. Call before open / verify. NULL = no key (lines are still

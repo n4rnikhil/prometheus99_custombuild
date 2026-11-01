@@ -286,7 +286,7 @@ static int card_layout(HDC dc, int idx, RECT c, bool draw)
         bool on = sim_row_value(&p->sim, r) != 0;
         bool pulse = (row->flags & SIM_PULSE) != 0;
         bool lab = (row->flags & SIM_LAB) != 0;
-        bool danger = (lab && !(row->flags & SIM_HMI_W)) || strstr(row->label, "stop") || strstr(row->label, "E-stop");
+        bool danger = (lab && !(row->flags & SIM_HMI_W)) || strstr(row->label, "stop") || strstr(row->label, "Stop");
         char label[48];
         if (pulse) snprintf(label, sizeof(label), "%s", row->label);
         else snprintf(label, sizeof(label), "%s  %s", row->label, on ? "ON" : "OFF");

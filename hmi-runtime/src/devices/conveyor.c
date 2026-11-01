@@ -23,7 +23,7 @@ static const hmi_tag_meta_t s_meta[] = {
     { CV_RATE,    TAG_TYPE_ANALOG,  "Throughput",     "/min",  0, 200,    0,   0, 0, 0, NULL, NULL, NULL },
     { CV_RUN,     TAG_TYPE_DIGITAL, "Conveyor",       "",      0, 1,      0,   0, 0, 0, NULL, NULL, NULL },
     { CV_JAM,     TAG_TYPE_DIGITAL, "Jam detected",   "",      0, 1,      0,   0, 0, ALARM_SEV_WARNING, "Clear the jam at the transfer point", "Press Reset jam, then Start", NULL },
-    { CV_CORD,    TAG_TYPE_DIGITAL, "Pull-cord stop", "",      0, 1,      0,   0, 0, ALARM_SEV_ESTOP,   "Find out who pulled the cord and why", "Re-arm the cord, acknowledge, then Reset E-stop", NULL },
+    { CV_CORD,    TAG_TYPE_DIGITAL, "Pull-cord stop", "",      0, 1,      0,   0, 0, ALARM_SEV_ESTOP,   "Find out who pulled the cord and why", "Re-arm the cord at the line, ack, then Reset stop", NULL },
     { CV_COMM,    TAG_TYPE_DIGITAL, "PLC comm loss",  "",      0, 1,      0,   0, 0, ALARM_SEV_CRITICAL, "Check the Ethernet cable and PLC power", "Verify the PLC address and port", NULL },
 };
 

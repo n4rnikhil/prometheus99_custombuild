@@ -12,6 +12,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <io.h>
+#include <aclapi.h>
+#include <sddl.h>
 #else
 #include <unistd.h>
 #if !defined(ESP_PLATFORM)
@@ -63,6 +65,11 @@ bool hal_file_sync(hal_file_t *h)
 #endif
 }
 
+bool hal_file_flush(hal_file_t *h)
+{
+    return h && fflush(h->f) == 0;
+}
+
 uint32_t hal_file_size(hal_file_t *h)
 {
     if (!h) return 0;
@@ -103,14 +110,66 @@ bool hal_file_remove(const char *path)
     return path && remove(path) == 0;
 }
 
-bool hal_file_restrict(const char *path)
+#if defined(_WIN32)
+/* Protected DACL: SYSTEM, Administrators and the account running this process, full control. */
+static bool win_restrict_own(const char *path)
+{
+    HANDLE tok = NULL;
+    static BYTE tu[256];
+    DWORD n = 0;
+    char *sid = NULL;
+    bool ok = false;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+    if (GetTokenInformation(tok, TokenUser, tu, sizeof(tu), &n) &&
+        ConvertSidToStringSidA(((TOKEN_USER *)(void *)tu)->User.Sid, &sid)) {
+        char sddl[256];
+        int k = snprintf(sddl, sizeof(sddl), "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;%s)", sid);
+        PSECURITY_DESCRIPTOR sd = NULL;
+        if (k > 0 && (size_t)k < sizeof(sddl) &&
+            ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, &sd, NULL)) {
+            BOOL present = FALSE, defaulted = FALSE;
+            PACL dacl = NULL;
+            if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present)
+                ok = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+                                           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                           NULL, NULL, dacl, NULL) == ERROR_SUCCESS;
+            LocalFree(sd);
+        }
+        LocalFree(sid);
+    }
+    CloseHandle(tok);
+    return ok;
+}
+
+static bool win_copy_dacl(const char *path, const char *like)
+{
+    PACL dacl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (GetNamedSecurityInfoA((LPSTR)like, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL,
+                              &sd) != ERROR_SUCCESS) return false;
+    bool ok = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                    NULL, NULL, dacl, NULL) == ERROR_SUCCESS;
+    LocalFree(sd);
+    return ok;
+}
+#endif
+
+bool hal_file_restrict(const char *path, const char *like)
 {
     if (!path) return false;
 #if defined(_WIN32)
-    return true;                         /* folder ACL applies: see hal/fs.h */
+    DWORD attr = like ? GetFileAttributesA(like) : INVALID_FILE_ATTRIBUTES;
+    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return win_copy_dacl(path, like);
+    return win_restrict_own(path);
 #elif defined(ESP_PLATFORM)
-    return true;                         /* single-user flash file system: nothing to restrict */
+    (void)like;
+    return true;
 #else
+    struct stat st;
+    if (like && geteuid() == 0 && stat(like, &st) == 0 && (st.st_uid != 0 || st.st_gid != 0)) {
+        if (chown(path, st.st_uid, st.st_gid) != 0) return false;
+    }
     return chmod(path, S_IRUSR | S_IWUSR) == 0;
 #endif
 }

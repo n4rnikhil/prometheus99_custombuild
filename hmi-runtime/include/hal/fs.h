@@ -29,6 +29,7 @@ hal_file_t *hal_file_open(const char *path, hal_file_mode_t mode);     /* NULL o
 int         hal_file_read(hal_file_t *f, void *buf, size_t cap);       /* bytes, 0 = end of file, -1 = error */
 bool        hal_file_write(hal_file_t *f, const void *buf, size_t len);/* all or nothing as far as reported */
 bool        hal_file_sync(hal_file_t *f);                              /* flush to the medium */
+bool        hal_file_flush(hal_file_t *f);                             /* hand buffered data to the OS (survives a crash, not a power cut) */
 uint32_t    hal_file_size(hal_file_t *f);
 /* Read exactly n bytes at an absolute offset (the append position is kept). */
 bool        hal_file_pread(hal_file_t *f, uint32_t offset, void *buf, size_t n);
@@ -39,9 +40,14 @@ void        hal_file_close(hal_file_t *f);                             /* NULL i
 bool        hal_file_replace(const char *tmp, const char *dst);
 bool        hal_file_remove(const char *path);
 
-/* Limit a secret file (device key, credential vault) to the account running the runtime:
- * mode 0600 on POSIX. On Windows the file keeps the ACL of its folder, so install the runtime
- * in a folder only the HMI service account and administrators can read. */
-bool        hal_file_restrict(const char *path);
+/* Limit a secret file (device key, credential vault) to the account that runs the runtime.
+ *   like == NULL or a folder: POSIX mode 0600; when run as root, the file is also given to the
+ *       owner of `like` (the install folder), so a key made by an administrator stays readable
+ *       by the HMI service account. Windows: a protected DACL with full control for SYSTEM,
+ *       Administrators and the current account only (inherited folder rights are dropped).
+ *   like == an existing file: the same owner (POSIX, when root) or the same DACL (Windows) as
+ *       that file, so the vault always follows the key.
+ * ESP32: nothing to do (single-user flash file system). */
+bool        hal_file_restrict(const char *path, const char *like);
 
 #endif /* INDUSTRIAL_HMI_HAL_FS_H */

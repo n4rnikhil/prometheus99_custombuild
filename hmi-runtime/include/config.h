@@ -101,6 +101,13 @@
 #define HMI_MAX_WIDGETS_PER_SCREEN  24
 #define HMI_MAX_SCREENS             5
 #define HMI_TREND_SAMPLES           60     /* 60 s at 1 Hz */
+#ifndef HMI_ALARM_LOG_SYNC_MS
+/* Audit records reach the OS at once (they survive a crash of the runtime) and the medium at
+ * least this often (they survive a power cut). A forced write to an SD card or flash can take
+ * tens of milliseconds on the UI thread, so it is bounded to a few per second; stop and critical
+ * events are forced to the medium immediately. */
+#define HMI_ALARM_LOG_SYNC_MS       250u
+#endif
 #ifndef HMI_ALARM_JOURNAL_SIZE
 /* In-memory circular journal between the fieldbus thread and the log writer. During an alarm
  * flood (ISA-18.2: more than 10 alarms in 10 min per operator, often hundreds in seconds) the
@@ -155,7 +162,7 @@
 #define COLOR_DARK_GRAY        5   /* #334155 */
 #define COLOR_CYAN_ACCENT      6   /* #00D2FF */
 #define COLOR_BLUE_ACCENT      7   /* #38BDF8 */
-#define COLOR_EMERALD_OK       8   /* #10B981 */
+#define COLOR_EMERALD_OK       8   /* normal / running: a neutral, not green (ISA-101); name kept for the API */
 #define COLOR_AMBER_WARN       9   /* #F59E0B */
 #define COLOR_CRIMSON_TRIP     10  /* #EF4444 */
 #define COLOR_VIBRANT_ORANGE   11  /* #FB923C */

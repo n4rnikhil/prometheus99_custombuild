@@ -52,6 +52,7 @@ void hmi_security_init(hmi_security_ctx_t *sec)
     sec->current_role = ROLE_VIEWER;          /* least privilege until a PIN login */
     sec->auto_logout_timeout_ms = DEFAULT_LOGOUT_TIMEOUT_MS;
     sec->high_contrast_theme = false;
+    hmi_security_set_device_key(sec, NULL);  /* derived keys from the all-zero key until a real one is set */
     hmi_security_load_default_pins(sec);     /* replaced by the vault when one exists */
 }
 
@@ -183,17 +184,17 @@ static bool pin_trivial(const char *pin)
     return same || up || down;
 }
 
-/* h0 = HMAC(pepper, salt || pin), h(i+1) = HMAC(pepper, h(i) || salt). The pepper is the device
- * key, so a copied vault alone cannot be brute-forced. */
-static void pin_hash(const uint8_t pepper[32], const uint8_t salt[8], const char *pin, uint8_t out[32])
+/* h0 = HMAC(pin_key, salt || pin), h(i+1) = HMAC(pin_key, h(i) || salt). pin_key is derived from
+ * the device key, so a copied vault alone cannot be brute-forced. */
+static void pin_hash(const uint8_t key[32], const uint8_t salt[8], const char *pin, uint8_t out[32])
 {
     hmi_hmac_sha256_t c;
-    hmi_hmac_sha256_init(&c, pepper, 32);
+    hmi_hmac_sha256_init(&c, key, 32);
     hmi_hmac_sha256_update(&c, salt, 8);
     hmi_hmac_sha256_update(&c, pin, strlen(pin));
     hmi_hmac_sha256_final(&c, out);
     for (uint32_t i = 1; i < HMI_PIN_HASH_ROUNDS; i++) {
-        hmi_hmac_sha256_init(&c, pepper, 32);
+        hmi_hmac_sha256_init(&c, key, 32);
         hmi_hmac_sha256_update(&c, out, 32);
         hmi_hmac_sha256_update(&c, salt, 8);
         hmi_hmac_sha256_final(&c, out);
@@ -209,7 +210,7 @@ static void update_default_flag(hmi_security_ctx_t *sec)
 static void store_pin(hmi_security_ctx_t *sec, hmi_role_t role, const char *pin, const uint8_t salt[8], bool factory)
 {
     memcpy(sec->pins[role].salt, salt, 8);
-    pin_hash(sec->pepper, salt, pin, sec->pins[role].hash);
+    pin_hash(sec->pin_key, salt, pin, sec->pins[role].hash);
     sec->factory[role] = factory;
     update_default_flag(sec);
 }
@@ -255,8 +256,10 @@ void hmi_security_load_default_pins(hmi_security_ctx_t *sec)
 void hmi_security_set_device_key(hmi_security_ctx_t *sec, const uint8_t *key32)
 {
     if (!sec) return;
-    if (key32) memcpy(sec->pepper, key32, sizeof(sec->pepper));
-    else memset(sec->pepper, 0, sizeof(sec->pepper));
+    static const uint8_t zero[32];
+    const uint8_t *k = key32 ? key32 : zero;
+    hmi_hkdf_sha256(NULL, 0, k, 32, "pin-hash", 8, sec->pin_key, sizeof(sec->pin_key));
+    hmi_hkdf_sha256(NULL, 0, k, 32, "vault-mac", 9, sec->vault_key, sizeof(sec->vault_key));
     for (int r = ROLE_OPERATOR; r <= ROLE_ENGINEER; r++) {     /* factory PINs follow the new key */
         if (sec->factory[r]) {
             uint8_t salt[8];
@@ -291,7 +294,7 @@ hmi_login_result_t hmi_security_login(hmi_security_ctx_t *sec, hmi_role_t role, 
     if (sec->factory[role] && !sec->allow_factory_pins) return HMI_LOGIN_FACTORY_PIN;
 
     uint8_t h[32];
-    pin_hash(sec->pepper, sec->pins[role].salt, pin, h);
+    pin_hash(sec->pin_key, sec->pins[role].salt, pin, h);
     if (hmi_ct_equal(h, sec->pins[role].hash, 32)) {
         sec->failed_attempts = 0;
         hmi_security_set_role(sec, role, now_ms);
@@ -337,7 +340,7 @@ size_t hmi_security_vault_export(const hmi_security_ctx_t *sec, uint8_t *out, si
         memcpy(rec + 4, sec->pins[r].salt, 8);
         memcpy(rec + 12, sec->pins[r].hash, 32);
     }
-    hmi_hmac_sha256(sec->pepper, sizeof(sec->pepper), out, VAULT_BODY, out + VAULT_BODY);
+    hmi_hmac_sha256(sec->vault_key, sizeof(sec->vault_key), out, VAULT_BODY, out + VAULT_BODY);
     return HMI_VAULT_SIZE;
 }
 
@@ -351,7 +354,7 @@ hmi_vault_result_t hmi_security_vault_import(hmi_security_ctx_t *sec, const uint
         if (in[8 + (r - 1) * 44] != (uint8_t)r || in[9 + (r - 1) * 44] > 1u) return HMI_VAULT_DAMAGED;
     }
     uint8_t mac[32];
-    hmi_hmac_sha256(sec->pepper, sizeof(sec->pepper), in, VAULT_BODY, mac);
+    hmi_hmac_sha256(sec->vault_key, sizeof(sec->vault_key), in, VAULT_BODY, mac);
     if (!hmi_ct_equal(mac, in + VAULT_BODY, 32)) return HMI_VAULT_AUTH_FAILED;
     for (int r = ROLE_OPERATOR; r <= ROLE_ENGINEER; r++) {
         const uint8_t *rec = in + 8 + (r - 1) * 44;

@@ -35,6 +35,15 @@ typedef enum {
 
 hmi_key_status_t hmi_device_key_load(const char *path, bool create, uint8_t key[HMI_DEVICE_KEY_LEN]);
 
+/* One key per purpose, derived from the device key with HKDF-SHA256 (RFC 5869), so the audit
+ * log, the vault signature and the PIN hashes never share key material. */
+typedef enum {
+    HMI_KEY_PURPOSE_AUDIT_LOG = 0,
+    HMI_KEY_PURPOSE_CREDENTIALS          /* PIN hashes and the vault signature (split again inside) */
+} hmi_key_purpose_t;
+void hmi_device_key_derive(const uint8_t master[HMI_DEVICE_KEY_LEN], hmi_key_purpose_t purpose,
+                           uint8_t out[HMI_DEVICE_KEY_LEN]);
+
 /* 8 hex digits that name a key without revealing it (first 4 bytes of SHA-256 over it). */
 void hmi_device_key_id(const uint8_t key[HMI_DEVICE_KEY_LEN], char out[9]);
 

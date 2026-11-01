@@ -140,11 +140,11 @@ static void test_tank_and_frames(void)
     CHECK(!wr_reg(&p, 0, 5) && exc(0x02));                                    /* level is read-only */
     CHECK(!wr_coil(&p, 4, true));                                             /* overload is a field input */
     CHECK(count_events(&p, "HMI set Valve V-101 to 25 %") == 1);
-    CHECK(wr_coil(&p, 2, true));                                              /* E-stop */
+    CHECK(wr_coil(&p, 2, true));                                              /* stop latch */
     steps(&p, 1);
     CHECK(p.coils[0] == 0 && p.coils[1] == 0);
     CHECK(wr_coil(&p, 0, true) && p.coils[0] == 0);                          /* start refused: latched */
-    CHECK(count_events(&p, "refused, E-stop is active") == 1);
+    CHECK(count_events(&p, "refused, Stop latch is active") == 1);
     CHECK(wr_coil(&p, 2, false));
     p.coils[4] = 1;                                                           /* field: pump A overload */
     CHECK(wr_coil(&p, 0, true) && p.coils[0] == 0);

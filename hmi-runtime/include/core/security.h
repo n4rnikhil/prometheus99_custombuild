@@ -99,7 +99,8 @@ typedef struct {
     bool       factory[HMI_ROLE_COUNT];/* this role still has its factory PIN */
     bool       default_pins;           /* any role still has its factory PIN (shown as a warning) */
     bool       allow_factory_pins;     /* bench override of the commissioning gate (--allow-factory-pins) */
-    uint8_t    pepper[32];             /* device key: PIN hashes and the vault signature depend on it */
+    uint8_t    pin_key[32];            /* HKDF(credentials key, "pin-hash"): keys the PIN hashes */
+    uint8_t    vault_key[32];          /* HKDF(credentials key, "vault-mac"): signs the vault */
     uint8_t    failed_attempts;
     bool       locked;
     uint32_t   lockout_start_ms;
@@ -108,8 +109,9 @@ typedef struct {
 
 /* --- Authentication --- */
 bool hmi_security_role_needs_pin(hmi_role_t role);
-/* Device key (32 bytes) that PIN hashes and the vault signature are keyed with. Set it before
- * loading the vault or setting PINs; factory PINs are re-hashed with it. NULL = all-zero key. */
+/* Credentials key (32 bytes, hmi_device_key_derive(..., CREDENTIALS)). Two keys are derived from
+ * it: one for the PIN hashes, one for the vault signature. Set it before loading the vault or
+ * setting PINs; factory PINs are re-hashed with it. NULL = all-zero key. */
 void hmi_security_set_device_key(hmi_security_ctx_t *sec, const uint8_t *key32);
 /* Factory PINs: Operator 1111, Maintenance 2222, Engineer 3333 (marks every role factory). */
 void hmi_security_load_default_pins(hmi_security_ctx_t *sec);

@@ -35,14 +35,14 @@ typedef struct { int x, y, w, h; } hmi_rect_t;
 typedef enum {
     HMI_HIT_NONE = 0,
     HMI_HIT_NAV_TAB,          /* param = screen index 0..SCREEN_COUNT-1 */
-    HMI_HIT_ESTOP,            /* header E-STOP button (always visible) */
+    HMI_HIT_ESTOP,            /* header STOP ALL button (always visible) */
     HMI_HIT_THEME,            /* header theme button */
     HMI_HIT_ROLE,             /* header role chip (demo role selector) */
     HMI_HIT_BANNER_ACK,       /* "Acknowledge" button inside the alarm banner */
     HMI_HIT_WIDGET_BUTTON,    /* manifest WIDGET_ACTION_BUTTON; param = tag id */
     HMI_HIT_ALARM_ACK,        /* alarm screen: acknowledge all */
     HMI_HIT_ALARM_SILENCE,    /* alarm screen: silence horn */
-    HMI_HIT_ESTOP_RESET,      /* alarm screen: reset E-stop */
+    HMI_HIT_ESTOP_RESET,      /* alarm screen: reset the stop latch */
     HMI_HIT_SET_ROLE,         /* settings screen: next role */
     HMI_HIT_SET_THEME,        /* settings screen: toggle theme */
     HMI_HIT_SET_WD_TEST,      /* settings screen: watchdog fault injection test */
@@ -58,7 +58,7 @@ typedef enum {
 } hmi_hit_kind_t;
 
 /* Dialogs drawn over the screen. While one is open only the dialog and the
- * header E-STOP accept input. */
+ * header STOP ALL accept input. */
 typedef enum {
     HMI_MODAL_NONE = 0,
     HMI_MODAL_ROLE,           /* choose a role */
@@ -105,6 +105,14 @@ hmi_rect_t hmi_layout_token_rect(uint32_t token, hmi_rect_t content);
 
 /* Non-manifest screens: body below the title row, and their cards */
 hmi_rect_t hmi_layout_screen_body(int sw, int sh, bool banner_active);
+
+/* Alarms screen, "Active" card: shared by the renderer and the touch handling so that a drawn
+ * Ack button and its touch area are always the same rectangle. nact = points not in NORMAL. */
+#define HMI_LAYOUT_ALARM_ROW_H   34
+hmi_rect_t hmi_layout_alarm_active_card(int sw, int sh, bool banner_active, int nact);
+int        hmi_layout_alarm_rows(hmi_rect_t card);                 /* rows that fit */
+int        hmi_layout_alarm_row_y(hmi_rect_t card, int row);       /* text baseline top of a row */
+hmi_rect_t hmi_layout_alarm_row_ack(hmi_rect_t card, int row);     /* that row's Ack button */
 /* Settings: idx 0 = access control (left), 1 = system (right) */
 hmi_rect_t hmi_layout_settings_card(int sw, int sh, bool banner_active, int idx);
 

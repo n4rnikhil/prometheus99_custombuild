@@ -4,7 +4,7 @@
  *
  * Map: %MW0 water temp 0.1 C, %MW1 temp setpoint 0.1 C, %MW2 firing rate %, %MW3 pressure kPa,
  * %MW4 drum level %, %MW5 mode (0 Manual, 1 Auto: PLC PID on temperature), %MW6 manual firing %;
- * %M0 burner enable, %M1 flame, %M2 low-water trip, %M3 E-stop, %M4 trip reset (pulse).
+ * %M0 burner enable, %M1 flame, %M2 low-water trip, %M3 stop latch (hardwired E-stop chain or STOP ALL), %M4 trip reset (pulse).
  */
 
 #include "devices/device_profile.h"
@@ -26,7 +26,7 @@ static const hmi_tag_meta_t s_meta[] = {
     { BL_BURNER, TAG_TYPE_DIGITAL, "Burner",          "",    0, 1,      0,   0, 0, 0, NULL, NULL, NULL },
     { BL_FLAME,  TAG_TYPE_DIGITAL, "Flame",           "",    0, 1,      0,   0, 0, 0, NULL, NULL, NULL },
     { BL_LOWW,   TAG_TYPE_DIGITAL, "Low water trip",  "",    0, 1,      0,   0, 0, ALARM_SEV_CRITICAL, "Check the feed-water pump and the drum level", "Reset the trip once the level is above 20 %", NULL },
-    { BL_ESTOP,  TAG_TYPE_DIGITAL, "Emergency stop",  "",    0, 1,      0,   0, 0, ALARM_SEV_ESTOP, "Make the boiler house safe before resetting", "Acknowledge, then press Reset E-stop", NULL },
+    { BL_ESTOP,  TAG_TYPE_DIGITAL, "Stop latch",      "",    0, 1,      0,   0, 0, ALARM_SEV_ESTOP, "Hardwired E-stop pressed? Make the boiler house safe", "Acknowledge, then Reset stop on Alarms", NULL },
     { BL_COMM,   TAG_TYPE_DIGITAL, "PLC comm loss",   "",    0, 1,      0,   0, 0, ALARM_SEV_CRITICAL, "Check the Ethernet cable and PLC power", "Verify the PLC address and port", NULL },
 };
 

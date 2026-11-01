@@ -24,7 +24,7 @@ set PORTABLE_SRC=src\core\tags.c src\core\alarms.c src\core\security.c src\core\
 
 set GCC_WARN=-std=c99 -Wall -Wextra -Wshadow -Werror
 set GCC_HARDEN=-fstack-protector-strong -static -Wl,--dynamicbase -Wl,--nxcompat -Wl,--high-entropy-va
-set GCC_LIBS=-luser32 -lgdi32 -lwinmm -lpsapi -lws2_32
+set GCC_LIBS=-luser32 -lgdi32 -lwinmm -lpsapi -lws2_32 -ladvapi32
 
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd.HHmmss"') do set BUILD_ID=%%t
 
@@ -125,7 +125,7 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [MSVC] building industrial_hmi.exe
-cl /nologo /O1 /W3 /GS /guard:cf /DHMI_BUILD_ID=\"!BUILD_ID!\" /I include %SRC% /Fe:industrial_hmi.exe /link /SUBSYSTEM:WINDOWS /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /GUARD:CF user32.lib gdi32.lib winmm.lib psapi.lib ws2_32.lib
+cl /nologo /O1 /W3 /GS /guard:cf /DHMI_BUILD_ID=\"!BUILD_ID!\" /I include %SRC% /Fe:industrial_hmi.exe /link /SUBSYSTEM:WINDOWS /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /GUARD:CF user32.lib gdi32.lib winmm.lib psapi.lib ws2_32.lib advapi32.lib
 if errorlevel 1 (
     echo [FAILED] compile error
     exit /b 1

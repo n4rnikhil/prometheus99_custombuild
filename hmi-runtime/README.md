@@ -89,28 +89,34 @@ role, an acknowledged stop alarm and a confirmation, and does not restart anythi
 
 Roles: Viewer (watch only), Operator, Maintenance, Engineer. The factory PINs (`1111`, `2222`,
 `3333`) are refused at sign-in until each role has a site PIN set with `--set-pin` (IEC 62443-4-2
-CR 1.5). On the bench, `--allow-factory-pins` lifts this and the Settings screen says BENCH MODE.
+CR 1.5). Run `--set-pin` as the account the HMI runs under. On the bench, `--allow-factory-pins`
+lifts this and the Settings screen says BENCH MODE; once any site PIN exists the option is refused
+and the refusal is logged.
+
+**Alarms.** Each unacknowledged alarm on the Alarms screen has its own **Ack** button: acknowledge
+the alarm you have read (ISA-18.2). **Acknowledge all** stays for a known flood.
 
 ### Security files
 
 | File | Holds | Protection |
 |---|---|---|
-| `hmi.key` | 32 random bytes made on the first start | mode 0600 on Linux; on Windows install in a folder only the HMI account and administrators can read |
-| `security.vault` | salted PIN hashes, keyed with `hmi.key` | HMAC-SHA256 under `hmi.key`; an edited vault, or one from an older build, is refused and every role falls back to the (locked) factory PINs |
-| `alarms.log` | alarms, events and operator commands | each line carries an HMAC-SHA256 chained to the line before; `--verify-log` shows the first broken line. Lines cut off the end of the newest file, or a deleted rotated file, cannot be detected by a chain: copy the log off the panel if that matters |
+| `hmi.key` | 32 random bytes made on the first start; the log key and the credentials key are derived from it (HKDF), the master is not kept in memory | Linux: mode 0600, and when made by root it is handed to the owner of the install folder; Windows: protected DACL for SYSTEM, Administrators and the account that created it |
+| `security.vault` | salted PIN hashes, keyed with `hmi.key` | HMAC-SHA256 under a key derived from `hmi.key`; same owner and rights as `hmi.key`; an edited vault, or one from an older build, is refused and every role falls back to the (locked) factory PINs |
+| `alarms.log` | alarms, events and operator commands, stamped with the time of the event | each line carries an HMAC-SHA256 chained to the line before; `--verify-log` shows the first broken line. Records reach the OS at once and the disk at least every 250 ms (stop and critical events at once). Lines cut off the end of the newest file, or a deleted rotated file, cannot be detected by a chain: copy the log off the panel if that matters |
 
 Losing `hmi.key` means old logs can no longer be verified and every PIN must be set again. Back it
 up to a place as safe as the panel itself.
 
 ## Tests
 
-`make test` (Linux, with AddressSanitizer and UBSan) and `build.bat test` (Windows) run:
+`make test` (Linux, with AddressSanitizer and UBSan) and `build.bat test` (Windows) run (counts at
+the time of writing):
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_core` | 8,308 | tags, alarms, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231 vectors), signed vault, device key, Modbus codec, layouts, renderer bounds, audit log forgery / truncation / wrong-key detection, UTC formatting, HAL |
+| `test_core` | 8,721 | tags, alarms (incl. per-alarm acknowledge), RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
 | `test_integration` | 478 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery |
-| `test_core` with the MCU profile | 7,647 | the same checks with the small-device limits |
+| `test_core` with the MCU profile | 8,060 | the same checks with the small-device limits |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery (real sockets on Linux and Windows) |
 
 CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) also builds both Raspberry Pi targets

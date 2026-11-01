@@ -133,6 +133,32 @@ hmi_rect_t hmi_layout_token_rect(uint32_t token, hmi_rect_t c)
 
 /* ---------------- Fixed screens ---------------- */
 
+hmi_rect_t hmi_layout_alarm_active_card(int sw, int sh, bool banner_active, int nact)
+{
+    hmi_rect_t body = hmi_layout_screen_body(sw, sh, banner_active);
+    int rows = nact ? (nact > 4 ? 4 : nact) : 1;
+    int ah = 46 + rows * HMI_LAYOUT_ALARM_ROW_H;
+    if (ah > body.h / 2) ah = body.h / 2;
+    return mk(body.x, body.y, body.w, ah);
+}
+
+int hmi_layout_alarm_rows(hmi_rect_t card)
+{
+    int n = (card.h - 42 - 4) / HMI_LAYOUT_ALARM_ROW_H;
+    return n < 0 ? 0 : n;
+}
+
+int hmi_layout_alarm_row_y(hmi_rect_t card, int row)
+{
+    return card.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H + (HMI_LAYOUT_ALARM_ROW_H - 20) / 2;
+}
+
+hmi_rect_t hmi_layout_alarm_row_ack(hmi_rect_t card, int row)
+{
+    int w = 76, h = HMI_LAYOUT_ALARM_ROW_H - 4;
+    return mk(card.x + card.w - 16 - w, card.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H + 2, w, h);
+}
+
 hmi_rect_t hmi_layout_screen_body(int sw, int sh, bool banner_active)
 {
     hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
