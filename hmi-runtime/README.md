@@ -5,7 +5,7 @@ puts each one on the dashboard with a screen for its machine, and lets an operat
 The code has no heap allocation, is `-Werror` clean, and uses no mutexes between the UI and the
 fieldbus threads.
 
-See the [root README](../README.md) for the two-app overview and for what is and is not verified.
+See the [project README](../README.md) for the overview and the [User Manual](../docs/USER_MANUAL.md) for operation.
 
 ## Build
 
@@ -194,7 +194,7 @@ See [docs/LAB_DEPLOYMENT.md](../docs/LAB_DEPLOYMENT.md).
 
 ## Folder map
 
-See the [root README](../README.md#layout). The short version: `include/` is the public interface,
+`include/` is the public interface,
 `src/core`, `src/renderer` and `src/devices` are portable, `src/fieldbus` is the Modbus side,
 `src/hal` holds the OS-specific code behind `include/hal/`, and `src/platform` holds the window
 or framebuffer shell. `src/app/app.c` is the application logic and has no OS header.

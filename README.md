@@ -29,7 +29,6 @@ PCs, Linux desktops and panels, and Raspberry Pi.
 - [Project structure](#project-structure)
 - [Standards](#standards)
 - [Status and limitations](#status-and-limitations)
-- [Upgrading from Build-5 or earlier](#upgrading-from-build-5-or-earlier)
 - [Further documentation](#further-documentation)
 - [License](#license)
 
@@ -103,6 +102,8 @@ the HMI's integration test only, to check that each driver matches the device it
 </p>
 
 ## Quick start
+
+The complete operating guide is the **[User Manual](docs/USER_MANUAL.md)**.
 
 ### Windows: run from this folder (no installation)
 
@@ -322,8 +323,10 @@ The suites pass on Linux x86-64 (under AddressSanitizer and UBSan), on 64-bit an
 │   ├── plc_simulator.exe         ready to run (Windows); plc_simulator_cli.exe for a console
 │   └── build.bat, Makefile
 ├── docs/
+│   ├── USER_MANUAL.md            the user manual
 │   ├── LAB_DEPLOYMENT.md         running the HMI on lab panels
 │   └── img/                      screenshots
+├── LICENSE                       MIT license
 └── README.md
 ```
 
@@ -355,28 +358,21 @@ no IEC 61508, IEC 62061 or ISO 13849 claim is made.
   own runtime; Harmony P6 (Windows 10 IoT) can run the Windows build. See
   [docs/LAB_DEPLOYMENT.md](docs/LAB_DEPLOYMENT.md).
 
-## Upgrading from Build-5 or earlier
-
-1. Stop the HMI and keep a copy of `alarms.log` and `security.vault`.
-2. Install the new build. Its first start creates `hmi.key`; the old log is renamed
-   `alarms.log.v2` (still checkable with `--verify-log`, as integrity only) and a new signed log
-   starts.
-3. The old vault is unsigned and is refused: set every role's PIN again with `--set-pin`, as the
-   account the HMI runs under.
-4. Remove `--allow-factory-pins` from any site `hmi.cfg` (it is refused on a commissioned panel).
-
 ## Further documentation
 
 | Document | Contents |
 |---|---|
+| **[User Manual](docs/USER_MANUAL.md)** | installation, operation, alarms, STOP ALL, simulator, configuration, commissioning, troubleshooting |
 | [hmi-runtime/README.md](hmi-runtime/README.md) | all options, operator guide, interface design rules, driver modules, heartbeat, tests |
 | [plc-simulator/README.md](plc-simulator/README.md) | simulator apps, options, devices, network mode |
 | [docs/LAB_DEPLOYMENT.md](docs/LAB_DEPLOYMENT.md) | running the HMI on lab panels: what works and what does not |
 
 ## License
 
-No license has been published for this project yet. Until one is added, all rights are reserved
-by the author.
+Prometheus HMI is released under the [MIT License](LICENSE). Copyright (c) 2026 Nikhil Nuguri.
+
+The software is provided "as is", without warranty of any kind. It is not a safety system; see
+[Status and limitations](#status-and-limitations).
 
 ---
 

@@ -49,7 +49,7 @@ make test
 
 The Altivar map is the one used in the HMI tests. The addresses are the same ones the runtime
 uses, so a green simulator device and a green runtime module agree by construction. Whether they
-match a real drive is a separate question; see the root README.
+match a real drive is a separate question: check the device documentation.
 
 ## Behaviour
 
@@ -69,5 +69,5 @@ covering the register tables, the Modbus codec, every device's process model, th
 machine and fault logic, the meter's floats and energy, and RUN/STOP.
 
 The network layer was smoke-tested over TCP: the Altivar status word, a live CMD write, and the
-meter's float current come back as expected. The end-to-end run with the HMI is described in the
-root README.
+meter's float current come back as expected. Using the simulator with the HMI is described in the
+[User Manual](../docs/USER_MANUAL.md#16-the-plc-simulator).
