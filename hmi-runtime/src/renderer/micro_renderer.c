@@ -23,7 +23,7 @@
 #define C_TEAL    COLOR_CYAN_ACCENT    /* simulated-data marker only */
 #define C_INFO    COLOR_BLUE_ACCENT    /* the INFO alarm priority only: blue is not used for controls */
 #define C_NEUTRAL COLOR_SILVER_MUTED   /* analog fills, trends: normal values are grey (ISA-101) */
-#define C_OK      COLOR_EMERALD_OK   /* normal / running: neutral (ISA-101) */
+#define C_OK      COLOR_EMERALD_OK   /* normal / running: green, or grey in the high-performance scheme */
 #define C_ORANGE  COLOR_AMBER_WARN
 #define C_RED     COLOR_CRIMSON_TRIP
 #define C_YELLOW  COLOR_VIBRANT_ORANGE
@@ -35,13 +35,26 @@
 /* Lifecycle                                                                  */
 /* ========================================================================= */
 
+/* Status scheme greens (IEC 60073 "normal"): dark theme, outdoor theme */
+#define STATUS_GREEN_DARK     0x30D158u
+#define STATUS_GREEN_OUTDOOR  0x1E7E34u
+
 static const uint32_t* palette_of(const hmi_renderer_t *r)
 {
-    return (r && r->high_contrast) ? g_hmi_palette_contrast : g_hmi_palette_dark;
+    return r ? r->palette : g_hmi_palette_dark;
+}
+
+static void load_palette(hmi_renderer_t *r)
+{
+    const uint32_t *base = r->high_contrast ? g_hmi_palette_contrast : g_hmi_palette_dark;
+    for (int i = 0; i < 16; i++) r->palette[i] = base[i];
+    if (!r->high_performance)
+        r->palette[COLOR_EMERALD_OK] = r->high_contrast ? STATUS_GREEN_OUTDOOR : STATUS_GREEN_DARK;
 }
 
 static void build_blend_lut(hmi_renderer_t *r)
 {
+    load_palette(r);
     const uint32_t *pal = palette_of(r);
     for (int fg = 0; fg < 16; fg++) {
         for (int bg = 0; bg < 16; bg++) {
@@ -100,6 +113,13 @@ void hmi_renderer_set_theme(hmi_renderer_t *rend, bool high_contrast)
 {
     if (!rend) return;
     rend->high_contrast = high_contrast;
+    build_blend_lut(rend);
+}
+
+void hmi_renderer_set_scheme(hmi_renderer_t *rend, bool high_performance)
+{
+    if (!rend) return;
+    rend->high_performance = high_performance;
     build_blend_lut(rend);
 }
 
@@ -1599,6 +1619,10 @@ static void render_settings(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
                                       v->ui_wd_alive ? C_OK : C_RED); y += rh; }
         if (y + rh <= limit) { kv_row(r, x, y, w, "Failover latch", (wd && wd->failover_active) ? "Latched" : "Clear",
                                       (wd && wd->failover_active) ? C_ORANGE : C_TEXT); y += rh; }
+        if (y + rh <= limit) {
+            kv_row(r, x, y, w, "Colour scheme", r->high_performance ? "High-performance" : "Status (green normal)", C_TEXT);
+            y += rh;
+        }
         if (y + rh <= limit) {
             bool signed_log = v->log && v->log->open && v->log->authenticated;
             if (v->log && v->log->open)

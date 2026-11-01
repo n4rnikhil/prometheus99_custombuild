@@ -42,6 +42,7 @@ per line, `#` for comments. The command line adds to the file. Examples are in
 | `--set-pin <role>` | set a role's site PIN (6-8 digits, not trivial; typed twice, never on the command line) and exit |
 | `--key <path>`, `--vault <path>` | device key (default `hmi.key`) and PIN vault (default `security.vault`) |
 | `--allow-factory-pins` | **bench only**: roles may sign in with the factory PINs |
+| `--color-scheme status\|high-performance` | normal and running states in green (default, the IEC 60073 indicator convention) or in grey (strict ISA-101). Alarms and stop controls are the same in both |
 | `--headless` | Linux: no display (Modbus, alarms and log only) |
 | `--horn-gpio <chip>:<line>` | Linux: drive a GPIO line high while unacknowledged alarms exist (buzzer, stack light), e.g. `gpiochip0:17`. The HMI refuses to start if the line cannot be driven |
 
@@ -52,7 +53,7 @@ must never wonder how to stop the machine or what a colour means (ISA-101, ISA-1
 
 | Rule | How it shows |
 |---|---|
-| Colour means something is wrong | Normal and running are grey (running brighter than stopped); colour appears only for alarms and abnormal values. Controls are neutral; the one primary action is a light button, not a coloured one |
+| Colour has one meaning each | Green = normal / running / online (default "status" scheme, the convention of machine indicator lights, IEC 60073); `--color-scheme high-performance` makes those grey for sites that follow ISA-101 strictly. Amber and red are only for warnings, alarms and stop. Controls are neutral; the one primary action is a light button, not a coloured one |
 | Red means stop | STOP ALL and device Stop buttons are the only red controls. Resetting a latch is never red |
 | Priority is never colour alone | Critical and stop: red diamond. Warning: amber triangle. Info: blue circle. Always with the word |
 | STOP ALL is always there | Same place on every screen, 40 px high, never covered by a dialog, keyboard key `E` |

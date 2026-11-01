@@ -38,6 +38,8 @@ typedef struct {
     int  band_count;
     int  current_band_y;
     bool high_contrast;
+    bool high_performance;  /* colour scheme: true = ISA-101 grey normal states; false = green (IEC 60073) */
+    uint32_t palette[16];   /* active palette: theme + scheme */
     int  clip_x0, clip_y0, clip_x1, clip_y1;   /* active clip rect (screen coords, x1/y1 exclusive) */
     uint8_t blend[16][16][4];                /* [fg][bg][coverage 0..3] -> palette index */
     uint8_t buffer[HMI_DISPLAY_MAX_BUF_SIZE];
@@ -92,6 +94,11 @@ typedef struct {
 void hmi_renderer_init(hmi_renderer_t *rend, int screen_w, int screen_h);
 void hmi_renderer_resize(hmi_renderer_t *rend, int screen_w, int screen_h);
 void hmi_renderer_set_theme(hmi_renderer_t *rend, bool high_contrast);
+/* Colour scheme for normal / running states:
+ *   false (default) "status": green, the indicator-light convention operators know (IEC 60073)
+ *   true  "high-performance": neutral grey, colour only for abnormal states (ISA-101)
+ * Alarms (red diamond, amber triangle, blue circle) and red stop controls are the same in both. */
+void hmi_renderer_set_scheme(hmi_renderer_t *rend, bool high_performance);
 
 /* --- Primitives (clipped to the active band and to the buffer) --- */
 void hmi_draw_rect(hmi_renderer_t *r, int x, int y, int w, int h, uint8_t color);

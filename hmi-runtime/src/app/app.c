@@ -37,6 +37,7 @@
  *   --vault <path>             credential vault (default security.vault next to the executable)
  *   --set-pin <role>           set a role's site PIN (asked for twice, never on the command line), exit
  *   --allow-factory-pins       BENCH ONLY: let roles sign in with the factory PINs (1111/2222/3333)
+ *   --color-scheme <status|high-performance>   normal states green (default) or grey (ISA-101)
  */
 
 #include <stdio.h>
@@ -176,6 +177,7 @@ static char                  g_key_path[HMI_PATH_MAX];
 static char                  g_verify_path[HMI_PATH_MAX];
 static uint8_t               g_device_key[HMI_DEVICE_KEY_LEN];
 static bool                  g_allow_factory_pins;
+static bool                  g_high_performance;          /* --color-scheme high-performance */
 static int                   g_set_pin_role = -1;
 static uint32_t              g_ui_max_frame_ms;
 static uint32_t              g_ui_wd_faults_seen;
@@ -1733,6 +1735,14 @@ static int parse_options(int argc, char **argv)
             copy_str(g_key_path, sizeof(g_key_path), next); i++;
         } else if (strcmp(a, "--allow-factory-pins") == 0) {
             g_allow_factory_pins = true;
+        } else if (strcmp(a, "--color-scheme") == 0 && next) {
+            if (strcmp(next, "high-performance") == 0) g_high_performance = true;
+            else if (strcmp(next, "status") == 0) g_high_performance = false;
+            else {
+                hal_console_print("usage: --color-scheme status|high-performance\r\n");
+                return 64;
+            }
+            i++;
         } else if (strcmp(a, "--set-pin") == 0 && next) {
             g_set_pin_role = parse_role(next);
             if (g_set_pin_role < 0) {
@@ -1868,6 +1878,7 @@ int app_init(void)
     g_exe_size = hal_exe_size();
 
     hmi_renderer_init(&g_renderer, HMI_DISPLAY_WIDTH_DEFAULT, HMI_DISPLAY_HEIGHT_DEFAULT);
+    hmi_renderer_set_scheme(&g_renderer, g_high_performance);
 
     if (g_log_enabled && !hmi_alarm_log_open(g_log_path, HMI_ALARM_LOG_MAX_BYTES)) {
         ui_toast("Alarm log file could not be opened", now_ms);

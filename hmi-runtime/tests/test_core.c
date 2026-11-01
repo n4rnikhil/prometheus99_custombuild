@@ -1051,6 +1051,25 @@ static void test_log_sync_policy(void)
     hal_file_remove(path);
 }
 
+static void test_color_scheme(void)
+{
+    static hmi_renderer_t r;
+    hmi_renderer_init(&r, 800, 480);
+    const uint32_t *pal = hmi_renderer_get_palette(&r);
+    CHECK(pal[COLOR_EMERALD_OK] == 0x30D158u);                       /* default: green normal (IEC 60073) */
+    hmi_renderer_set_scheme(&r, true);
+    CHECK(hmi_renderer_get_palette(&r)[COLOR_EMERALD_OK] == 0xC9CDD4u); /* high-performance: grey */
+    hmi_renderer_set_theme(&r, true);
+    CHECK(hmi_renderer_get_palette(&r)[COLOR_EMERALD_OK] == 0x2F343Bu); /* outdoor theme keeps the scheme */
+    hmi_renderer_set_scheme(&r, false);
+    CHECK(hmi_renderer_get_palette(&r)[COLOR_EMERALD_OK] == 0x1E7E34u);
+    /* alarm and stop colours never depend on the scheme */
+    hmi_renderer_set_theme(&r, false);
+    uint32_t red = hmi_renderer_get_palette(&r)[COLOR_CRIMSON_TRIP], amber = hmi_renderer_get_palette(&r)[COLOR_AMBER_WARN];
+    hmi_renderer_set_scheme(&r, true);
+    CHECK(hmi_renderer_get_palette(&r)[COLOR_CRIMSON_TRIP] == red && hmi_renderer_get_palette(&r)[COLOR_AMBER_WARN] == amber);
+}
+
 static void test_utc_format(void)
 {
     char b[32];
@@ -1245,6 +1264,7 @@ test_hal();
     test_alarm_log();
     test_device_key();
     test_utc_format();
+    test_color_scheme();
     test_log_sync_policy();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
