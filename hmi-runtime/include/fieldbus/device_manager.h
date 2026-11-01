@@ -56,6 +56,17 @@ void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, int16_t value, hmi_tag_
  * Returns the number of devices the command was sent to. */
 uint8_t hmi_devmgr_estop(bool trip, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms);
 
+/* STOP ALL: every attached device that can move is told to stop.
+ *   - pending writes of each device (starts, setpoints, reset pulses) are cancelled first, so a
+ *     command queued a moment earlier can never restart the machine after the stop
+ *   - a device with a stop latch gets the latch; any other device gets every Stop control of its
+ *     module, and every mode selector whose first option is "Off" is set to Off
+ *   - devices that cannot be reached (offline) or have no stop control are logged as CRITICAL:
+ *     the operator must stop them at the machine
+ * Read-only devices (meters: no controls) are not counted. Returns the devices stopped;
+ * *not_stopped (optional) receives the devices that could not be stopped. */
+uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms, uint8_t *not_stopped);
+
 /* Copy the state of all slots (EMPTY ones included) for publishing. */
 void hmi_devmgr_publish(hmi_device_info_t out[HMI_MAX_DEVICES], uint32_t now_ms);
 

@@ -398,6 +398,11 @@ hmi_rect_t hmi_layout_device_body(hmi_rect_t p)
     return mk(p.x, p.y + HMI_LAYOUT_DEVICE_HEADER_H, p.w, p.h - HMI_LAYOUT_DEVICE_HEADER_H);
 }
 
+bool hmi_layout_device_summary(hmi_rect_t panel)
+{
+    return panel.h < HMI_LAYOUT_SUMMARY_BELOW_H;
+}
+
 bool hmi_layout_device_compact(hmi_rect_t body)
 {
     return body.w < HMI_LAYOUT_COMPACT_W || body.h < HMI_LAYOUT_COMPACT_H;
@@ -528,6 +533,10 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
             hmi_rect_t panel = hmi_layout_device_panel(c, ndev, d);
             hmi_rect_t head = hmi_layout_device_open(panel);
             if (hmi_rect_contains(head, x, y)) return result(HMI_HIT_DEVICE_OPEN, devs[d].slot, head);
+            if (hmi_layout_device_summary(panel)) {                 /* summary card: all of it opens the faceplate */
+                if (hmi_rect_contains(panel, x, y)) return result(HMI_HIT_DEVICE_OPEN, devs[d].slot, panel);
+                continue;
+            }
             hmi_rect_t body = hmi_layout_device_body(panel);
             uint8_t nt = 0;
             const uint32_t *tk = hmi_layout_device_manifest(devs[d].profile, body, &nt);

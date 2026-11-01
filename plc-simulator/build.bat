@@ -24,7 +24,14 @@ if errorlevel 1 (
 )
 
 echo [GCC] building plc_simulator.exe
-gcc %WARN% -Os -s %HARDEN% -I include src\main_win32.c %CORE% -luser32 -lgdi32 -lwinmm -lws2_32 -mwindows -o plc_simulator.exe
+REM Icon and version information (optional: skipped when windres is not installed)
+set RES=
+where windres >nul 2>nul
+if not errorlevel 1 (
+    windres res\plc_simulator.rc -O coff -o res\plc_simulator.res
+    if not errorlevel 1 set RES=res\plc_simulator.res
+)
+gcc %WARN% -Os -s %HARDEN% -I include src\main_win32.c %CORE% %RES% -luser32 -lgdi32 -lwinmm -lws2_32 -mwindows -o plc_simulator.exe
 if errorlevel 1 (
     echo [FAILED] plc_simulator compile error
     exit /b 1

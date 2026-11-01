@@ -66,8 +66,20 @@ static bool host_poll_cyclic(hmi_tag_table_t *tags, uint32_t now_ms)
     hal_host_stats_t hs;
     hal_host_stats_poll(&hs);
 
-    if (hs.cpu_ok) hmi_tag_write_analog(tags, HOST_TAG_CPU_LOAD, hs.cpu_pct, QUALITY_GOOD);
-    else           hmi_tag_set_quality(tags, HOST_TAG_CPU_LOAD, QUALITY_COMM_FAULT);
+    /* CPU load is an alarm point: a burst (our own start-up, a short job) must not annunciate.
+     * The first reading only sets the baseline; after it, a 4-sample moving average is shown
+     * and alarmed, so only sustained load reaches the HH limit (ISA-18.2: no nuisance alarms). */
+    static int32_t cpu_avg = -1;
+    if (hs.cpu_ok) {
+        if (cpu_avg < 0) {
+            cpu_avg = 0;                                   /* baseline sample: not published */
+        } else {
+            cpu_avg = cpu_avg == 0 ? hs.cpu_pct : (cpu_avg * 3 + hs.cpu_pct + 2) / 4;
+            hmi_tag_write_analog(tags, HOST_TAG_CPU_LOAD, (int16_t)cpu_avg, QUALITY_GOOD);
+        }
+    } else {
+        hmi_tag_set_quality(tags, HOST_TAG_CPU_LOAD, QUALITY_COMM_FAULT);
+    }
 
     if (hs.ram_ok) hmi_tag_write_analog(tags, HOST_TAG_RAM_LOAD, hs.ram_pct, QUALITY_GOOD);
     else           hmi_tag_set_quality(tags, HOST_TAG_RAM_LOAD, QUALITY_COMM_FAULT);

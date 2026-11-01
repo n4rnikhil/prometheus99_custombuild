@@ -291,9 +291,18 @@ static void fb_handle_commands(int32_t bits, hmi_tag_table_t *tags, hmi_alarm_su
     if (bits & CMD_BIT_ESTOP) {
         hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_ESTOP, ALARM_PT_NORMAL,
                              "STOP ALL commanded by operator (software stop)");
-        if (hmi_devmgr_estop(true, tags, alarms, now_ms) == 0) {
-            hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_CRITICAL, ALARM_PT_NORMAL,
-                                 "No device took STOP ALL: use the hardwired E-stop");
+        uint8_t missed = 0;
+        uint8_t stopped = hmi_devmgr_stop_all(tags, alarms, now_ms, &missed);
+        char msg[57];
+        if (missed) {
+            snprintf(msg, sizeof(msg), "STOP ALL: %u NOT stopped - use the hardwired E-stop", (unsigned)missed);
+            hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_CRITICAL, ALARM_PT_NORMAL, msg);
+        } else if (stopped == 0) {
+            hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_WARNING, ALARM_PT_NORMAL,
+                                 "STOP ALL: no device to stop");
+        } else {
+            snprintf(msg, sizeof(msg), "STOP ALL: stop sent to %u device(s)", (unsigned)stopped);
+            hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_ESTOP, ALARM_PT_NORMAL, msg);
         }
     }
     if (bits & CMD_BIT_ACK) {

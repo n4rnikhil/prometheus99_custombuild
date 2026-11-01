@@ -267,13 +267,15 @@ static bool create_window(HINSTANCE hInstance)
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon         = LoadIcon(hInstance, MAKEINTRESOURCE(1));      /* res/industrial_hmi.rc; NULL if built without it */
+    wc.hIconSm       = wc.hIcon;
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = class_name;
     RegisterClassExA(&wc);
 
     RECT wr = { 0, 0, HMI_DISPLAY_WIDTH_DEFAULT, HMI_DISPLAY_HEIGHT_DEFAULT };   /* client area */
     AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowExA(0, class_name, "Prometheus HMI - plug-and-play PLC runtime", WS_OVERLAPPEDWINDOW,
+    HWND hwnd = CreateWindowExA(0, class_name, "Prometheus HMI", WS_OVERLAPPEDWINDOW,
                                 CW_USEDEFAULT, CW_USEDEFAULT, wr.right - wr.left, wr.bottom - wr.top,
                                 NULL, NULL, hInstance, NULL);
     if (!hwnd) return false;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Prometheus HMI
+Comment=Operator panel for PLCs, drives and meters (Modbus TCP)
+Exec=@LIB@/prometheus-hmi
+Icon=prometheus-hmi
+Terminal=false
+Categories=Utility;Engineering;
+StartupWMClass=Prometheus-HMI

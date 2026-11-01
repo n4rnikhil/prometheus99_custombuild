@@ -4,7 +4,7 @@ Two independent applications in one repository:
 
 | App | Folder | What it is | Runs on |
 |---|---|---|---|
-| **HMI runtime** (`industrial_hmi`) | [hmi-runtime/](hmi-runtime/) | The operator panel. Finds PLCs, drives and meters on the network, shows them, raises alarms, and sends operator commands (start/stop, setpoints, modes, resets) with role-based sign-in and a signed audit log | Windows (incl. Harmony P6 / Windows IoT); Linux (PC, Raspberry Pi 32/64-bit); small MCUs (ESP32 class, not yet compiled) |
+| **HMI runtime** (`industrial_hmi`) | [hmi-runtime/](hmi-runtime/) | The operator panel. Finds PLCs, drives and meters on the network, shows them, raises alarms, and sends operator commands (start/stop, setpoints, modes, resets) with role-based sign-in and a signed audit log | Windows (installer; incl. Harmony P6 / Windows IoT); Linux desktops (a normal window), Linux panels and Raspberry Pi (framebuffer), servers (headless); small MCUs (ESP32 class, not yet compiled) |
 | **PLC simulator** (`plc_simulator`) | [plc-simulator/](plc-simulator/) | A bench of simulated PLCs, drives and meters. Each one is a real Modbus TCP server, so the HMI or any Modbus client talks to it as it would to hardware. Has RUN/STOP, fault injection and an activity log | Windows (window and console); Linux / Raspberry Pi (console) |
 
 The two apps share no code at run time. The HMI does not link the simulator. The simulator's
@@ -54,7 +54,18 @@ industrial_hmi/
 `hmi-runtime` builds without the simulator folder. Its integration test is the one exception: it
 links the simulator's device models, so `build.bat test` needs `plc-simulator/` next to it.
 
-## Quick start
+## Install and run
+
+| Computer | Install | Then |
+|---|---|---|
+| **Windows 10/11** | run `Prometheus-HMI-Setup-<version>.exe` (no administrator rights needed) | double-click **Prometheus HMI** on the desktop: the PLC simulator opens with a drive, a tank and a meter, then the HMI |
+| **Linux PC** (Ubuntu, Debian, Fedora, ...) | `tar -xzf prometheus-hmi-linux-x86_64.tar.gz` then `./install.sh` (no root) | open **Prometheus HMI (bench)** from the applications menu |
+| **Raspberry Pi** (64-bit or 32-bit OS) | the same with `prometheus-hmi-raspberrypi-arm64` / `-armhf` | with a desktop: the menu entry; on a bare panel the HMI draws to the screen directly |
+
+Sign in: tap **Viewer** at the top, choose **Operator**, PIN **1111** (bench only). The release files
+are built by `installer/build_windows_release.sh` and `installer/build_linux_release.sh` (and by CI).
+
+## Build from source
 
 **Bench on one Windows PC**
 

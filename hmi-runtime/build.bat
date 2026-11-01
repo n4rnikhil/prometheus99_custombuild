@@ -39,10 +39,17 @@ if errorlevel 1 goto :msvc
 if /i "%~1"=="snapshot" goto :snapshot
 
 echo [GCC] building industrial_hmi.exe
+REM Icon and version information (optional: skipped when windres is not installed)
+set RES=
+where windres >nul 2>nul
+if not errorlevel 1 (
+    windres res\industrial_hmi.rc -O coff -o res\industrial_hmi.res
+    if not errorlevel 1 set RES=res\industrial_hmi.res
+)
 if /i "%~1"=="debug" (
-    gcc %GCC_WARN% -O0 -g -DHMI_BUILD_ID=\"!BUILD_ID!-debug\" -I include %SRC% %GCC_LIBS% -mwindows -o industrial_hmi.exe
+    gcc %GCC_WARN% -O0 -g -DHMI_BUILD_ID=\"!BUILD_ID!-debug\" -I include %SRC% %RES% %GCC_LIBS% -mwindows -o industrial_hmi.exe
 ) else (
-    gcc %GCC_WARN% -Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections %GCC_HARDEN% -DHMI_BUILD_ID=\"!BUILD_ID!\" -I include %SRC% %GCC_LIBS% -mwindows -o industrial_hmi.exe
+    gcc %GCC_WARN% -Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections %GCC_HARDEN% -DHMI_BUILD_ID=\"!BUILD_ID!\" -I include %SRC% %RES% %GCC_LIBS% -mwindows -o industrial_hmi.exe
 )
 if errorlevel 1 (
     echo [FAILED] compile error

@@ -44,6 +44,7 @@ per line, `#` for comments. The command line adds to the file. Examples are in
 | `--allow-factory-pins` | **bench only**: roles may sign in with the factory PINs |
 | `--color-scheme status\|high-performance` | normal and running states in green (default, the IEC 60073 indicator convention) or in grey (strict ISA-101). Alarms and stop controls are the same in both |
 | `--headless` | Linux: no display (Modbus, alarms and log only) |
+| `--window`, `--fb <device>` | Linux: a desktop window (default when a desktop session is running; X11, or XWayland on Wayland desktops) / force the framebuffer. libX11 is loaded only when a window is opened, so the same binary runs on machines without it |
 | `--horn-gpio <chip>:<line>` | Linux: drive a GPIO line high while unacknowledged alarms exist (buzzer, stack light), e.g. `gpiochip0:17`. The HMI refuses to start if the line cannot be driven |
 
 ## Operator interface design
@@ -165,7 +166,7 @@ on `src/` and `include/`.
 | Target | Status |
 |---|---|
 | Windows 10/11, Harmony P6 (Windows 10 IoT) | earlier builds run on Windows; the current code is built with MinGW and its tests pass under Wine, but it has not been run on Windows itself since the security changes (in particular the `--set-pin` console prompt). Not yet run on a P6 |
-| Linux PC (x86-64) | built, all tests, headless end-to-end run against the simulator |
+| Linux PC (x86-64) | built, all tests; runs as a desktop window (tested on a virtual X display: STOP ALL clicked and confirmed at the simulator), install / uninstall script tested |
 | Raspberry Pi 2/3/4/5 (32- and 64-bit, framebuffer, evdev) | cross-built; all tests pass under qemu; not run on a real Pi screen |
 | ESP32-S3 (ESP-IDF 5.3) | port written; not compiled |
 | Harmony ST6 panel | not applicable: Schneider's runtime runs there |

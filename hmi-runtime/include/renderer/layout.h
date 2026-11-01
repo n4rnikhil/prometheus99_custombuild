@@ -148,6 +148,10 @@ hmi_rect_t hmi_layout_modal_key(int sw, int sh, int key);        /* key 0..11, s
  * Each panel = a header row (device name, address, status) + a body that shows the
  * profile's full manifest, or its compact manifest when the body is small. */
 #define HMI_LAYOUT_DEVICE_HEADER_H 34
+/* A device panel lower than this cannot show its widgets without overlap: it shows a summary
+ * (main value, state) instead, and a tap anywhere on it opens the faceplate with every control. */
+#define HMI_LAYOUT_SUMMARY_BELOW_H 200
+bool hmi_layout_device_summary(hmi_rect_t panel);
 #define HMI_LAYOUT_COMPACT_W       620
 #define HMI_LAYOUT_COMPACT_H       260
 

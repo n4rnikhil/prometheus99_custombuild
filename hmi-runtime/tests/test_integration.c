@@ -304,6 +304,97 @@ static void test_hmi_heartbeat(void)
     hmi_devmgr_shutdown();
 }
 
+/* STOP ALL must stop EVERY device that can move - not only the ones with a stop latch - and a
+ * start queued a moment before must not run after the stop. Checked through the device's own
+ * registers, read back over Modbus, for every simulated machine type. */
+static const hmi_device_profile_t *prof_of(uint8_t slot)
+{
+    static hmi_device_info_t d[HMI_MAX_DEVICES];
+    hmi_devmgr_publish(d, 0);
+    return slot < HMI_MAX_DEVICES ? d[slot].profile : NULL;
+}
+
+static bool is_stopped(uint8_t slot)
+{
+    const hmi_device_profile_t *p = prof_of(slot);
+    if (!p) return false;
+    if (p->estop_coil != 0xFFFFu && tag(slot, p->estop_tag) == 0) return false;   /* latch must be set */
+    bool any = false;
+    for (uint8_t k = 0; k < p->n_actions; k++) {
+        const hmi_device_action_t *a = &p->actions[k];
+        if (hmi_act_is_stop(a->kind)) { any = true; if (tag(slot, a->rel_tag) != 0) return false; }
+        else if (a->kind == HMI_ACT_SET_ENUM) {
+            char o[24];
+            hmi_action_option_label(a, 0, o, sizeof(o));
+            if (strcmp(o, "Off") == 0) { any = true; if (tag(slot, a->rel_tag) != 0) return false; }
+        }
+    }
+    return any || p->estop_coil != 0xFFFFu;
+}
+
+static void stop_all_group(const sim_type_t *types, int n, const char *name)
+{
+    world();
+    for (int i = 0; i < n; i++) CHECK(attach(types[i], NULL, 100));
+    run(100, 3000);                                          /* online, running in their start state */
+    for (int i = 0; i < n; i++) {                            /* start whatever can be started */
+        const hmi_device_profile_t *p = prof_of((uint8_t)i);
+        for (uint8_t k = 0; p && k < p->n_actions; k++)
+            if (hmi_act_is_start(p->actions[k].kind)) hmi_devmgr_action((uint8_t)i, k, 0, &g_t, &g_al, 3000);
+    }
+    run(3000, 6000);
+    for (int i = 0; i < n; i++) {                            /* a start queued just before STOP ALL ... */
+        const hmi_device_profile_t *p = prof_of((uint8_t)i);
+        for (uint8_t k = 0; p && k < p->n_actions; k++)
+            if (hmi_act_is_start(p->actions[k].kind)) hmi_devmgr_action((uint8_t)i, k, 0, &g_t, &g_al, 6000);
+    }
+    uint8_t missed = 9;
+    uint8_t stopped = hmi_devmgr_stop_all(&g_t, &g_al, 6000, &missed);
+    CHECK(stopped == n && missed == 0);
+    run(6000, 12000);                                        /* ... never runs after it */
+    for (int i = 0; i < n; i++) {
+        bool ok = is_stopped((uint8_t)i);
+        if (!ok) printf("  STOP ALL did not stop %s device %d (%s)\n", name, i, sim_type_info(types[i])->type_name);
+        CHECK(ok);
+    }
+    hmi_devmgr_shutdown();
+}
+
+static void test_stop_all_every_machine(void)
+{
+    static const sim_type_t a[] = { SIM_ATV340, SIM_TANK, SIM_CONVEYOR, SIM_COMPRESSOR };
+    static const sim_type_t b[] = { SIM_ATV630, SIM_BOILER, SIM_PUMPS, SIM_AHU };
+#if HMI_MAX_DEVICES >= 4
+    stop_all_group(a, 4, "A");
+    stop_all_group(b, 4, "B");
+    static const sim_type_t c[] = { SIM_VFD };
+    stop_all_group(c, 1, "C");
+#else
+    stop_all_group(a, HMI_MAX_DEVICES, "A");
+    stop_all_group(b, HMI_MAX_DEVICES, "B");
+#endif
+    /* a meter has nothing to stop: it is neither stopped nor missed */
+    world();
+    CHECK(attach(SIM_METER, "em6400", 100));
+    run(100, 2000);
+    uint8_t missed = 9;
+    CHECK(hmi_devmgr_stop_all(&g_t, &g_al, 2000, &missed) == 0 && missed == 0);
+    hmi_devmgr_shutdown();
+    /* an offline device is reported, never silently skipped */
+    world();
+    CHECK(attach(SIM_ATV340, NULL, 100));
+    run(100, 2000);
+    g_sim[0].freeze = true;                                  /* link dead: no replies */
+    uint32_t t = 2000;
+    hmi_device_info_t d[HMI_MAX_DEVICES];
+    do { run(t, t + 10); t += 10; hmi_devmgr_publish(d, t); } while (d[0].state != HMI_DEV_OFFLINE && t < 12000);
+    CHECK(d[0].state == HMI_DEV_OFFLINE);
+    missed = 0;
+    CHECK(hmi_devmgr_stop_all(&g_t, &g_al, t, &missed) == 0 && missed == 1);
+    CHECK(journal_has("OFFLINE, not stopped"));
+    hmi_devmgr_shutdown();
+}
+
 static void test_every_plc_comes_online(void)
 {
     static const sim_type_t types[] = { SIM_ATV340, SIM_ATV630, SIM_CONVEYOR, SIM_BOILER, SIM_PUMPS, SIM_COMPRESSOR, SIM_AHU, SIM_VFD };
@@ -427,6 +518,7 @@ int main(void)
     test_modules_match_devices();
     test_tank_scenario();
     test_hmi_heartbeat();
+    test_stop_all_every_machine();
     test_every_plc_comes_online();
     test_altivar_control();
     test_meter();

@@ -1,0 +1,28 @@
+// Windows resources: application icon and version information (windres / rc.exe)
+#include <winver.h>
+1 ICON "industrial_hmi.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     6,1,0,0
+PRODUCTVERSION  6,1,0,0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Prometheus HMI"
+            VALUE "FileDescription",  "Prometheus HMI - operator panel runtime"
+            VALUE "FileVersion",      "6.1"
+            VALUE "InternalName",     "industrial_hmi"
+            VALUE "OriginalFilename", "industrial_hmi.exe"
+            VALUE "ProductName",      "Prometheus HMI"
+            VALUE "ProductVersion",   "6.1"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

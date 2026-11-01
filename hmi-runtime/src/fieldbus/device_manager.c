@@ -719,25 +719,79 @@ void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, int16_t value, hmi_tag_
     }
 }
 
+static bool option0_is_off(const hmi_device_action_t *a)
+{
+    char o[24];
+    hmi_action_option_label(a, 0, o, sizeof(o));
+    return (o[0] == 'O' || o[0] == 'o') && (o[1] == 'f' || o[1] == 'F') && (o[2] == 'f' || o[2] == 'F') && o[3] == '\0';
+}
+
+uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms, uint8_t *not_stopped)
+{
+    (void)tags;
+    uint8_t stopped = 0, missed = 0;
+    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
+        slot_t *s = &s_slots[i];
+        const hmi_device_profile_t *p = s->info.profile;
+        if (s->info.state == HMI_DEV_EMPTY || !p) continue;
+        if (p->estop_coil == 0xFFFFu && p->n_actions == 0) continue;          /* a meter: nothing moves */
+        if (s->info.state != HMI_DEV_ONLINE) {
+            LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: OFFLINE, not stopped - stop it at the machine", s->info.label);
+            missed++;
+            continue;
+        }
+        /* A stop overrides everything queued before it: never let a queued start run after it */
+        if (s->wq_count || s->pulse_pending)
+            LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %u queued command(s) cancelled by STOP ALL", s->info.label,
+                (unsigned)(s->wq_count + (s->pulse_pending ? 1u : 0u)));
+        s->wq_count = 0;
+        s->pulse_pending = false;
+
+        bool sent = false, failed = false;
+        if (p->estop_coil != 0xFFFFu) {
+            if (queue_write(s, true, p->estop_coil, 1)) sent = true; else failed = true;
+        } else {
+            for (uint8_t k = 0; k < p->n_actions; k++) {
+                const hmi_device_action_t *a = &p->actions[k];
+                bool ok;
+                if (a->kind == HMI_ACT_COIL_OFF)                          ok = queue_write(s, true, a->address, 0);
+                else if (a->kind == HMI_ACT_REG_OFF)                      ok = queue_seq(s, a->address, a->seq, a->seq_len);
+                else if (a->kind == HMI_ACT_SET_ENUM && option0_is_off(a)) ok = queue_write(s, false, a->address, 0);
+                else continue;
+                if (ok) sent = true; else failed = true;
+            }
+        }
+        if (sent && !failed) {
+            LOG(al, now_ms, ALARM_SEV_ESTOP, "%s: STOP ALL sent", s->info.label);
+            stopped++;
+        } else {
+            LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: %s - stop it at the machine", s->info.label,
+                sent ? "stop only partly sent" : failed ? "stop write FAILED" : "no stop control");
+            missed++;
+        }
+    }
+    if (not_stopped) *not_stopped = missed;
+    return stopped;
+}
+
 uint8_t hmi_devmgr_estop(bool trip, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms)
 {
+    if (trip) return hmi_devmgr_stop_all(tags, al, now_ms, NULL);
     uint8_t sent = 0;
     for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
         slot_t *s = &s_slots[i];
         const hmi_device_profile_t *p = s->info.profile;
         if (s->info.state == HMI_DEV_EMPTY || !p || p->estop_coil == 0xFFFFu) continue;
-        if (!trip) {
-            uint8_t et = HMI_DEV_TAG(i, p->estop_tag);
-            uint8_t st = al->points[et].state;
-            if (hmi_tag_read_value(tags, et) == 0) continue;                       /* not tripped */
-            if (st == ALARM_PT_UNACK || st == ALARM_PT_RTN_UNACK) {
-                LOG(al, now_ms, ALARM_SEV_WARNING, "%s: E-stop reset refused, ack first", s->info.label);
-                continue;
-            }
+        uint8_t et = HMI_DEV_TAG(i, p->estop_tag);
+        uint8_t st = al->points[et].state;
+        if (hmi_tag_read_value(tags, et) == 0) continue;                       /* not tripped */
+        if (st == ALARM_PT_UNACK || st == ALARM_PT_RTN_UNACK) {
+            LOG(al, now_ms, ALARM_SEV_WARNING, "%s: stop-latch reset refused, ack first", s->info.label);
+            continue;
         }
-        bool ok = queue_write(s, true, p->estop_coil, (int16_t)(trip ? 1 : 0));
-        LOG(al, now_ms, ok ? (trip ? ALARM_SEV_ESTOP : ALARM_SEV_INFO) : ALARM_SEV_CRITICAL, "%s: E-stop %s%s",
-            s->info.label, trip ? "trip" : "reset", ok ? " commanded" : " write FAILED");
+        bool ok = queue_write(s, true, p->estop_coil, 0);
+        LOG(al, now_ms, ok ? ALARM_SEV_INFO : ALARM_SEV_CRITICAL, "%s: stop-latch reset%s", s->info.label,
+            ok ? " commanded" : " write FAILED");
         if (ok) sent++;
     }
     return sent;

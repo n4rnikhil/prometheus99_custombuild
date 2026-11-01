@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install analysis tools
-        run: sudo apt-get update && sudo apt-get install -y cppcheck gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf qemu-user
+        run: sudo apt-get update && sudo apt-get install -y cppcheck gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf qemu-user libx11-dev python3-pil gcc-mingw-w64-x86-64 nsis
       - name: PLC simulator - build and model tests
         working-directory: plc-simulator
         run: make && make test
@@ -30,6 +30,17 @@ jobs:
             q=qemu-${t%%-*}
             for x in test_core test_integration test_modbus_faults; do $q -L /usr/$t ./tests/$x; done
           done
+      - name: Release files - Linux archives and the Windows installer
+        run: |
+          installer/build_linux_release.sh dist
+          installer/build_windows_release.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            dist/*.tar.gz
+            dist/Prometheus-HMI-Setup-*.exe
+            dist/SHA256SUMS.txt
       - name: Static analysis
         run: |
           cppcheck --std=c99 --enable=warning,performance,portability --error-exitcode=1 \

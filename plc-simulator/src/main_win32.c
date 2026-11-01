@@ -586,14 +586,15 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     ReleaseDC(NULL, sdc);
     make_fonts();
 
-    /* command line: --network, --port <first port>, --add <type> (repeatable) */
+    /* command line: --network, --port <first port>, --add <type> (repeatable), --open-hmi */
     uint16_t base = PLC_DEFAULT_PORT;
-    bool network = false;
+    bool network = false, open_hmi_now = false;
     sim_type_t adds[PLC_MAX_STATIONS];
     int nadds = 0;
     for (int i = 1; i < __argc; i++) {
         const char *a = __argv[i], *next = i + 1 < __argc ? __argv[i + 1] : NULL;
         if (strcmp(a, "--network") == 0) network = true;
+        else if (strcmp(a, "--open-hmi") == 0) open_hmi_now = true;   /* one-click bench: start the HMI too */
         else if (strcmp(a, "--port") == 0 && next) { long v = strtol(next, NULL, 10); if (v > 0 && v < 65536 - PLC_MAX_STATIONS) base = (uint16_t)v; i++; }
         else if (strcmp(a, "--add") == 0 && next) {
             sim_type_t t = bench_type_by_name(next);
@@ -611,6 +612,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(1));                /* res/plc_simulator.rc */
+    wc.hIconSm = wc.hIcon;
     wc.lpszClassName = "PrometheusPlcSimulator";
     RegisterClassExA(&wc);
     g_hwnd = CreateWindowExA(0, wc.lpszClassName, "PLC Simulator - simulated PLCs, drives and meters on Modbus TCP", WS_OVERLAPPEDWINDOW,
@@ -623,6 +626,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     SetTimer(g_hwnd, TIMER_POLL, POLL_MS, NULL);
     ShowWindow(g_hwnd, show);
     UpdateWindow(g_hwnd);
+    if (open_hmi_now) open_hmi();
 
     MSG m;
     while (GetMessageA(&m, NULL, 0, 0) > 0) {

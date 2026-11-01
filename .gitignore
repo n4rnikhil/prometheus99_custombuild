@@ -9,11 +9,11 @@ plc_simulator_cli.exe
 plc-simulator/plc_simulator_cli
 *.o
 *.obj
+*.res
 *.pdb
 *.ilk
 *.idb
 *.map
-*.res
 snapshot_*.bmp
 
 # Runtime-generated persistent state & logs
@@ -67,3 +67,6 @@ hmi-runtime/industrial_hmi
 **/tests/test_modbus_faults
 plc-simulator/plc_simulator_cli
 **/tests/test_plc_models
+
+# Release output (installer/build_*_release.sh)
+dist/

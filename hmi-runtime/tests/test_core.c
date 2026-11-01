@@ -412,6 +412,12 @@ static void test_layout(void)
                         CHECK(!overlap);
                     }
                     hmi_rect_t body = hmi_layout_device_body(pa);
+                    if (hmi_layout_device_summary(pa)) {          /* too small for widgets: one big tap target */
+                        hmi_hit_t sh_ = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE,
+                                                            NULL, 0, devs, (uint8_t)n, 0xFF, pa.x + pa.w / 2, pa.y + pa.h / 2);
+                        CHECK(sh_.kind == HMI_HIT_DEVICE_OPEN && sh_.param == devs[a].slot);
+                        continue;
+                    }
                     uint8_t nt = 0;
                     const uint32_t *tk = hmi_layout_device_manifest(devs[a].profile, body, &nt);
                     CHECK(tk != NULL && nt > 0);
@@ -425,8 +431,9 @@ static void test_layout(void)
                         CHECK(hmi_profile_action(devs[a].profile, hmi_token_get_tag(tk[i])) != NULL);
                     }
                 }
-                CHECK(hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE, NULL, 0,
-                                          devs, (uint8_t)n, 0xFF, c.x + 30, c.y + 46).kind == HMI_HIT_NONE);
+                if (!hmi_layout_device_summary(hmi_layout_device_panel(c, n, 0)))
+                    CHECK(hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE, NULL, 0,
+                                              devs, (uint8_t)n, 0xFF, c.x + 30, c.y + 46).kind == HMI_HIT_NONE);
             }
             /* header controls do not overlap each other */
             hmi_rect_t e = hmi_layout_estop_button(w, h), ro = hmi_layout_role_pill(w, h), th = hmi_layout_theme_button(w, h);

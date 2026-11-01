@@ -1083,6 +1083,63 @@ static void render_empty_dashboard(hmi_renderer_t *r, const hmi_view_t *v, hmi_r
     text_center(r, &hmi_font_caption, t3, drv, C_DIM);
 }
 
+/* Summary card for a panel too small for the device's widgets: the main value, its state and a
+ * clear way in. Nothing is drawn over anything else, whatever the number of devices. */
+static void render_device_summary(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t p, const hmi_device_info_t *dev)
+{
+    hmi_rect_t b = hmi_layout_device_body(p);
+    hmi_draw_round_frame(r, b.x, b.y, b.w, b.h - 4, 14, C_CARD, C_LINE);
+    const hmi_device_profile_t *pf = dev->profile;
+    if (!pf) return;
+    uint8_t rel = pf->trend_tag;
+    if (rel == HMI_REL_NONE || rel >= HMI_DEVICE_TAG_SPAN) {
+        rel = 0;
+        for (uint8_t i = 0; i < pf->meta_count; i++) if (pf->meta[i].type == TAG_TYPE_ANALOG) { rel = pf->meta[i].tag_id; break; }
+    }
+    uint8_t tag = HMI_DEV_TAG(dev->slot, rel);
+    const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
+    char name[48], val[24], line[48];
+    nice_name(name, sizeof(name), m ? m->name : "Value");
+    fmt_value(val, sizeof(val), v, tag);
+    int16_t raw; uint8_t q;
+    bool ok = tag_value(v, tag, &raw, &q) && !v->data_stale;
+    uint8_t sev = point_sev(v, tag);
+    uint8_t vc = !ok ? C_DIM : sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_TEXT;
+    int x = b.x + 16, y = b.y + 8, right = b.x + b.w - 16;
+    int inner_h = b.h - 4;
+    const hmi_font_t *vf = inner_h >= 70 ? &hmi_font_headline : &hmi_font_title;
+
+    /* right: what to do next */
+    const char *go = "Details >";
+    text_right(r, &hmi_font_body_b, right, b.y + (inner_h - hmi_font_body_b.line_h) / 2, go, C_TEXT);
+    int rw = hmi_text_width(&hmi_font_body_b, go) + 24;
+
+    /* run state of the first start/stop control, if the device has one */
+    const char *st = NULL;
+    uint8_t sc = C_MUTED;
+    if (pf->estop_tag != HMI_REL_NONE && hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, pf->estop_tag)) &&
+        v->tags && v->tags->tags[HMI_DEV_TAG(dev->slot, pf->estop_tag)].value) { st = "Stop latch"; sc = C_RED; }
+    for (uint8_t k = 0; !st && k < pf->n_actions; k++) {
+        if (!hmi_act_is_stop(pf->actions[k].kind)) continue;
+        int16_t rv; uint8_t rq;
+        if (tag_value(v, HMI_DEV_TAG(dev->slot, pf->actions[k].rel_tag), &rv, &rq) && !v->data_stale) {
+            st = rv ? "Running" : "Stopped";
+            sc = rv ? C_OK : C_MUTED;
+        }
+    }
+    if (st) {
+        int sw_ = hmi_text_width(&hmi_font_body_b, st);
+        int sx = right - rw - sw_;
+        hmi_draw_circle(r, sx - 10, b.y + inner_h / 2, 4, sc);
+        hmi_draw_text(r, &hmi_font_body_b, sx, b.y + (inner_h - hmi_font_body_b.line_h) / 2, st, C_TEXT);
+        rw += sw_ + 26;
+    }
+    /* left: the main value, never covered */
+    text_fit(r, &hmi_font_caption, x, y, right - rw - x, name, C_MUTED);
+    snprintf(line, sizeof(line), "%s %s", val, (m && m->unit) ? m->unit : "");
+    text_fit(r, vf, x, y + hmi_font_caption.line_h + 2, right - rw - x, line, vc);
+}
+
 static void render_devices(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t c)
 {
     if (!v->devices || v->ndev == 0) { render_empty_dashboard(r, v, c); return; }
@@ -1091,6 +1148,7 @@ static void render_devices(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t c)
         hmi_rect_t p = hmi_layout_device_panel(c, v->ndev, d);
         if (!band_hits(r, p.y, p.h)) continue;
         device_header(r, p, dev);
+        if (hmi_layout_device_summary(p)) { render_device_summary(r, v, p, dev); continue; }
         hmi_rect_t body = hmi_layout_device_body(p);
         uint8_t nt = 0;
         const uint32_t *tk = hmi_layout_device_manifest(dev->profile, body, &nt);

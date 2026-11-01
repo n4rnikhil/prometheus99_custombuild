@@ -10,6 +10,9 @@
  * Shell options (all other options go to the application, see src/app.c):
  *   --fb <device>     framebuffer device (default /dev/fb0, or $HMI_FBDEV)
  *   --headless        no display at all: Modbus, alarms, log and report only (servers, CI)
+ *   --window          a desktop window (X11, or XWayland on Wayland desktops). Default whenever a
+ *                     desktop session is present ($DISPLAY); otherwise the framebuffer is used
+ *   --fb <device>     force the framebuffer even on a desktop
  *   --horn-gpio <chip>:<line>   drive a GPIO line high while unacknowledged alarms exist
  * Touch calibration via environment: HMI_TOUCH_SWAP_XY=1, HMI_TOUCH_INVERT_X=1, HMI_TOUCH_INVERT_Y=1
  *
@@ -35,6 +38,7 @@
 #include <linux/gpio.h>
 
 #include "app.h"
+#include "x11_window.h"
 #include "hal/platform.h"
 #include "hal/sys.h"
 #include "hal/timer.h"
@@ -438,10 +442,11 @@ int main(int argc, char **argv)
     static char *app_argv[64];
     int app_argc = 0;
     const char *fbdev = getenv("HMI_FBDEV") ? getenv("HMI_FBDEV") : "/dev/fb0";
-    bool headless = false;
+    bool headless = false, force_fb = false, force_window = false, windowed = false;
 
     for (int i = 0; i < argc && app_argc < 63; i++) {         /* take the shell's own options out */
-        if (i > 0 && strcmp(argv[i], "--fb") == 0 && i + 1 < argc) { fbdev = argv[++i]; continue; }
+        if (i > 0 && strcmp(argv[i], "--fb") == 0 && i + 1 < argc) { fbdev = argv[++i]; force_fb = true; continue; }
+        if (i > 0 && strcmp(argv[i], "--window") == 0) { force_window = true; continue; }
         if (i > 0 && strcmp(argv[i], "--headless") == 0) { headless = true; continue; }
         if (i > 0 && strcmp(argv[i], "--horn-gpio") == 0 && i + 1 < argc) {
             const char *spec = argv[++i];
@@ -463,7 +468,16 @@ int main(int argc, char **argv)
 
     int sw = HMI_DISPLAY_WIDTH_DEFAULT, sh = HMI_DISPLAY_HEIGHT_DEFAULT;
     for (int i = 0; i < MAX_INPUTS; i++) s_in[i].fd = -1;     /* never fd 0 (stdin) by accident */
-    if (!headless) {
+    if (!headless && !force_fb && (force_window || x11_available())) {
+        windowed = x11_open(sw, sh, "Prometheus HMI");
+        if (!windowed && force_window) {
+            fprintf(stderr, "industrial_hmi: --window: no desktop session or no libX11 on this system\n");
+            app_shutdown();
+            return 1;
+        }
+        if (windowed) app_resize(sw, sh);
+    }
+    if (!headless && !windowed) {
         if (!fb_open(fbdev)) {
             fprintf(stderr, "industrial_hmi: no usable display; use --headless to run without one\n");
             fb_close();
@@ -481,7 +495,18 @@ int main(int argc, char **argv)
     if (!app_start_workers()) { fb_close(); app_shutdown(); return 2; }
 
     uint32_t last_scan = hmi_timer_get_ms();
-    while (app_running()) {
+    while (windowed && app_running()) {                       /* desktop window */
+        uint32_t wait_ms = app_tick();
+        if (x11_events()) g_repaint = 1;
+        if (g_repaint) {
+            g_repaint = 0;
+            app_render(x11_present_band, NULL);
+            x11_flush();
+        }
+        struct pollfd xp = { x11_fd(), POLLIN, 0 };
+        poll(&xp, 1, (int)(wait_ms ? wait_ms : 1));
+    }
+    while (!windowed && app_running()) {
         uint32_t wait_ms = app_tick();
         if (!headless && g_repaint) {
             g_repaint = 0;
@@ -514,6 +539,6 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < MAX_INPUTS; i++) if (s_in[i].fd >= 0) { close(s_in[i].fd); s_in[i].fd = -1; }
     app_shutdown();
-    fb_close();
+    if (windowed) x11_close(); else fb_close();
     return 0;
 }

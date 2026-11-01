@@ -1,0 +1,9 @@
+#!/bin/sh
+# Prometheus HMI launcher (Linux): keeps the site's settings, log, key and vault in the user's
+# data folder, not next to the program. Extra options are passed to the HMI.
+APP_DIR="$(dirname "$(readlink -f "$0")")"   # the real folder, also when started through a link
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/prometheus-hmi"
+mkdir -p "$DATA" && chmod 700 "$DATA"
+[ -f "$DATA/hmi.cfg" ] || cp "$APP_DIR/hmi.cfg" "$DATA/hmi.cfg"
+exec "$APP_DIR/industrial_hmi" --config "$DATA/hmi.cfg" --log "$DATA/alarms.log" \
+     --key "$DATA/hmi.key" --vault "$DATA/security.vault" "$@"
