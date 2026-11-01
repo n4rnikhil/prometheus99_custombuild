@@ -25,6 +25,9 @@
 #ifndef HMI_ALARM_LOG_MAX_BYTES
 #define HMI_ALARM_LOG_MAX_BYTES (256u * 1024u)
 #endif
+#ifndef HMI_ALARM_JOURNAL_SIZE
+#define HMI_ALARM_JOURNAL_SIZE  16
+#endif
 #ifndef HMI_STACK_FIELDBUS
 #define HMI_STACK_FIELDBUS      (8u * 1024u)
 #endif

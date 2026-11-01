@@ -70,7 +70,9 @@ bool hal_thread_start(hal_thread_t *t, void (*fn)(void *), void *arg, hal_prio_t
 
     if (pthread_attr_init(&attr) != 0) return false;
     if (stack_bytes) {
-        size_t sz = stack_bytes < PTHREAD_STACK_MIN ? PTHREAD_STACK_MIN : stack_bytes;
+        /* PTHREAD_STACK_MIN is a long on 32-bit glibc: compare as size_t on every target */
+        size_t min_sz = (size_t)PTHREAD_STACK_MIN;
+        size_t sz = (size_t)stack_bytes < min_sz ? min_sz : (size_t)stack_bytes;
         pthread_attr_setstacksize(&attr, sz);
     }
 

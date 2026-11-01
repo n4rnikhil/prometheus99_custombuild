@@ -1,7 +1,7 @@
 /**
  * @file test_core.c
  * @brief Unit tests for the portable core: tags, alarms (ISA-18.2), Modbus codec,
- *        gestures, layout/hit-test, renderer bounds, hash-chained alarm log.
+ *        gestures, layout/hit-test, renderer bounds, keyed (HMAC) alarm log, device key.
  *
  * Build & run:  build.bat test     (or see build.bat for the gcc line)
  * Exit code 0 = all tests passed.
@@ -16,6 +16,7 @@
 #include "core/alarms.h"
 #include "core/alarm_log.h"
 #include "core/crc32.h"
+#include "core/device_key.h"
 #include "core/sha256.h"
 #include "core/security.h"
 #include "core/watchdog.h"
@@ -153,7 +154,7 @@ static void test_alarms(void)
     /* Journal: newest first, monotonic seq */
     const hmi_alarm_record_t *n0 = hmi_alarms_journal_newest(&s, 0), *n1 = hmi_alarms_journal_newest(&s, 1);
     CHECK(n0 && n1 && n0->seq == s.journal_total && n1->seq + 1 == n0->seq);
-    for (int i = 0; i < 40; i++) hmi_alarms_log_event(&s, 20u + (uint32_t)i, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "x");
+    for (int i = 0; i < HMI_ALARM_JOURNAL_SIZE + 24; i++) hmi_alarms_log_event(&s, 20u + (uint32_t)i, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "x");
     CHECK(hmi_alarms_journal_count(&s) == HMI_ALARM_JOURNAL_SIZE);
     CHECK(hmi_alarms_journal_by_seq(&s, s.journal_total) != NULL);
     CHECK(hmi_alarms_journal_by_seq(&s, 1) == NULL);
@@ -564,9 +565,35 @@ static void test_auth(void)
     hmi_sha256_final(&c, h);
     CHECK(h[0] == 0xcd && h[1] == 0xc7 && h[31] == 0xd0);
 
+    /* HMAC-SHA256: RFC 4231 test cases 1, 2 and 6 (key longer than the block) */
+    static const uint8_t t1[32] = { 0xb0,0x34,0x4c,0x61,0xd8,0xdb,0x38,0x53,0x5c,0xa8,0xaf,0xce,0xaf,0x0b,0xf1,0x2b,
+                                    0x88,0x1d,0xc2,0x00,0xc9,0x83,0x3d,0xa7,0x26,0xe9,0x37,0x6c,0x2e,0x32,0xcf,0xf7 };
+    static const uint8_t t2[32] = { 0x5b,0xdc,0xc1,0x46,0xbf,0x60,0x75,0x4e,0x6a,0x04,0x24,0x26,0x08,0x95,0x75,0xc7,
+                                    0x5a,0x00,0x3f,0x08,0x9d,0x27,0x39,0x83,0x9d,0xec,0x58,0xb9,0x64,0xec,0x38,0x43 };
+    static const uint8_t t6[32] = { 0x60,0xe4,0x31,0x59,0x1e,0xe0,0xb6,0x7f,0x0d,0x8a,0x26,0xaa,0xcb,0xf5,0xb7,0x7f,
+                                    0x8e,0x0b,0xc6,0x21,0x37,0x28,0xc5,0x14,0x05,0x46,0x04,0x0f,0x0e,0xe3,0x7f,0x54 };
+    uint8_t k1[20]; memset(k1, 0x0b, sizeof(k1));
+    hmi_hmac_sha256(k1, sizeof(k1), "Hi There", 8, h);
+    CHECK(memcmp(h, t1, 32) == 0);
+    hmi_hmac_sha256("Jefe", 4, "what do ya want for nothing?", 28, h);
+    CHECK(memcmp(h, t2, 32) == 0);
+    uint8_t k6[131]; memset(k6, 0xaa, sizeof(k6));
+    hmi_hmac_sha256(k6, sizeof(k6), "Test Using Larger Than Block-Size Key - Hash Key First", 54, h);
+    CHECK(memcmp(h, t6, 32) == 0);
+    hmi_hmac_sha256_t hc;                                                  /* streaming == one shot */
+    hmi_hmac_sha256_init(&hc, "Jefe", 4);
+    hmi_hmac_sha256_update(&hc, "what do ya ", 11);
+    hmi_hmac_sha256_update(&hc, "want for nothing?", 17);
+    hmi_hmac_sha256_final(&hc, h);
+    CHECK(memcmp(h, t2, 32) == 0);
+    CHECK(hmi_ct_equal(t1, t1, 32) && !hmi_ct_equal(t1, t2, 32));
+
     hmi_security_ctx_t sec;
     hmi_security_init(&sec);
     CHECK(sec.current_role == ROLE_VIEWER && sec.default_pins);
+    /* commissioning gate: factory PINs never sign in unless the bench override is on */
+    CHECK(hmi_security_login(&sec, ROLE_OPERATOR, "1111", 0) == HMI_LOGIN_FACTORY_PIN && sec.current_role == ROLE_VIEWER);
+    sec.allow_factory_pins = true;
     CHECK(hmi_security_login(&sec, ROLE_OPERATOR, "1111", 0) == HMI_LOGIN_OK && sec.current_role == ROLE_OPERATOR);
     CHECK(hmi_security_login(&sec, ROLE_ENGINEER, "123", 1) == HMI_LOGIN_INVALID);
     CHECK(hmi_security_login(&sec, ROLE_ENGINEER, "12a4", 1) == HMI_LOGIN_INVALID);
@@ -581,20 +608,60 @@ static void test_auth(void)
     CHECK(hmi_security_login(&sec, ROLE_ENGINEER, "3333", 4 + HMI_PIN_LOCKOUT_MS) == HMI_LOGIN_OK);
     CHECK(sec.current_role == ROLE_ENGINEER);
     CHECK(hmi_security_login(&sec, ROLE_VIEWER, NULL, 50000) == HMI_LOGIN_OK && sec.current_role == ROLE_VIEWER);
+    sec.allow_factory_pins = false;
 
-    /* vault round trip with a new PIN; a corrupted vault is rejected */
+    /* site PIN rules: 6..8 digits, not trivial */
     static const uint8_t salt[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-    CHECK(hmi_security_set_pin(&sec, ROLE_MAINTENANCE, "975310", salt) && !sec.default_pins);
-    CHECK(!hmi_security_set_pin(&sec, ROLE_VIEWER, "1234", salt));
+    CHECK(hmi_security_set_pin(&sec, ROLE_VIEWER, "975310", salt) == HMI_PIN_SET_BAD_ROLE);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "1234", salt) == HMI_PIN_SET_FORMAT);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "123456789", salt) == HMI_PIN_SET_FORMAT);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "12345a", salt) == HMI_PIN_SET_FORMAT);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "777777", salt) == HMI_PIN_SET_TRIVIAL);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "123456", salt) == HMI_PIN_SET_TRIVIAL);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "987654", salt) == HMI_PIN_SET_TRIVIAL);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "8901234", salt) == HMI_PIN_SET_TRIVIAL);
+
+    /* changing ONE role must not clear the factory warning of the others */
+    CHECK(hmi_security_set_pin(&sec, ROLE_MAINTENANCE, "975310", salt) == HMI_PIN_SET_OK);
+    CHECK(sec.default_pins && sec.factory[ROLE_OPERATOR] && !sec.factory[ROLE_MAINTENANCE] && sec.factory[ROLE_ENGINEER]);
+    CHECK(hmi_security_login(&sec, ROLE_MAINTENANCE, "975310", 60000) == HMI_LOGIN_OK);
+    CHECK(hmi_security_login(&sec, ROLE_ENGINEER, "3333", 60001) == HMI_LOGIN_FACTORY_PIN);
+    CHECK(hmi_security_set_pin(&sec, ROLE_OPERATOR, "406182", salt) == HMI_PIN_SET_OK);
+    CHECK(hmi_security_set_pin(&sec, ROLE_ENGINEER, "71935268", salt) == HMI_PIN_SET_OK);
+    CHECK(!sec.default_pins);
+
+    /* vault: signed with the device key */
+    static const uint8_t devkey[32] = { 0x42, 0x13, 0x37 };
+    static const uint8_t otherkey[32] = { 0x99 };
+    static hmi_security_ctx_t sk; hmi_security_init(&sk);
+    hmi_security_set_device_key(&sk, devkey);
+    CHECK(hmi_security_set_pin(&sk, ROLE_MAINTENANCE, "975310", salt) == HMI_PIN_SET_OK);
     uint8_t blob[HMI_VAULT_SIZE];
-    CHECK(hmi_security_vault_export(&sec, blob, sizeof(blob)) == HMI_VAULT_SIZE);
-    hmi_security_ctx_t s2; hmi_security_init(&s2);
-    CHECK(hmi_security_vault_import(&s2, blob, sizeof(blob)));
+    CHECK(hmi_security_vault_export(&sk, blob, sizeof(blob)) == HMI_VAULT_SIZE);
+    static hmi_security_ctx_t s2; hmi_security_init(&s2);
+    hmi_security_set_device_key(&s2, devkey);
+    CHECK(hmi_security_vault_import(&s2, blob, sizeof(blob)) == HMI_VAULT_OK);
+    CHECK(s2.default_pins && s2.factory[ROLE_OPERATOR] && !s2.factory[ROLE_MAINTENANCE]);
     CHECK(hmi_security_login(&s2, ROLE_MAINTENANCE, "2222", 0) == HMI_LOGIN_BAD_PIN);
     CHECK(hmi_security_login(&s2, ROLE_MAINTENANCE, "975310", 0) == HMI_LOGIN_OK);
-    blob[60] ^= 1;
-    hmi_security_ctx_t s3; hmi_security_init(&s3);
-    CHECK(!hmi_security_vault_import(&s3, blob, sizeof(blob)) && s3.default_pins);
+    /* the same vault under another device key: refused, and the PIN hash does not match either */
+    static hmi_security_ctx_t s4; hmi_security_init(&s4);
+    hmi_security_set_device_key(&s4, otherkey);
+    CHECK(hmi_security_vault_import(&s4, blob, sizeof(blob)) == HMI_VAULT_AUTH_FAILED && s4.default_pins);
+    /* an attacker who edits a record (e.g. copies the Maintenance hash over Engineer) is caught */
+    memcpy(blob + 8 + 2 * 44 + 4, blob + 8 + 1 * 44 + 4, 40);
+    static hmi_security_ctx_t s3; hmi_security_init(&s3);
+    hmi_security_set_device_key(&s3, devkey);
+    CHECK(hmi_security_vault_import(&s3, blob, sizeof(blob)) == HMI_VAULT_AUTH_FAILED && s3.default_pins);
+    /* v1 vaults (CRC only, anyone can write one) are refused */
+    uint8_t v1[HMI_VAULT_V1_SIZE] = { 0x53, 0x45, 0x43, 0x56, 1, 3 };
+    CHECK(hmi_security_vault_import(&s3, v1, sizeof(v1)) == HMI_VAULT_LEGACY);
+    CHECK(hmi_security_vault_import(&s3, blob, 10) == HMI_VAULT_DAMAGED);
+    /* factory PINs are re-hashed under the device key and still work with the bench override */
+    s3.allow_factory_pins = true;
+    CHECK(hmi_security_login(&s3, ROLE_ENGINEER, "3333", 0) == HMI_LOGIN_OK);
+    /* the same PIN and salt give a different hash under another key (vault copy is useless alone) */
+    CHECK(memcmp(sk.pins[ROLE_ENGINEER].hash, s4.pins[ROLE_ENGINEER].hash, 32) != 0);
 }
 
 /* Render every screen at many sizes with guard bytes around the band buffer. */
@@ -672,18 +739,21 @@ static void test_alarm_log(void)
     char path[HMI_PATH_MAX] = "hmi_test_alarms.log";      /* in the working directory: portable */
     hal_file_remove(path);
     char p1[HMI_PATH_MAX + 4]; snprintf(p1, sizeof(p1), "%s.1", path); hal_file_remove(p1);
+    static const uint8_t key_a[HMI_DEVICE_KEY_LEN] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    static const uint8_t key_b[HMI_DEVICE_KEY_LEN] = { 9, 9, 9 };
+    hmi_alarm_log_set_key(key_a);
 
     static hmi_alarm_supervisor_t s; hmi_alarms_init(&s);
     CHECK(hmi_alarm_log_open(path, 1u << 20));
     for (int i = 0; i < 10; i++) hmi_alarms_log_event(&s, (uint32_t)i, 3, ALARM_SEV_WARNING, 1, "event, with \"quotes\"");
     hmi_alarm_log_sync(&s);
     hmi_alarm_log_stats_t st; hmi_alarm_log_get_stats(&st);
-    CHECK(st.records_written == 10 && st.records_lost == 0);
-    /* overrun: 40 events between two syncs, only 16 are still in memory */
-    for (int i = 0; i < 40; i++) hmi_alarms_log_event(&s, 100u + (uint32_t)i, 3, ALARM_SEV_INFO, 0, "burst");
+    CHECK(st.records_written == 10 && st.records_lost == 0 && st.authenticated);
+    /* overrun: 24 more events between two syncs than the journal holds */
+    for (int i = 0; i < HMI_ALARM_JOURNAL_SIZE + 24; i++) hmi_alarms_log_event(&s, 100u + (uint32_t)i, 3, ALARM_SEV_INFO, 0, "burst");
     hmi_alarm_log_sync(&s);
     hmi_alarm_log_get_stats(&st);
-    CHECK(st.records_lost == 24 && st.records_written == 27);
+    CHECK(st.records_lost == 24 && st.records_written == 10u + 1u + HMI_ALARM_JOURNAL_SIZE);
     hmi_alarm_log_close();
 
     /* restart: the chain continues */
@@ -697,7 +767,7 @@ static void test_alarm_log(void)
 
     uint32_t lines = 0, bad = 0, first = 0;
     CHECK(hmi_alarm_log_verify_file(path, &lines, &bad, &first));
-    CHECK(lines == 29 && bad == 0);
+    CHECK(lines == 13u + HMI_ALARM_JOURNAL_SIZE && bad == 0);
 
     /* tamper 1: change one character */
     static char buf[16384];
@@ -740,7 +810,139 @@ static void test_alarm_log(void)
     CHECK(st.rotations >= 1 && st.write_errors == 0);
     CHECK(hmi_alarm_log_verify_file(path, &lines, &bad, &first));
     CHECK(hmi_alarm_log_verify_file(p1, &lines, &bad, &first));
+
+    /* the wrong key never verifies, and the note names both keys */
+    hmi_alarm_log_set_key(key_b);
+    CHECK(!hmi_alarm_log_verify_file(path, &lines, &bad, &first) && first == 1);
+    CHECK(strstr(hmi_alarm_log_verify_note(), "signed with key") != NULL);
+    /* opening with another key does not append to the old file: it is moved aside */
+    CHECK(hmi_alarm_log_open(path, 1u << 20));
+    hmi_alarm_log_close();
+    char pd[HMI_PATH_MAX + 16]; snprintf(pd, sizeof(pd), "%s.damaged", path);
+    hmi_alarm_log_set_key(key_a);
+    CHECK(hmi_alarm_log_verify_file(pd, &lines, &bad, &first));
+    hal_file_remove(pd);
     hal_file_remove(path); hal_file_remove(p1);
+
+    /* attacks the old CRC chain could not detect */
+    CHECK(hmi_alarm_log_open(path, 1u << 20));
+    static hmi_alarm_supervisor_t s4; hmi_alarms_init(&s4);
+    for (int i = 0; i < 6; i++) hmi_alarms_log_event(&s4, (uint32_t)i, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "Operator: Pump start");
+    hmi_alarm_log_sync(&s4);
+    hmi_alarm_log_close();
+    CHECK(hmi_alarm_log_verify_file(path, &lines, &bad, &first) && lines == 7);
+    f = hal_file_open(path, HAL_FILE_READ);
+    n = f ? hal_file_read(f, buf, sizeof(buf) - 1) : 0;
+    hal_file_close(f);
+    if (n < 0) n = 0;
+    buf[n] = 0;
+    {   /* (a) an attacker without the key rewrites line 3 and re-signs it with a key of their own */
+        static char forged[16384];
+        memcpy(forged, buf, (size_t)n + 1);
+        char *l2 = strstr(forged, "\r\n") + 2;              /* start of record 1 */
+        char *r2 = strstr(l2, "\r\n") + 2;                  /* start of record 2 */
+        char *r2e = strstr(r2, "\r\n");
+        char prev[33]; memcpy(prev, r2 - 2 - 32, 32); prev[32] = 0;
+        hmi_alarm_record_t r; memset(&r, 0, sizeof(r));
+        r.seq = 2; r.tag_id = HMI_ALARM_TAG_SYSTEM; r.severity = ALARM_SEV_INFO;
+        snprintf(r.message, sizeof(r.message), "Operator: Pump stop");
+        hmi_alarm_log_set_key(key_b);
+        char line[320], mac[33];
+        size_t ln = hmi_alarm_log_format_line(line, sizeof(line), &r, "2026-01-01T00:00:00.000Z", prev, mac);
+        hmi_alarm_log_set_key(key_a);
+        CHECK(ln > 0);
+        static char out[16384];
+        size_t head = (size_t)(r2 - forged);
+        memcpy(out, forged, head);
+        memcpy(out + head, line, ln);
+        strcpy(out + head + ln, r2e + 2);
+        f = hal_file_open(path, HAL_FILE_WRITE_NEW);
+        hal_file_write(f, out, strlen(out)); hal_file_close(f);
+        CHECK(!hmi_alarm_log_verify_file(path, &lines, &bad, &first) && first == 3);
+    }
+    {   /* (b) cut the first two records off and keep the header: the chain breaks at line 2 */
+        char *r1 = strstr(buf, "\r\n") + 2;
+        char *r3 = strstr(strstr(r1, "\r\n") + 2, "\r\n") + 2;
+        static char out[16384];
+        size_t hl = (size_t)(r1 - buf);
+        memcpy(out, buf, hl);
+        strcpy(out + hl, r3);
+        f = hal_file_open(path, HAL_FILE_WRITE_NEW);
+        hal_file_write(f, out, strlen(out)); hal_file_close(f);
+        CHECK(!hmi_alarm_log_verify_file(path, &lines, &bad, &first) && first == 2);
+    }
+    {   /* (c) drop the header too: a v3 file must start with its signed header */
+        char *r1 = strstr(buf, "\r\n") + 2;
+        f = hal_file_open(path, HAL_FILE_WRITE_NEW);
+        hal_file_write(f, r1, strlen(r1)); hal_file_close(f);
+        CHECK(!hmi_alarm_log_verify_file(path, &lines, &bad, &first) && first == 1);
+    }
+    hal_file_remove(path);
+
+    /* a v2 log from an older build still verifies, reported as integrity only, and is moved aside */
+    {
+        static const char v2[] =
+            "# industrial_hmi alarm log v2;chain=C001CAFE;seq,utc,uptime_ms,tag,severity,state,message,crc32c\r\n"
+            "1,2026-11-01T13:00:08.943Z,2,SYS,INFO,NORMAL,\"HMI started: plug-and-play\",501A0791\r\n";
+        f = hal_file_open(path, HAL_FILE_WRITE_NEW);
+        hal_file_write(f, v2, sizeof(v2) - 1); hal_file_close(f);
+        CHECK(hmi_alarm_log_verify_file(path, &lines, &bad, &first) && lines == 2);
+        CHECK(strstr(hmi_alarm_log_verify_note(), "v2") != NULL);
+        CHECK(hmi_alarm_log_open(path, 1u << 20));
+        hmi_alarm_log_get_stats(&st);
+        hmi_alarm_log_close();
+        CHECK(st.legacy_rotated && !st.chain_resumed);
+        char pv2[HMI_PATH_MAX + 8]; snprintf(pv2, sizeof(pv2), "%s.v2", path);
+        CHECK(hmi_alarm_log_verify_file(pv2, &lines, &bad, &first));
+        CHECK(hmi_alarm_log_verify_file(path, &lines, &bad, &first) && lines == 1);
+        hal_file_remove(pv2);
+    }
+    hal_file_remove(path); hal_file_remove(p1);
+}
+
+static void test_utc_format(void)
+{
+    char b[32];
+    hal_utc_format(0, b, sizeof(b));                         CHECK(strcmp(b, "1970-01-01T00:00:00.000Z") == 0);
+    hal_utc_format(951782400123ull, b, sizeof(b));           CHECK(strcmp(b, "2000-02-29T00:00:00.123Z") == 0);
+    hal_utc_format(1704067199999ull, b, sizeof(b));          CHECK(strcmp(b, "2023-12-31T23:59:59.999Z") == 0);
+    hal_utc_format(4102444800000ull, b, sizeof(b));          CHECK(strcmp(b, "2100-01-01T00:00:00.000Z") == 0);
+    hal_utc_format(1709164800000ull, b, sizeof(b));          CHECK(strcmp(b, "2024-02-29T00:00:00.000Z") == 0);
+    /* hal_utc_ms() and hal_utc_now() read the same clock: same second (or the next one) */
+    char now[32];
+    uint64_t ms = hal_utc_ms();
+    hal_utc_now(now, sizeof(now));
+    hal_utc_format(ms, b, sizeof(b));
+    CHECK(strncmp(b, now, 16) == 0);                         /* same minute */
+}
+
+static void test_device_key(void)
+{
+    const char *path = "hmi_test_fs_key.bin";
+    hal_file_remove(path);
+    uint8_t k1[HMI_DEVICE_KEY_LEN], k2[HMI_DEVICE_KEY_LEN];
+    CHECK(hmi_device_key_load(path, false, k1) == HMI_KEY_MISSING);
+    CHECK(hmi_device_key_load(path, true, k1) == HMI_KEY_CREATED);
+    CHECK(hmi_device_key_load(path, true, k2) == HMI_KEY_LOADED);
+    CHECK(memcmp(k1, k2, sizeof(k1)) == 0);
+    static const uint8_t zero[HMI_DEVICE_KEY_LEN];
+    CHECK(memcmp(k1, zero, sizeof(k1)) != 0);
+    char id1[9], id2[9];
+    hmi_device_key_id(k1, id1);
+    k2[0] ^= 1u;
+    hmi_device_key_id(k2, id2);
+    CHECK(strlen(id1) == 8 && strcmp(id1, id2) != 0);
+    /* a damaged key file is reported and left alone, never replaced by a new key */
+    uint8_t raw[HMI_DEVICE_KEY_FILE_LEN];
+    hal_file_t *f = hal_file_open(path, HAL_FILE_READ);
+    CHECK(f && hal_file_read(f, raw, sizeof(raw)) == (int)sizeof(raw));
+    hal_file_close(f);
+    raw[10] ^= 0x40u;
+    f = hal_file_open(path, HAL_FILE_WRITE_NEW);
+    hal_file_write(f, raw, sizeof(raw)); hal_file_close(f);
+    CHECK(hmi_device_key_load(path, true, k2) == HMI_KEY_DAMAGED);
+    CHECK(hmi_device_key_load(path, true, k2) == HMI_KEY_DAMAGED);
+    hal_file_remove(path);
 }
 
 static void test_discovery_targets(void)
@@ -887,6 +1089,8 @@ test_hal();
     test_discovery_targets();
     test_renderer();
     test_alarm_log();
+    test_device_key();
+    test_utc_format();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

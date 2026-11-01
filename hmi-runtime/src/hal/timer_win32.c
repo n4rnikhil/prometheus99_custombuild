@@ -13,13 +13,24 @@
 
 static LARGE_INTEGER s_qpc_freq;
 static LARGE_INTEGER s_qpc_boot;
+static volatile LONG  s_qpc_ready;
+
+/* The time base must work before hmi_timer_init() too (POSIX needs no init, and code that reads
+ * the clock early used to divide by a zero frequency here). QPF is constant from boot, so a race
+ * between two first callers only repeats the same values. */
+static void qpc_setup(void)
+{
+    if (s_qpc_ready) return;
+    QueryPerformanceFrequency(&s_qpc_freq);
+    if (s_qpc_freq.QuadPart <= 0) s_qpc_freq.QuadPart = 1;
+    QueryPerformanceCounter(&s_qpc_boot);
+    InterlockedExchange(&s_qpc_ready, 1);
+}
 
 void hmi_timer_init(void)
 {
     timeBeginPeriod(1);
-    QueryPerformanceFrequency(&s_qpc_freq);
-    QueryPerformanceCounter(&s_qpc_boot);
-    if (s_qpc_freq.QuadPart <= 0) s_qpc_freq.QuadPart = 1;
+    qpc_setup();
 }
 
 void hmi_timer_shutdown(void)
@@ -30,6 +41,7 @@ void hmi_timer_shutdown(void)
 uint64_t hmi_timer_get_us(void)
 {
     LARGE_INTEGER now;
+    qpc_setup();
     QueryPerformanceCounter(&now);
     uint64_t ticks = (uint64_t)(now.QuadPart - s_qpc_boot.QuadPart);
     uint64_t freq = (uint64_t)s_qpc_freq.QuadPart;

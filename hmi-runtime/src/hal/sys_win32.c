@@ -21,6 +21,15 @@ void hal_utc_now(char *out, size_t cap)
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 }
 
+uint64_t hal_utc_ms(void)
+{
+    FILETIME ft;                                   /* 100 ns ticks since 1601-01-01 */
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    const uint64_t EPOCH_1970 = 116444736000000000ull;
+    return t < EPOCH_1970 ? 0 : (t - EPOCH_1970) / 10000u;
+}
+
 bool hal_random(void *out, size_t n)
 {
     unsigned char *p = (unsigned char *)out;

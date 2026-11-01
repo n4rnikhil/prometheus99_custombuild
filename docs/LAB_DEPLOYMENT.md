@@ -17,8 +17,9 @@ that sits on the panels' Ethernet switch and talks Modbus TCP to the PLCs and dr
 | Option | What it needs | Notes |
 |---|---|---|
 | **A. Windows PC** | a PC on the switch, with the runtime | the simplest; this is what has been tested |
-| **B. Harmony P6 iPC or any Windows industrial PC** | Windows, the runtime | fits the lab if a P6 is on hand |
-| **C. Raspberry Pi** | Linux build, framebuffer or headless | the `make` build is type-checked but not run on a Pi |
+| **B. Harmony P6 iPC or any Windows industrial PC** | Windows, the runtime | Schneider sells the P6 with Windows 10 IoT Enterprise and states it "can run all software on Windows 10"; not yet tried on one |
+| **C. Raspberry Pi** | Linux build, framebuffer or headless | built and tested for 32- and 64-bit Pi under emulation; not yet run on a Pi screen |
+| **D. Harmony STW6 web panel (future)** | a web front end in the runtime | the STW6 is a browser terminal that shows any HTML5 server. If the runtime served its screens over HTTP, an STW6 on the same switch could display them with no Schneider runtime. Not built yet; it would need HTTPS and sign-in on the web side before any control is allowed from it |
 
 Using option A/B/C, the panel's own screen stays as it is. The runtime becomes a second operator
 screen that understands every device. If the lab requires the Harmony panel itself to show the
@@ -77,3 +78,16 @@ screens, that needs EcoStruxure Operator Terminal Expert on the panel, not this 
 
 Keep the rule from the project: do not drive a real machine with a register map that has not
 been checked against its device.
+
+## Before the runtime touches a real machine
+
+1. Set every role's site PIN: `industrial_hmi --set-pin operator` (and maintenance, engineer).
+   Do not copy `--allow-factory-pins` from the bench configuration.
+2. Keep `hmi.key` and `security.vault` on the panel PC only, readable by the HMI account.
+3. Put the PCs, panels, PLCs and drives on their own control network. Modbus TCP has no
+   authentication: anyone on that network can write to the PLCs directly, with or without this HMI.
+4. Check that each machine's hardwired emergency stop works on its own. STOP ALL on the HMI is a
+   software stop request, not an emergency stop.
+5. For drives commanded over Modbus, set the drive's own communication-loss behaviour (Altivar:
+   the Modbus TCP / Ethernet timeout and its fault response) so that a drive stops if the HMI or
+   the network goes away. The HMI cannot stop a drive it can no longer reach.

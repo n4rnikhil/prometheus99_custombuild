@@ -32,8 +32,11 @@
  *   --no-log                   disable the persistent alarm log
  *   --exit-after-ms <n>        close automatically after n ms (tests / measure.bat)
  *   --report <path>            write measured runtime statistics on exit
- *   --verify-log <path>        verify an alarm log's CRCs, print result, exit (0 = ok)
- *   --set-pin <role> <pin>     change a role PIN in the credential vault, exit
+ *   --verify-log <path>        verify an alarm log's signature chain, print result, exit (0 = ok)
+ *   --key <path>               device key file (default hmi.key next to the executable)
+ *   --vault <path>             credential vault (default security.vault next to the executable)
+ *   --set-pin <role>           set a role's site PIN (asked for twice, never on the command line), exit
+ *   --allow-factory-pins       BENCH ONLY: let roles sign in with the factory PINs (1111/2222/3333)
  */
 
 #include <stdio.h>
@@ -49,6 +52,7 @@
 #include "core/watchdog.h"
 #include "core/security.h"
 #include "core/crc32.h"
+#include "core/device_key.h"
 #include "core/runtime_stats.h"
 #include "renderer/micro_renderer.h"
 #include "renderer/layout.h"
@@ -164,8 +168,11 @@ static char                  g_log_path[HMI_PATH_MAX];
 static uint32_t              g_exit_after_ms;
 static char                  g_report_path[HMI_PATH_MAX];
 static char                  g_vault_path[HMI_PATH_MAX];
+static char                  g_key_path[HMI_PATH_MAX];
+static char                  g_verify_path[HMI_PATH_MAX];
+static uint8_t               g_device_key[HMI_DEVICE_KEY_LEN];
+static bool                  g_allow_factory_pins;
 static int                   g_set_pin_role = -1;
-static char                  g_set_pin_value[HMI_PIN_MAX_LEN + 1];
 static uint32_t              g_ui_max_frame_ms;
 static uint32_t              g_ui_wd_faults_seen;
 static hmi_device_info_t     g_dev_view[HMI_MAX_DEVICES];   /* present devices, slot order */
@@ -277,10 +284,10 @@ static void fb_handle_commands(int32_t bits, hmi_tag_table_t *tags, hmi_alarm_su
 {
     if (bits & CMD_BIT_ESTOP) {
         hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_ESTOP, ALARM_PT_NORMAL,
-                             "E-stop commanded by operator");
+                             "STOP ALL commanded by operator (software stop)");
         if (hmi_devmgr_estop(true, tags, alarms, now_ms) == 0) {
             hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_CRITICAL, ALARM_PT_NORMAL,
-                                 "No device took the E-stop: use hardwired");
+                                 "No device took STOP ALL: use the hardwired E-stop");
         }
     }
     if (bits & CMD_BIT_ACK) {
@@ -296,7 +303,7 @@ static void fb_handle_commands(int32_t bits, hmi_tag_table_t *tags, hmi_alarm_su
     if (bits & CMD_BIT_ESTOP_RESET) {
         if (hmi_devmgr_estop(false, tags, alarms, now_ms) == 0) {
             hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, ALARM_PT_NORMAL,
-                                 "E-stop reset: nothing to reset");
+                                 "Stop-latch reset: nothing to reset");
         }
     }
     if (bits & CMD_BIT_WD_RESET) {
@@ -520,7 +527,15 @@ static char    g_modal_msg_buf[80];
 #define NO_SLOT 0xFFu
 static uint8_t g_fp_slot = NO_SLOT;        /* faceplate open for this device (also behind nested dialogs) */
 
-typedef struct { bool active; uint8_t slot, action; int16_t value; bool has_value; } ui_cmd_t;
+typedef struct {
+    bool    active;
+    uint8_t slot, action;
+    int16_t value;
+    bool    has_value;
+    bool    system;          /* a runtime command (stop-latch reset), not a device action */
+    uint8_t sys_cmd;         /* hmi_command_t when system */
+    int32_t sys_bit;         /* CMD_BIT_* when system */
+} ui_cmd_t;
 static ui_cmd_t g_pending_login;           /* control waiting for a sign-in */
 static ui_cmd_t g_pending_confirm;         /* command waiting for "Confirm" */
 
@@ -611,6 +626,12 @@ static void ui_pin_submit(uint32_t now_ms)
         case HMI_LOGIN_LOCKED:
             ui_post_event(ALARM_SEV_WARNING, "PIN entry locked for 30 s");
             g_modal_msg = NULL;
+            break;
+        case HMI_LOGIN_FACTORY_PIN:
+            snprintf(ev, sizeof(ev), "Factory PIN refused: %s", hmi_security_role_name(role));
+            ui_post_event(ALARM_SEV_WARNING, ev);
+            g_modal_msg = "Factory PIN: set a site PIN first";
+            g_modal_msg_error = true;
             break;
         default:
             g_modal_msg = "Enter 4 to 8 digits";
@@ -724,6 +745,30 @@ static void ui_ask_confirm(const ui_cmd_t *c)
     g_modal = HMI_MODAL_CONFIRM;
 }
 
+/* Confirmation for a runtime command that is not tied to one device. */
+static void ui_ask_confirm_system(hmi_command_t cmd, int32_t bit, const char *title, const char *detail,
+                                  const char *ok, uint32_t now_ms)
+{
+    if (!hmi_security_authorize(&g_security, cmd, now_ms)) { ui_request(cmd, bit, now_ms); return; }  /* denial path */
+    snprintf(g_cf_title, sizeof(g_cf_title), "%s", title);
+    snprintf(g_cf_detail, sizeof(g_cf_detail), "%s", detail);
+    snprintf(g_cf_ok, sizeof(g_cf_ok), "%s", ok);
+    g_cf_danger = true;
+    memset(&g_pending_confirm, 0, sizeof(g_pending_confirm));
+    g_pending_confirm.active = true;
+    g_pending_confirm.system = true;
+    g_pending_confirm.slot = NO_SLOT;
+    g_pending_confirm.sys_cmd = (uint8_t)cmd;
+    g_pending_confirm.sys_bit = bit;
+    g_modal = HMI_MODAL_CONFIRM;
+}
+
+static void ui_confirmed(const ui_cmd_t *c, uint32_t now_ms)
+{
+    if (c->system) ui_request((hmi_command_t)c->sys_cmd, c->sys_bit, now_ms);
+    else ui_send(c, now_ms);
+}
+
 static void ui_open_numpad(uint8_t slot, uint8_t action)
 {
     const hmi_device_info_t *d = ui_dev(slot);
@@ -790,7 +835,7 @@ static void ui_start_action(uint8_t slot, uint8_t action, uint8_t option, uint32
         return;
     }
     if (a->kind == HMI_ACT_SET_REG) { ui_open_numpad(slot, action); return; }
-    ui_cmd_t c = { true, slot, action, 0, false };
+    ui_cmd_t c = { true, slot, action, 0, false, false, 0, 0 };
     if (a->kind == HMI_ACT_SET_ENUM) {
         if (option == HMI_FP_NO_OPTION) { ui_open_faceplate(slot); return; }   /* pick the option there */
         c.value = option;
@@ -840,7 +885,7 @@ static void ui_numpad_key(uint8_t key, uint32_t now_ms)
             g_modal_msg_error = true;
             return;
         }
-        ui_cmd_t c = { true, g_np_slot, g_np_action, (int16_t)v, true };
+        ui_cmd_t c = { true, g_np_slot, g_np_action, (int16_t)v, true, false, 0, 0 };
         if (a->confirm) { ui_ask_confirm(&c); return; }
         ui_send(&c, now_ms);
         modal_close();
@@ -944,13 +989,17 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
             if (g_pending_confirm.active) {
                 ui_cmd_t c = g_pending_confirm;
                 modal_close();
-                ui_send(&c, now_ms);
+                ui_confirmed(&c, now_ms);
             }
             break;
         case HMI_HIT_BANNER_ACK:
         case HMI_HIT_ALARM_ACK:     ui_request(HMI_CMD_ACK_ALARMS, CMD_BIT_ACK, now_ms); break;
         case HMI_HIT_ALARM_SILENCE: ui_request(HMI_CMD_SILENCE_HORN, CMD_BIT_SILENCE, now_ms); break;
-        case HMI_HIT_ESTOP_RESET:   ui_request(HMI_CMD_ESTOP_RESET, CMD_BIT_ESTOP_RESET, now_ms); break;
+        case HMI_HIT_ESTOP_RESET:
+            /* ISO 13850 4.1.3: resetting is a deliberate act and must not restart the machine. */
+            ui_ask_confirm_system(HMI_CMD_ESTOP_RESET, CMD_BIT_ESTOP_RESET, "Reset the stop latch?",
+                                  "Check the machine is clear. Reset does not restart anything.", "Reset latch", now_ms);
+            break;
         case HMI_HIT_SET_WD_TEST:   ui_request(HMI_CMD_INJECT_FAULT, CMD_BIT_INJECT_FAULT, now_ms); break;
         case HMI_HIT_SET_WD_RESET:  ui_watchdog_reset(now_ms); break;
         case HMI_HIT_WIDGET_BUTTON:
@@ -964,7 +1013,7 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
 
 static void ui_handle_key(uint16_t key, bool shift, uint32_t now_ms)
 {
-    if (key == 'E') {                     /* E-stop works in every state, dialog or not */
+    if (key == 'E') {                     /* STOP ALL works in every state, dialog or not */
         ui_request(HMI_CMD_ESTOP, CMD_BIT_ESTOP, now_ms);
         return;
     }
@@ -988,7 +1037,7 @@ static void ui_handle_key(uint16_t key, bool shift, uint32_t now_ms)
         } else if (g_modal == HMI_MODAL_CONFIRM && key == HMI_K_ENTER && g_pending_confirm.active) {
             ui_cmd_t c = g_pending_confirm;
             modal_close();
-            ui_send(&c, now_ms);
+            ui_confirmed(&c, now_ms);
         }
         return;
     }
@@ -1133,7 +1182,7 @@ void app_frame(uint32_t now_ms)
     /* A device that left the dashboard takes its dialogs with it */
     bool fp_gone = g_fp_slot != NO_SLOT && !ui_dev(g_fp_slot);
     bool np_gone = g_modal == HMI_MODAL_NUMPAD && !ui_dev(g_np_slot);
-    bool cf_gone = g_modal == HMI_MODAL_CONFIRM && !ui_dev(g_pending_confirm.slot);
+    bool cf_gone = g_modal == HMI_MODAL_CONFIRM && !g_pending_confirm.system && !ui_dev(g_pending_confirm.slot);
     if (fp_gone || np_gone || cf_gone) {
         g_fp_slot = NO_SLOT;
         if (g_modal == HMI_MODAL_FACEPLATE || g_modal == HMI_MODAL_NUMPAD || g_modal == HMI_MODAL_CONFIRM) {
@@ -1268,17 +1317,43 @@ static void exe_dir_path(char *out, size_t cap, const char *file)
 }
 
 /* Returns -1 to continue, otherwise a process exit code. */
-/* --- Credential vault (security.vault): 144-byte CRC-protected blob --- */
-/* 1 = loaded, 0 = no vault file, -1 = present but damaged */
+/* --- Device key (hmi.key) --------------------------------------------------------- */
+/* Loads (or creates) the key and gives it to the audit log and the PIN store. Returns the status;
+ * on anything but LOADED / CREATED both run with an all-zero key and say so. */
+static hmi_key_status_t device_key_setup(bool create, hmi_security_ctx_t *sec)
+{
+    hmi_key_status_t st = hmi_device_key_load(g_key_path, create, g_device_key);
+    bool ok = st == HMI_KEY_LOADED || st == HMI_KEY_CREATED;
+    if (!ok) hal_secure_zero(g_device_key, sizeof(g_device_key));
+    hmi_alarm_log_set_key(ok ? g_device_key : NULL);
+    if (sec) hmi_security_set_device_key(sec, ok ? g_device_key : NULL);
+    if (st == HMI_KEY_CREATED) hal_file_restrict(g_key_path);
+    return st;
+}
+
+/* --- Credential vault (security.vault): signed with the device key ------------------ */
+#define VAULT_MISSING 0
+#define VAULT_LOADED  1
+/* VAULT_LOADED, VAULT_MISSING, or -(hmi_vault_result_t) when present but not accepted */
 static int vault_load(hmi_security_ctx_t *sec)
 {
     uint8_t buf[HMI_VAULT_SIZE + 1];
     hal_file_t *f = hal_file_open(g_vault_path, HAL_FILE_READ);
-    if (!f) return 0;
+    if (!f) return VAULT_MISSING;
     int got = hal_file_read(f, buf, sizeof(buf));
     hal_file_close(f);
-    if (got != HMI_VAULT_SIZE) return -1;
-    return hmi_security_vault_import(sec, buf, (size_t)got) ? 1 : -1;
+    hmi_vault_result_t r = got > 0 ? hmi_security_vault_import(sec, buf, (size_t)got) : HMI_VAULT_DAMAGED;
+    hal_secure_zero(buf, sizeof(buf));
+    return r == HMI_VAULT_OK ? VAULT_LOADED : -(int)r;
+}
+
+static const char *vault_problem(int v)
+{
+    switch (-v) {
+        case HMI_VAULT_LEGACY:      return "Old unsigned vault: set PINs again";
+        case HMI_VAULT_AUTH_FAILED: return "Vault signature invalid: factory PINs";
+        default:                    return "Credential vault damaged: factory PINs";
+    }
 }
 
 static bool vault_save(const hmi_security_ctx_t *sec)
@@ -1289,6 +1364,7 @@ static bool vault_save(const hmi_security_ctx_t *sec)
     snprintf(tmp, sizeof(tmp), "%.255s.tmp", g_vault_path);
     hal_file_t *f = hal_file_open(tmp, HAL_FILE_WRITE_NEW);
     if (!f) return false;
+    hal_file_restrict(tmp);
     bool ok = hal_file_write(f, buf, sizeof(buf)) && hal_file_sync(f);
     hal_file_close(f);
     /* atomic replace: a power cut leaves either the old or the new vault, never half of one */
@@ -1322,19 +1398,52 @@ static int parse_role(const char *s)
 static int run_set_pin(void)
 {
     static hmi_security_ctx_t sec;
-    char out[200];
+    char out[260];
     hmi_security_init(&sec);
-    if (vault_load(&sec) < 0) {
-        hal_console_print("existing vault is damaged; starting from factory PINs\r\n");
+    hmi_key_status_t ks = device_key_setup(true, &sec);
+    if (ks != HMI_KEY_LOADED && ks != HMI_KEY_CREATED) {
+        snprintf(out, sizeof(out), "device key %.150s: %s - PINs cannot be stored safely\r\n", g_key_path,
+                 hmi_device_key_status_name(ks));
+        hal_console_print(out);
+        return 3;
+    }
+    int v = vault_load(&sec);
+    if (v < 0) {
+        snprintf(out, sizeof(out), "%s: the other roles keep their factory PINs until they are set\r\n", vault_problem(v));
+        hal_console_print(out);
         hmi_security_load_default_pins(&sec);
     }
-    uint8_t salt[8];
-    if (!hal_random(salt, sizeof(salt))) { hal_console_print("no OS random source available\r\n"); return 3; }
-    if (!hmi_security_set_pin(&sec, (hmi_role_t)g_set_pin_role, g_set_pin_value, salt)) {
-        hal_console_print("invalid PIN: use 4 to 8 digits\r\n");
+
+    static char pin[32], again[32];
+    snprintf(out, sizeof(out), "New PIN for %s (6-8 digits): ", hmi_security_role_name((hmi_role_t)g_set_pin_role));
+    bool ok = hal_console_read_secret(out, pin, sizeof(pin)) &&
+              hal_console_read_secret("Repeat the PIN: ", again, sizeof(again));
+    if (!ok) {
+        hal_console_print("no PIN entered (needs an interactive console, or the PIN twice on stdin)\r\n");
+        hal_secure_zero(pin, sizeof(pin));
+        hal_secure_zero(again, sizeof(again));
         return 64;
     }
-    hal_secure_zero(g_set_pin_value, sizeof(g_set_pin_value));
+    bool same = strcmp(pin, again) == 0;
+    hal_secure_zero(again, sizeof(again));
+    if (!same) {
+        hal_secure_zero(pin, sizeof(pin));
+        hal_console_print("the two PINs differ: nothing changed\r\n");
+        return 64;
+    }
+    uint8_t salt[8];
+    if (!hal_random(salt, sizeof(salt))) {
+        hal_secure_zero(pin, sizeof(pin));
+        hal_console_print("no OS random source available\r\n");
+        return 3;
+    }
+    hmi_pin_set_result_t r = hmi_security_set_pin(&sec, (hmi_role_t)g_set_pin_role, pin, salt);
+    hal_secure_zero(pin, sizeof(pin));
+    if (r != HMI_PIN_SET_OK) {
+        snprintf(out, sizeof(out), "PIN not accepted: %s\r\n", hmi_security_pin_set_message(r));
+        hal_console_print(out);
+        return 64;
+    }
     if (!vault_save(&sec)) {
         snprintf(out, sizeof(out), "could not write %.150s\r\n", g_vault_path);
         hal_console_print(out);
@@ -1342,7 +1451,38 @@ static int run_set_pin(void)
     }
     snprintf(out, sizeof(out), "PIN for %s updated in %.150s\r\n", hmi_security_role_name((hmi_role_t)g_set_pin_role), g_vault_path);
     hal_console_print(out);
+    if (sec.default_pins) {
+        hal_console_print("Still on factory PINs:");
+        for (int role = ROLE_OPERATOR; role <= ROLE_ENGINEER; role++)
+            if (sec.factory[role]) { hal_console_print(" "); hal_console_print(hmi_security_role_name((hmi_role_t)role)); }
+        hal_console_print(" - those roles cannot sign in until their PIN is set.\r\n");
+    }
     return 0;
+}
+
+static int run_verify_log(void)
+{
+    char out[360];
+    hmi_key_status_t ks = device_key_setup(false, NULL);
+    if (ks != HMI_KEY_LOADED) {
+        snprintf(out, sizeof(out), "device key %.150s: %s - only unsigned logs can be checked\r\n", g_key_path,
+                 hmi_device_key_status_name(ks));
+        hal_console_print(out);
+    }
+    uint32_t lines = 0, bad = 0, first_bad = 0;
+    bool ok = hmi_alarm_log_verify_file(g_verify_path, &lines, &bad, &first_bad);
+    if (ok) {
+        snprintf(out, sizeof(out), "%.200s: %lu lines, chain intact -> VERIFIED\r\n  (%s)\r\n",
+                 g_verify_path, (unsigned long)lines, hmi_alarm_log_verify_note());
+    } else if (lines == 0) {
+        snprintf(out, sizeof(out), "%.200s: cannot read file or file is empty -> FAILED\r\n", g_verify_path);
+    } else {
+        snprintf(out, sizeof(out), "%.200s: %lu lines, %lu fail, first at line %lu -> FAILED\r\n  (%s)\r\n",
+                 g_verify_path, (unsigned long)lines, (unsigned long)bad, (unsigned long)first_bad,
+                 hmi_alarm_log_verify_note());
+    }
+    hal_console_print(out);
+    return ok ? 0 : 2;
 }
 
 /* --- Site configuration file: command-line options, one or more per line ------------- */
@@ -1411,6 +1551,7 @@ int app_parse_args(int argc, char **argv)
 {
     exe_dir_path(g_log_path, sizeof(g_log_path), HMI_ALARM_LOG_PATH);
     exe_dir_path(g_vault_path, sizeof(g_vault_path), "security.vault");
+    exe_dir_path(g_key_path, sizeof(g_key_path), "hmi.key");
 
     /* hmi.cfg (or --config) first, so the command line can add to it */
     char cfg[HMI_PATH_MAX];
@@ -1434,6 +1575,7 @@ int app_parse_args(int argc, char **argv)
     }
     int rc = parse_options(argc, argv);
     if (rc >= 0) return rc;
+    if (g_verify_path[0]) return run_verify_log();
     if (g_set_pin_role >= 0) return run_set_pin();
     return -1;
 }
@@ -1482,29 +1624,25 @@ static int parse_options(int argc, char **argv)
             copy_str(g_report_path, sizeof(g_report_path), next); i++;
         } else if (strcmp(a, "--vault") == 0 && next) {
             copy_str(g_vault_path, sizeof(g_vault_path), next); i++;
-        } else if (strcmp(a, "--set-pin") == 0 && next && i + 2 < argc) {
+        } else if (strcmp(a, "--key") == 0 && next) {
+            copy_str(g_key_path, sizeof(g_key_path), next); i++;
+        } else if (strcmp(a, "--allow-factory-pins") == 0) {
+            g_allow_factory_pins = true;
+        } else if (strcmp(a, "--set-pin") == 0 && next) {
             g_set_pin_role = parse_role(next);
-            copy_str(g_set_pin_value, sizeof(g_set_pin_value), argv[i + 2]);
-            if (g_set_pin_role < 0 || strlen(argv[i + 2]) > HMI_PIN_MAX_LEN) {
-                hal_console_print("usage: --set-pin <operator|maintenance|engineer> <4-8 digit PIN>\r\n");
+            if (g_set_pin_role < 0) {
+                hal_console_print("usage: --set-pin <operator|maintenance|engineer>   (the PIN is asked for)\r\n");
                 return 64;
             }
-            i += 2;
-        } else if (strcmp(a, "--verify-log") == 0 && next) {
-            uint32_t lines = 0, bad = 0, first_bad = 0;
-            bool ok = hmi_alarm_log_verify_file(next, &lines, &bad, &first_bad);
-            char out[320];
-            if (ok) {
-                snprintf(out, sizeof(out), "%.200s: %lu lines, hash chain intact -> VERIFIED\r\n",
-                         next, (unsigned long)lines);
-            } else if (lines == 0) {
-                snprintf(out, sizeof(out), "%.200s: cannot read file or file is empty -> FAILED\r\n", next);
-            } else {
-                snprintf(out, sizeof(out), "%.200s: %lu lines, %lu fail, chain broken at line %lu -> TAMPERED\r\n",
-                         next, (unsigned long)lines, (unsigned long)bad, (unsigned long)first_bad);
+            i++;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                /* A PIN on the command line ends up in shell history and the process list. */
+                hal_console_print("PINs are not accepted on the command line: run --set-pin <role> and type it "
+                                  "when asked\r\n");
+                return 64;
             }
-            hal_console_print(out);
-            return ok ? 0 : 2;
+        } else if (strcmp(a, "--verify-log") == 0 && next) {
+            copy_str(g_verify_path, sizeof(g_verify_path), next); i++;
         } else {
             char out[160];
             snprintf(out, sizeof(out), "unknown or incomplete argument: %s\r\n", a);
@@ -1573,15 +1711,25 @@ int app_init(void)
 
     hmi_security_init(&g_security);                     /* starts as VIEWER with factory PINs */
     hmi_security_register_activity(&g_security, now_ms);
+    hmi_key_status_t ks = device_key_setup(true, &g_security);
+    if (ks == HMI_KEY_CREATED) {
+        ui_post_event(ALARM_SEV_INFO, "Device key created: audit log signed");
+    } else if (ks != HMI_KEY_LOADED) {
+        ui_post_event(ALARM_SEV_CRITICAL, "Device key unusable: log NOT signed");
+        ui_toast("Device key unusable - audit log is not signed", now_ms);
+    }
     int vault = vault_load(&g_security);
     if (vault < 0) {
         hmi_security_load_default_pins(&g_security);
-        ui_post_event(ALARM_SEV_WARNING, "Credential vault damaged: factory PINs");
+        ui_post_event(ALARM_SEV_WARNING, vault_problem(vault));
+        ui_toast(vault_problem(vault), now_ms);
     }
-    if (g_cfg_note[0]) {
-        ui_post_event(ALARM_SEV_INFO, g_cfg_note);
-        ui_toast("Credential vault damaged - factory PINs in use", now_ms);
-    }
+    g_security.allow_factory_pins = g_allow_factory_pins;
+    if (g_allow_factory_pins && g_security.default_pins)
+        ui_post_event(ALARM_SEV_WARNING, "BENCH MODE: factory PINs allowed");
+    else if (g_security.default_pins)
+        ui_post_event(ALARM_SEV_WARNING, "Factory PINs: those roles locked out");
+    if (g_cfg_note[0]) ui_post_event(ALARM_SEV_INFO, g_cfg_note);
     hmi_seqlock_init(&g_seqlock);
 
     /* Drivers and tag metadata: registered once, before any worker thread exists. */

@@ -39,4 +39,9 @@ void        hal_file_close(hal_file_t *f);                             /* NULL i
 bool        hal_file_replace(const char *tmp, const char *dst);
 bool        hal_file_remove(const char *path);
 
+/* Limit a secret file (device key, credential vault) to the account running the runtime:
+ * mode 0600 on POSIX. On Windows the file keeps the ACL of its folder, so install the runtime
+ * in a folder only the HMI service account and administrators can read. */
+bool        hal_file_restrict(const char *path);
+
 #endif /* INDUSTRIAL_HMI_HAL_FS_H */

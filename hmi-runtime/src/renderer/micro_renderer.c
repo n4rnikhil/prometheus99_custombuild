@@ -1080,10 +1080,11 @@ static void render_header(hmi_renderer_t *r, const hmi_view_t *v)
     if (role < 0 || role > 3) role = 0;
     chip(r, hmi_layout_role_pill(sw, sh), C_PURPLE, roles[role], C_TEXT);
 
-    /* E-stop */
+    /* STOP ALL: a software stop request to every device. Deliberately not labelled E-STOP and
+     * not red-on-yellow: those belong to the hardwired emergency stop (ISO 13850, IEC 60204-1). */
     hmi_rect_t e = hmi_layout_estop_button(sw, sh);
     hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, e.h / 2, C_RED);
-    text_center(r, &hmi_font_body_b, e, "E-STOP", C_WHITE);
+    text_center(r, &hmi_font_body_b, e, "STOP ALL", C_WHITE);
 }
 
 static void render_banner(hmi_renderer_t *r, const hmi_view_t *v)
@@ -1209,7 +1210,7 @@ static void screen_title(hmi_renderer_t *r, const hmi_view_t *v, const char *tit
 
 static void render_diagnostics(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
 {
-    char b1[48], b2[48];
+    char b1[64], b2[80];   /* sized for the longest formatted line (endpoint + three u32 counters) */
     screen_title(r, v, "Diagnostics", "live, measured");
     hmi_rect_t body = hmi_layout_screen_body(r->screen_w, r->screen_h, banner);
     int g = HMI_LAYOUT_GAP;
@@ -1345,7 +1346,7 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
            (can_ack && al && al->unacked_count) ? BTN_PRIMARY : BTN_DISABLED);
     button(r, hmi_layout_screen_button(sw, sh, banner, HMI_HIT_ALARM_SILENCE), "Silence horn",
            (can_ack && al && al->horn_sounding) ? BTN_PLAIN : BTN_DISABLED);
-    button(r, hmi_layout_screen_button(sw, sh, banner, HMI_HIT_ESTOP_RESET), "Reset E-stop",
+    button(r, hmi_layout_screen_button(sw, sh, banner, HMI_HIT_ESTOP_RESET), "Reset stop",
            (estop && role_allows(v, HMI_CMD_ESTOP_RESET)) ? BTN_DANGER : BTN_DISABLED);
 
     hmi_rect_t body = hmi_layout_screen_body(sw, sh, banner);
@@ -1433,11 +1434,12 @@ static void render_settings(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
         if (role < 0 || role > 3) role = 0;
         if (y + rh <= limit) { kv_row(r, x, y, w, "Current role", roles[role], C_PURPLE); y += rh; }
         if (v->sec && v->sec->default_pins && y + rh <= limit) {
-            kv_row(r, x, y, w, "PINs", "Factory defaults - change!", C_ORANGE); y += rh;
+            kv_row(r, x, y, w, "PINs", v->sec->allow_factory_pins ? "Factory PINs - BENCH MODE"
+                                                                   : "Factory PINs: roles locked", C_ORANGE); y += rh;
         }
         y += 4;
         static const struct { hmi_command_t c; const char *n; } perms[] = {
-            { HMI_CMD_ESTOP, "Emergency stop" }, { HMI_CMD_ACK_ALARMS, "Acknowledge alarms" },
+            { HMI_CMD_ESTOP, "Stop all (software)" }, { HMI_CMD_ACK_ALARMS, "Acknowledge alarms" },
             { HMI_CMD_PUMP_TOGGLE, "Operate pump / valve" }, { HMI_CMD_WATCHDOG_RESET, "Reset watchdog" },
             { HMI_CMD_INJECT_FAULT, "Fault injection" },
         };
@@ -1473,9 +1475,13 @@ static void render_settings(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
         if (y + rh <= limit) { kv_row(r, x, y, w, "Failover latch", (wd && wd->failover_active) ? "Latched" : "Clear",
                                       (wd && wd->failover_active) ? C_ORANGE : C_TEXT); y += rh; }
         if (y + rh <= limit) {
-            if (v->log && v->log->open) snprintf(b1, sizeof(b1), "%lu records", (unsigned long)v->log->records_written);
+            bool signed_log = v->log && v->log->open && v->log->authenticated;
+            if (v->log && v->log->open)
+                snprintf(b1, sizeof(b1), "%lu records, %s", (unsigned long)v->log->records_written,
+                         signed_log ? "signed" : "NOT signed");
             else snprintf(b1, sizeof(b1), "Off");
-            kv_row(r, x, y, w, "Alarm log (chained)", b1, (v->log && v->log->write_errors) ? C_RED : C_TEXT); y += rh;
+            kv_row(r, x, y, w, "Audit log", b1,
+                   (v->log && (v->log->write_errors || (v->log->open && !signed_log))) ? C_RED : C_TEXT); y += rh;
         }
         if (y + rh <= limit) {
             snprintf(b1, sizeof(b1), "%lu KB", (unsigned long)((v->exe_size_bytes + 1023u) / 1024u));
@@ -1790,7 +1796,7 @@ void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t 
         hmi_rect_t e = hmi_layout_estop_button(r->screen_w, r->screen_h);
         if (band_hits(r, e.y, e.h)) {
             hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, e.h / 2, C_RED);
-            text_center(r, &hmi_font_body_b, e, "E-STOP", C_WHITE);
+            text_center(r, &hmi_font_body_b, e, "STOP ALL", C_WHITE);
         }
         render_modal(r, v);
     } else {

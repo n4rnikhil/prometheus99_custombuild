@@ -14,6 +14,9 @@
 #include <io.h>
 #else
 #include <unistd.h>
+#if !defined(ESP_PLATFORM)
+#include <sys/stat.h>
+#endif
 #endif
 
 struct hal_file {
@@ -98,4 +101,16 @@ bool hal_file_replace(const char *tmp, const char *dst)
 bool hal_file_remove(const char *path)
 {
     return path && remove(path) == 0;
+}
+
+bool hal_file_restrict(const char *path)
+{
+    if (!path) return false;
+#if defined(_WIN32)
+    return true;                         /* folder ACL applies: see hal/fs.h */
+#elif defined(ESP_PLATFORM)
+    return true;                         /* single-user flash file system: nothing to restrict */
+#else
+    return chmod(path, S_IRUSR | S_IWUSR) == 0;
+#endif
 }

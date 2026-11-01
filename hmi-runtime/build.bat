@@ -11,11 +11,11 @@ REM  The PLC Simulator is a separate app: ..\plc-simulator\build.bat
 REM ==========================================================================
 cd /d "%~dp0"
 
-set CORE=src\core\sha256.c src\core\tags.c src\core\alarms.c src\core\alarm_log.c src\core\watchdog.c src\core\security.c src\core\crc32.c
+set CORE=src\core\sha256.c src\core\tags.c src\core\alarms.c src\core\alarm_log.c src\core\watchdog.c src\core\security.c src\core\crc32.c src\core\device_key.c
 set RENDER=src\renderer\micro_renderer.c src\renderer\layout.c src\renderer\font_inter.c
 set DEVICES=src\devices\device_registry.c src\devices\altivar_drive.c src\devices\em6400_meter.c src\devices\tank_skid.c src\devices\conveyor.c src\devices\boiler.c src\devices\pump_station.c src\devices\compressor.c src\devices\air_handler.c src\devices\abb_drive.c src\devices\generic.c
 set FIELDBUS=src\fieldbus\device_manager.c src\fieldbus\discovery.c src\fieldbus\modbus_proto.c src\fieldbus\driver_host.c
-set HAL=src\hal\net_ip.c src\hal\net_win32.c src\hal\timer_win32.c src\hal\gesture.c src\hal\sys_win32.c src\hal\fs_stdio.c src\hal\thread_win32.c
+set HAL=src\hal\net_ip.c src\hal\net_win32.c src\hal\timer_win32.c src\hal\gesture.c src\hal\sys_win32.c src\hal\fs_stdio.c src\hal\thread_win32.c src\hal\utc_format.c
 set LIB_SRC=%CORE% %RENDER% %DEVICES% %FIELDBUS% %HAL%
 set SRC=src\app\app.c src\platform\win32\main_win32.c %LIB_SRC%
 set MODBUS_SRC=src\fieldbus\device_manager.c src\fieldbus\discovery.c src\fieldbus\modbus_proto.c

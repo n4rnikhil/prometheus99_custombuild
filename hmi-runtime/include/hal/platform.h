@@ -17,4 +17,10 @@ void hal_request_repaint(void);             /* call app_render() soon */
 void hal_request_quit(void);                /* leave the main loop (--exit-after-ms) */
 void hal_fatal(const char *message);        /* unrecoverable start-up error, shown to the operator */
 
+#include <stddef.h>
+#include <stdbool.h>
+/* Show prompt and read one line from the operator without echoing it (PIN entry for --set-pin).
+ * The line end is stripped. false = no interactive console on this platform, or input ended. */
+bool hal_console_read_secret(const char *prompt, char *out, size_t cap);
+
 #endif /* INDUSTRIAL_HMI_PLATFORM_H */

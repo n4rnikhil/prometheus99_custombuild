@@ -30,6 +30,14 @@ void hal_utc_now(char *out, size_t cap)
              tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (long)(ts.tv_nsec / 1000000L));
 }
 
+uint64_t hal_utc_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    if (ts.tv_sec < 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
+}
+
 bool hal_random(void *out, size_t n)
 {
 #if defined(ESP_PLATFORM)

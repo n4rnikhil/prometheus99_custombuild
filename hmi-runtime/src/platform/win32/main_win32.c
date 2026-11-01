@@ -38,6 +38,43 @@ void hal_console_print(const char *text)
     }
 }
 
+/* A GUI-subsystem exe cannot safely share the parent shell's input (cmd.exe does not wait for it
+ * and reads the same keystrokes). Ask in a console window of our own instead. */
+bool hal_console_read_secret(const char *prompt, char *out, size_t cap)
+{
+    if (!out || cap < 2) return false;
+    FreeConsole();
+    if (!AllocConsole()) return false;
+    HANDLE in = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, 0, NULL);
+    HANDLE con = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                             OPEN_EXISTING, 0, NULL);
+    bool ok = false;
+    DWORD mode = 0, n = 0;
+    if (in != INVALID_HANDLE_VALUE && con != INVALID_HANDLE_VALUE && GetConsoleMode(in, &mode)) {
+        WriteFile(con, prompt, (DWORD)strlen(prompt), &n, NULL);
+        SetConsoleMode(in, (mode & ~(DWORD)ENABLE_ECHO_INPUT) | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+        char line[64];
+        DWORD got = 0;
+        if (ReadFile(in, line, sizeof(line) - 1, &got, NULL) && got > 0) {
+            line[got] = '\0';
+            size_t len = strcspn(line, "\r\n");
+            if (len < cap && line[len] != '\0') {       /* a whole line that fits */
+                memcpy(out, line, len);
+                out[len] = '\0';
+                ok = true;
+            }
+        }
+        SecureZeroMemory(line, sizeof(line));
+        SetConsoleMode(in, mode);
+        WriteFile(con, "\r\n", 2, &n, NULL);
+    }
+    if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
+    if (con != INVALID_HANDLE_VALUE) CloseHandle(con);
+    if (!ok) out[0] = '\0';
+    return ok;
+}
+
 void hal_beep(void)
 {
     MessageBeep(MB_ICONHAND);

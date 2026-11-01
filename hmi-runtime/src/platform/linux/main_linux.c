@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <termios.h>
 #include <linux/fb.h>
 #include <linux/input.h>
 #include <linux/kd.h>
@@ -47,6 +48,34 @@ void hal_trim_memory(void)     {}
 void hal_request_repaint(void) { g_repaint = 1; }
 void hal_request_quit(void)    { app_stop(); }
 void hal_fatal(const char *message) { fprintf(stderr, "industrial_hmi: %s\n", message); }
+
+bool hal_console_read_secret(const char *prompt, char *out, size_t cap)
+{
+    if (!out || cap < 2) return false;
+    bool tty = isatty(STDIN_FILENO) != 0;
+    struct termios old, quiet;
+    if (tty) {
+        if (tcgetattr(STDIN_FILENO, &old) != 0) return false;
+        quiet = old;
+        quiet.c_lflag &= (tcflag_t)~(ECHO | ECHONL);
+        fputs(prompt, stderr);
+        fflush(stderr);
+        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet) != 0) return false;
+    }
+    bool ok = fgets(out, (int)cap, stdin) != NULL;
+    if (tty) { tcsetattr(STDIN_FILENO, TCSAFLUSH, &old); fputs("\n", stderr); }
+    if (!ok) { out[0] = '\0'; return false; }
+    size_t n = strcspn(out, "\r\n");
+    bool whole_line = out[n] != '\0';
+    out[n] = '\0';
+    if (!whole_line && !feof(stdin)) {               /* longer than cap: refuse, drain the rest */
+        int c;
+        while ((c = getchar()) != EOF && c != '\n') {}
+        hal_secure_zero(out, cap);
+        return false;
+    }
+    return true;
+}
 
 /* ------------------------------------------------------------------------- */
 /* Framebuffer                                                                */

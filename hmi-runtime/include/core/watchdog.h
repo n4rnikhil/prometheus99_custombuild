@@ -1,7 +1,8 @@
 /**
  * @file watchdog.h
  * @brief Heartbeat watchdog used for cross-supervision of the two loops
- * @standard IEC 61508-style watchdog with latched failover
+ * @standard Mutual thread watchdog with latched failover (pattern borrowed from IEC 61508 practice;
+ *           not a certified safety function)
  *
  * Each loop publishes a heartbeat timestamp. The UI thread runs one instance
  * that supervises the fieldbus heartbeat; the fieldbus thread runs another that

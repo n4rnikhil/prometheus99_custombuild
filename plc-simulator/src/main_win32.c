@@ -92,7 +92,8 @@ static void open_hmi(void)
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
     char cmd[MAX_PATH + 80];
-    snprintf(cmd, sizeof(cmd), "\"%s\"", path);
+    /* The bench: simulated devices only, so the factory PINs may be used (the HMI says so on screen). */
+    snprintf(cmd, sizeof(cmd), "\"%s\" --allow-factory-pins", path);
     if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);

@@ -15,6 +15,12 @@
  * time since 1970 as the C library reports it, which is only meaningful after an SNTP sync. */
 void hal_utc_now(char *out, size_t cap);
 
+/* The same clock as milliseconds since 1970-01-01T00:00:00Z. */
+uint64_t hal_utc_ms(void);
+
+/* Format a hal_utc_ms() value as "YYYY-MM-DDTHH:MM:SS.mmmZ" (portable, no C library time zone). */
+void hal_utc_format(uint64_t utc_ms, char *out, size_t cap);
+
 /* Cryptographically secure random bytes from the OS (PIN salts). false = no source available. */
 bool hal_random(void *out, size_t n);
 

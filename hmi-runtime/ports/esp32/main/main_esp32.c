@@ -52,6 +52,11 @@ void hal_trim_memory(void)               {}
 void hal_request_repaint(void)           { s_repaint = true; }
 void hal_request_quit(void)              { app_stop(); }
 void hal_fatal(const char *message)      { ESP_LOGE(TAG, "%s", message); }
+bool hal_console_read_secret(const char *prompt, char *out, size_t cap)
+{
+    (void)prompt; (void)out; (void)cap;
+    return false;                                     /* PINs are provisioned in the vault file */
+}
 
 /* ------------------------------------------------------------------------- */
 /* Board                                                                      */

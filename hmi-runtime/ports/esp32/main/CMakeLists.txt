@@ -6,7 +6,7 @@ idf_component_register(
         "main_esp32.c"
         "${R}/src/app/app.c"
         "${R}/src/core/sha256.c" "${R}/src/core/tags.c" "${R}/src/core/alarms.c" "${R}/src/core/alarm_log.c"
-        "${R}/src/core/watchdog.c" "${R}/src/core/security.c" "${R}/src/core/crc32.c"
+        "${R}/src/core/watchdog.c" "${R}/src/core/security.c" "${R}/src/core/crc32.c" "${R}/src/core/device_key.c"
         "${R}/src/renderer/micro_renderer.c" "${R}/src/renderer/layout.c" "${R}/src/renderer/font_inter.c"
         "${R}/src/devices/device_registry.c" "${R}/src/devices/generic.c"
         "${R}/src/devices/altivar_drive.c" "${R}/src/devices/em6400_meter.c"
@@ -16,7 +16,7 @@ idf_component_register(
         "${R}/src/fieldbus/device_manager.c" "${R}/src/fieldbus/discovery.c" "${R}/src/fieldbus/modbus_proto.c"
         "${R}/src/fieldbus/driver_host.c"
         "${R}/src/hal/net_ip.c" "${R}/src/hal/net_posix.c" "${R}/src/hal/timer_posix.c" "${R}/src/hal/sys_posix.c"
-        "${R}/src/hal/fs_stdio.c" "${R}/src/hal/thread_posix.c" "${R}/src/hal/gesture.c"
+        "${R}/src/hal/fs_stdio.c" "${R}/src/hal/thread_posix.c" "${R}/src/hal/gesture.c" "${R}/src/hal/utc_format.c"
     INCLUDE_DIRS "${R}/include" "."
     REQUIRES esp_lcd esp_wifi esp_netif esp_event nvs_flash driver lwip pthread esp_hw_support heap
 )

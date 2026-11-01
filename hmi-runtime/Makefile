@@ -2,7 +2,9 @@
 #  Prometheus HMI Runtime - Linux / Raspberry Pi build (GNU make, any C99 compiler)
 #
 #    make                      industrial_hmi (framebuffer + evdev, no GUI libraries)
-#    make test                 build and run the portable unit tests
+#    make test                 every suite: unit, MCU profile, integration, Modbus faults,
+#                              all under AddressSanitizer + UBSan
+#    make test-fast            unit tests only, no sanitizers
 #    make STATIC=1             fully static binary (copy one file to the target)
 #    make CC=aarch64-linux-gnu-gcc     cross-compile for Raspberry Pi 3/4/5 (64-bit OS)
 #    make CC=arm-linux-gnueabihf-gcc   cross-compile for Raspberry Pi Zero/2/3 (32-bit OS)
@@ -24,7 +26,7 @@ LDFLAGS += -static
 endif
 
 CORE_SRC := src/core/sha256.c src/core/tags.c src/core/alarms.c src/core/alarm_log.c \
-            src/core/watchdog.c src/core/security.c src/core/crc32.c \
+            src/core/watchdog.c src/core/security.c src/core/crc32.c src/core/device_key.c \
             src/renderer/micro_renderer.c src/renderer/layout.c src/renderer/font_inter.c \
             src/devices/device_registry.c src/devices/altivar_drive.c src/devices/em6400_meter.c \
             src/devices/tank_skid.c src/devices/conveyor.c src/devices/boiler.c \
@@ -33,10 +35,16 @@ CORE_SRC := src/core/sha256.c src/core/tags.c src/core/alarms.c src/core/alarm_l
             src/fieldbus/device_manager.c src/fieldbus/discovery.c src/fieldbus/modbus_proto.c \
             src/fieldbus/driver_host.c
 HAL_SRC  := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c src/hal/sys_posix.c \
-            src/hal/fs_stdio.c src/hal/thread_posix.c src/hal/gesture.c
+            src/hal/fs_stdio.c src/hal/thread_posix.c src/hal/gesture.c src/hal/utc_format.c
 APP_SRC  := src/app/app.c src/platform/linux/main_linux.c
 
-.PHONY: all test clean
+SAN     := -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+SIM_DIR := ../plc-simulator
+NET_TEST_SRC := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c \
+            src/fieldbus/device_manager.c src/fieldbus/discovery.c src/fieldbus/modbus_proto.c \
+            $(filter src/devices/%,$(CORE_SRC)) src/core/tags.c src/core/alarms.c src/core/crc32.c
+
+.PHONY: all test test-fast clean
 
 all: industrial_hmi
 
@@ -47,8 +55,27 @@ industrial_hmi: $(APP_SRC) $(CORE_SRC) $(HAL_SRC)
 tests/test_core: tests/test_core.c $(CORE_SRC) $(HAL_SRC)
 	$(CC) $(WARN) -O1 -g $(DEFS) -Iinclude $^ -o $@ $(LIBS)
 
-test: tests/test_core
+tests/test_core_san: tests/test_core.c $(CORE_SRC) $(HAL_SRC)
+	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -Iinclude $^ -o $@ $(LIBS)
+
+tests/test_core_mcu: tests/test_core.c $(CORE_SRC) $(HAL_SRC)
+	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -DHMI_PROFILE_MCU -Iinclude $^ -o $@ $(LIBS)
+
+tests/test_integration: tests/test_integration.c $(SIM_DIR)/src/plc_models.c $(NET_TEST_SRC)
+	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -Iinclude -I$(SIM_DIR)/include $^ -o $@ $(LIBS)
+
+tests/test_modbus_faults: tests/test_modbus_faults.c $(NET_TEST_SRC)
+	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -Iinclude $^ -o $@ $(LIBS)
+
+test-fast: tests/test_core
 	./tests/test_core
 
+test: industrial_hmi tests/test_core_san tests/test_core_mcu tests/test_integration tests/test_modbus_faults
+	./tests/test_core_san
+	./tests/test_core_mcu
+	./tests/test_integration
+	./tests/test_modbus_faults
+
 clean:
-	rm -f industrial_hmi tests/test_core hmi_test_*.log* hmi_test_fs_*.bin
+	rm -f industrial_hmi tests/test_core tests/test_core_san tests/test_core_mcu \
+	      tests/test_integration tests/test_modbus_faults hmi_test_*.log* hmi_test_fs_*.bin

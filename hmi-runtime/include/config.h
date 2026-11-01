@@ -1,7 +1,9 @@
 /**
  * @file config.h
  * @brief Industrial HMI Runtime System Configuration
- * @standards IEC 62443-4-2 / IEC 61508 SIL-ready / ISA-101 / ISA-18.2
+ * @standards Designed after IEC 62443-4-2, ISA-101 and ISA-18.2. Not certified, and not a safety
+ *            system: no IEC 61508 / IEC 62061 / ISO 13849 claim is made. Safety functions (emergency
+ *            stop, interlocks that protect people) belong in hardwired circuits and safety PLCs.
  *
  * All runtime state is statically allocated (no malloc/calloc/free in
  * application code). The display is rendered through one 19,200-byte
@@ -99,7 +101,15 @@
 #define HMI_MAX_WIDGETS_PER_SCREEN  24
 #define HMI_MAX_SCREENS             5
 #define HMI_TREND_SAMPLES           60     /* 60 s at 1 Hz */
-#define HMI_ALARM_JOURNAL_SIZE      16     /* in-memory circular journal */
+#ifndef HMI_ALARM_JOURNAL_SIZE
+/* In-memory circular journal between the fieldbus thread and the log writer. During an alarm
+ * flood (ISA-18.2: more than 10 alarms in 10 min per operator, often hundreds in seconds) the
+ * writer must not fall behind and replace audit records by "RECORDS LOST": 64 x 72 B = 4.5 KB. */
+#define HMI_ALARM_JOURNAL_SIZE      64
+#endif
+#if HMI_ALARM_JOURNAL_SIZE > 255
+#error "HMI_ALARM_JOURNAL_SIZE must fit the uint8_t journal indices"
+#endif
 #define HMI_INPUT_QUEUE_SIZE        16
 
 /* --- Driver modules compiled in (the generic Modbus driver is always present) ---

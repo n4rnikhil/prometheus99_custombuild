@@ -11,10 +11,38 @@
  * It says nothing about a real PLC, a real network or Modbus gateways.
  */
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+typedef int sock_len_t;
+#define SELECT_NFDS(s) 0
+#define THREAD_RET DWORD WINAPI
+#define THREAD_ARG LPVOID
+#define SLEEP_1MS() Sleep(1)
+#define SEND_FLAGS 0
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
+typedef int SOCKET;
+typedef socklen_t sock_len_t;
+#define INVALID_SOCKET (-1)
+#define closesocket(s) close(s)
+#define SELECT_NFDS(s) ((int)(s) + 1)
+#define THREAD_RET void *
+#define THREAD_ARG void *
+static void sleep_1ms(void) { struct timespec ts = { 0, 1000000L }; nanosleep(&ts, NULL); }
+#define SLEEP_1MS() sleep_1ms()
+#define SEND_FLAGS MSG_NOSIGNAL
+#endif
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -36,7 +64,12 @@ typedef struct {
     int           good_first;     /* requests answered normally before the fault starts */
     int           fault_count;    /* faulty replies, -1 = forever, then normal again */
     hal_atomic_t requests;
+#ifdef _WIN32
     HANDLE        thread;
+#else
+    pthread_t     thread;
+    bool          thread_ok;
+#endif
 } srv_t;
 
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
@@ -51,7 +84,7 @@ static int recv_exact(srv_t *s, SOCKET c, uint8_t *buf, int n)
         FD_ZERO(&rs);
         FD_SET(c, &rs);
         struct timeval tv = { 0, 50000 };
-        int r = select(0, &rs, NULL, NULL, &tv);
+        int r = select(SELECT_NFDS(c), &rs, NULL, NULL, &tv);
         if (r < 0) return -1;
         if (r == 0) continue;
         int k = recv(c, (char *)buf + got, n - got, 0);
@@ -91,7 +124,7 @@ static void serve_client(srv_t *s, SOCKET c)
         if (rq[7] != 3) {                      /* only FC03 is polled by the generic profile */
             put16(out, tid); put16(out + 2, 0); put16(out + 4, 3); out[6] = unit;
             out[7] = (uint8_t)(rq[7] | 0x80); out[8] = 1;
-            send(c, (const char *)out, 9, 0);
+            send(c, (const char *)out, 9, SEND_FLAGS);
             continue;
         }
         if (!faulty) {
@@ -99,7 +132,7 @@ static void serve_client(srv_t *s, SOCKET c)
         } else switch (s->fault) {
             case F_STALE_TID:
                 len = build_ok(out, (uint16_t)(tid + 7u), unit, qty, 0);
-                send(c, (const char *)out, len, 0);
+                send(c, (const char *)out, len, SEND_FLAGS);
                 len = build_ok(out, tid, unit, qty, 0);
                 break;
             case F_BAD_LEN:
@@ -108,7 +141,7 @@ static void serve_client(srv_t *s, SOCKET c)
                 break;
             case F_CLOSE_MID:
                 len = build_ok(out, tid, unit, qty, 0);
-                send(c, (const char *)out, 9, 0);
+                send(c, (const char *)out, 9, SEND_FLAGS);
                 closesocket(c);
                 return;
             case F_SILENT:
@@ -141,11 +174,11 @@ static void serve_client(srv_t *s, SOCKET c)
                 len = build_ok(out, tid, unit, qty, 0);
                 break;
         }
-        if (len > 0) send(c, (const char *)out, len, 0);
+        if (len > 0) send(c, (const char *)out, len, SEND_FLAGS);
     }
 }
 
-static DWORD WINAPI server_main(LPVOID p)
+static THREAD_RET server_main(THREAD_ARG p)
 {
     srv_t *s = (srv_t *)p;
     while (!s->stop) {
@@ -153,7 +186,7 @@ static DWORD WINAPI server_main(LPVOID p)
         FD_ZERO(&rs);
         FD_SET(s->listener, &rs);
         struct timeval tv = { 0, 50000 };
-        if (select(0, &rs, NULL, NULL, &tv) <= 0) continue;
+        if (select(SELECT_NFDS(s->listener), &rs, NULL, NULL, &tv) <= 0) continue;
         SOCKET c = accept(s->listener, NULL, NULL);
         if (c == INVALID_SOCKET) continue;
         serve_client(s, c);
@@ -175,22 +208,31 @@ static bool server_start(srv_t *s, fault_t fault, int good_first, int fault_coun
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     a.sin_port = 0;
-    int alen = (int)sizeof(a);
+    sock_len_t alen = (sock_len_t)sizeof(a);
     if (bind(s->listener, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(s->listener, 4) != 0 ||
         getsockname(s->listener, (struct sockaddr *)&a, &alen) != 0) {
         closesocket(s->listener);
         return false;
     }
     s->port = ntohs(a.sin_port);
+#ifdef _WIN32
     s->thread = CreateThread(NULL, 0, server_main, s, 0, NULL);
     return s->thread != NULL;
+#else
+    s->thread_ok = pthread_create(&s->thread, NULL, server_main, s) == 0;
+    return s->thread_ok;
+#endif
 }
 
 static void server_stop(srv_t *s)
 {
     hal_atomic_store(&s->stop, 1);
+#ifdef _WIN32
     WaitForSingleObject(s->thread, 3000);
     CloseHandle(s->thread);
+#else
+    if (s->thread_ok) pthread_join(s->thread, NULL);
+#endif
     closesocket(s->listener);
 }
 
@@ -253,7 +295,7 @@ static void run_scenario(const char *name, fault_t fault, int good_first, int fa
             case EXPECT_ONLINE_THEN_OFFLINE:   done = offline_after_online && alarm; break;
             case EXPECT_OFFLINE_THEN_ONLINE:   done = online_after_offline && alarm; break;
         }
-        Sleep(1);
+        SLEEP_1MS();
     }
 
     hmi_device_info_t d[HMI_MAX_DEVICES];

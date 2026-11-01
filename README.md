@@ -4,7 +4,7 @@ Two independent applications in one repository:
 
 | App | Folder | What it is | Runs on |
 |---|---|---|---|
-| **HMI runtime** (`industrial_hmi`) | [hmi-runtime/](hmi-runtime/) | The operator panel. Finds PLCs, drives and meters on the network, shows them, raises alarms, and sends operator commands (start/stop, setpoints, modes, resets) with role-based sign-in and an audit log | Windows; Linux (PC, Raspberry Pi); small MCUs (ESP32 class, not yet compiled) |
+| **HMI runtime** (`industrial_hmi`) | [hmi-runtime/](hmi-runtime/) | The operator panel. Finds PLCs, drives and meters on the network, shows them, raises alarms, and sends operator commands (start/stop, setpoints, modes, resets) with role-based sign-in and a signed audit log | Windows (incl. Harmony P6 / Windows IoT); Linux (PC, Raspberry Pi 32/64-bit); small MCUs (ESP32 class, not yet compiled) |
 | **PLC simulator** (`plc_simulator`) | [plc-simulator/](plc-simulator/) | A bench of simulated PLCs, drives and meters. Each one is a real Modbus TCP server, so the HMI or any Modbus client talks to it as it would to hardware. Has RUN/STOP, fault injection and an activity log | Windows (window and console); Linux / Raspberry Pi (console) |
 
 The two apps share no code at run time. The HMI does not link the simulator. The simulator's
@@ -17,7 +17,7 @@ matches the device it is meant to control.
 industrial_hmi/
 ├── hmi-runtime/                 the operator panel
 │   ├── include/                 public headers
-│   │   ├── core/                tags, alarms (ISA-18.2 journal), RBAC, hash-chained log, seqlock
+│   │   ├── core/                tags, alarms (ISA-18.2 journal), RBAC, signed audit log, device key, seqlock
 │   │   ├── devices/             driver-module format (device_profile.h)
 │   │   ├── fieldbus/            Modbus TCP codec, device manager, discovery
 │   │   ├── hal/                 the only OS-facing interfaces (net, fs, sys, thread, timer)
@@ -43,6 +43,7 @@ industrial_hmi/
 │   │   └── main_console.c       console app (Windows, Linux, Raspberry Pi)
 │   ├── tests/                   device-model tests
 │   └── build.bat, Makefile
+├── .github/workflows/ci.yml     Linux, Raspberry Pi (qemu) and Windows builds and tests
 ├── docs/
 │   ├── LAB_DEPLOYMENT.md        running the HMI on the lab panels: what works, what does not
 │   ├── img/                     screenshots
@@ -70,36 +71,66 @@ industrial_hmi.exe --config examples\bench.cfg
 **Headless bench** (Raspberry Pi, Linux, or a Windows console)
 
 ```sh
-cd plc-simulator && make
+cd plc-simulator && make && make test
 ./plc_simulator_cli --add atv340 --add meter --network
+cd ../hmi-runtime && make test        # every suite, under AddressSanitizer + UBSan
+./industrial_hmi --headless --allow-factory-pins --scan <simulator-ip>:1502-1509
 ```
 
-Then start the HMI on the same network with `--scan <simulator-ip>:1502-1509`.
+**Before a real plant** (once per installation)
+
+```sh
+industrial_hmi --set-pin operator       # asked twice, never typed on the command line
+industrial_hmi --set-pin maintenance
+industrial_hmi --set-pin engineer
+```
+
+Until a role has a site PIN it cannot sign in (`--allow-factory-pins` lifts this on the bench
+only). The first start creates `hmi.key` next to the executable: it signs the audit log and the
+PIN vault. Keep it on the panel, readable only by the HMI account, and out of version control.
 
 ## What is verified and what is not
 
 - **Verified here:** the unit, integration and fault-injection tests (counts in
-  [hmi-runtime/README.md](hmi-runtime/README.md#tests)); a live discovery test over real sockets;
-  the simulator's Modbus replies over TCP; the HMI showing simulated devices and sending them
-  commands (screenshots in `docs/img/`).
+  [hmi-runtime/README.md](hmi-runtime/README.md#tests)) on Linux x86-64 under AddressSanitizer and
+  UBSan, on 32-bit and 64-bit ARM (Raspberry Pi targets, run under qemu), and the Windows build
+  under Wine; a live discovery test over real sockets; the simulator's Modbus replies over TCP;
+  the headless Linux HMI discovering simulated devices end to end and writing a signed log;
+  `cppcheck` clean. The HMI showing simulated devices and sending them commands (screenshots in
+  `docs/img/`).
 - **Not verified against real hardware.** Only the Altivar status and command words (3201, 3202,
   8501, 8502) appear in public Schneider material. Every other real-device register address is
   listed as unverified in its module's header. Check them against the device's own documentation
   before relying on them.
-- **Not compiled for the target:** the ESP32 port, and the Linux binary on real hardware. The Linux
-  sources pass a type check against stub headers only.
+- **Not run on the target hardware:** the ESP32 port (not compiled), the Linux build on a real
+  Raspberry Pi with a framebuffer and touch screen (built and tested under emulation only), and
+  the Windows build on a real panel PC (tested under Wine, not on Windows itself).
 - **Not supported:** OPC UA. Harmony ST6 panels run Schneider's own runtime, which this project
-  does not replace. See [docs/LAB_DEPLOYMENT.md](docs/LAB_DEPLOYMENT.md).
+  does not replace. Harmony P6 (Windows 10 IoT) can run the Windows build, and Harmony STW6 web
+  panels can show any HTML5 server, which this runtime does not have yet. See
+  [docs/LAB_DEPLOYMENT.md](docs/LAB_DEPLOYMENT.md).
 
 ## Operating a PLC
 
 Each device has a panel with its live values and its controls. Controls are checked the same way
 on every device: the HMI asks for the PIN of the role a control needs, a start is refused while
-its interlock is active, and every command is written to the hash-chained audit log. The
+its interlock is active, and every command is written to the signed audit log. The
 operator guide is in [hmi-runtime/README.md](hmi-runtime/README.md#operating-a-plc).
+
+**STOP ALL is not an emergency stop.** The red header button sends a stop request to every
+device over Modbus. It depends on this software, the network and each PLC program, so it can
+never replace the hardwired emergency stop that ISO 13850 and IEC 60204-1 require on the
+machine. It is labelled STOP ALL, not E-STOP, for that reason.
 
 ## Standards
 
-The design follows ISA-101 (faceplates and display), ISA-18.2 (alarm journal, acknowledge and
-return-to-normal states), role-based access in the style of IEC 62443, and Modbus Application
-Protocol v1.1b3 / Modbus Messaging on TCP/IP v1.0b. The implementation is not certified.
+The design follows the standards below. **Nothing is certified**, and this is not a safety system:
+no IEC 61508 / IEC 62061 / ISO 13849 claim is made.
+
+| Standard | What the runtime does | Not done |
+|---|---|---|
+| ISA-101 (HMI design) | dark low-glare display, alarm colours reserved for alarm priorities, faceplates, the same control behaviour on every device, every value shown with its quality, an outdoor high-contrast theme | normal states (Running, Online, System OK) are shown in green, which ISA-101 high-performance practice keeps grey; no site HMI philosophy / style guide |
+| ISA-18.2 / IEC 62682 (alarms) | per-point state machine (unack, acked, return-to-normal unack), priorities, horn with silence, operator guidance for the top alarm, comm-loss alarms, journal sized for floods, event time-stamps | per-alarm acknowledge (only "acknowledge all"), shelving, out-of-service, alarm rationalisation database |
+| ISO 13850 / IEC 60204-1 (stop functions) | STOP ALL never gated; stop-latch reset needs a role and an explicit confirmation and never restarts anything | STOP ALL is a software stop, not an emergency stop (see above) |
+| IEC 62443-4-2 (security, component) | roles with least privilege, auto-logout, PIN lockout, keyed PIN hashes, site PINs required before control (CR 1.5), audit log signed with HMAC-SHA256 under a per-device key (CR 2.8, 3.9), secret files limited to the HMI account | Modbus TCP has no authentication or encryption: segment the control network (IEC 62443-3-3 zones and conduits); no per-person accounts; no remote log forwarding |
+| Modbus Application Protocol v1.1b3, Messaging on TCP/IP v1.0b | client for FC 01, 03, 05, 06, 43/14; strict frame checks; fault-injection tested | FC 02, 04, 15, 16 (no current driver module needs them) |

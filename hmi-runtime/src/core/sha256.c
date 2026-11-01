@@ -92,3 +92,59 @@ void hmi_sha256(const void *data, size_t len, uint8_t out[32])
     hmi_sha256_update(&c, data, len);
     hmi_sha256_final(&c, out);
 }
+
+/* ------------------------------------------------------------------------- */
+/* HMAC-SHA256 (RFC 2104, FIPS 198-1)                                         */
+/* ------------------------------------------------------------------------- */
+
+void hmi_hmac_sha256_init(hmi_hmac_sha256_t *c, const void *key, size_t key_len)
+{
+    uint8_t k[64], pad[64];
+    memset(k, 0, sizeof(k));
+    if (key_len > sizeof(k)) hmi_sha256(key, key_len, k);
+    else if (key_len) memcpy(k, key, key_len);
+
+    for (int i = 0; i < 64; i++) pad[i] = (uint8_t)(k[i] ^ 0x36u);
+    hmi_sha256_init(&c->inner);
+    hmi_sha256_update(&c->inner, pad, sizeof(pad));
+    for (int i = 0; i < 64; i++) pad[i] = (uint8_t)(k[i] ^ 0x5Cu);
+    hmi_sha256_init(&c->outer);
+    hmi_sha256_update(&c->outer, pad, sizeof(pad));
+
+    volatile uint8_t *v = k;                       /* do not leave key material on the stack */
+    for (size_t i = 0; i < sizeof(k); i++) v[i] = 0;
+    v = pad;
+    for (size_t i = 0; i < sizeof(pad); i++) v[i] = 0;
+}
+
+void hmi_hmac_sha256_update(hmi_hmac_sha256_t *c, const void *data, size_t len)
+{
+    hmi_sha256_update(&c->inner, data, len);
+}
+
+void hmi_hmac_sha256_final(hmi_hmac_sha256_t *c, uint8_t out[32])
+{
+    uint8_t ih[32];
+    hmi_sha256_final(&c->inner, ih);
+    hmi_sha256_update(&c->outer, ih, sizeof(ih));
+    hmi_sha256_final(&c->outer, out);
+    volatile uint8_t *v = ih;
+    for (size_t i = 0; i < sizeof(ih); i++) v[i] = 0;
+}
+
+void hmi_hmac_sha256(const void *key, size_t key_len, const void *data, size_t len, uint8_t out[32])
+{
+    hmi_hmac_sha256_t c;
+    hmi_hmac_sha256_init(&c, key, key_len);
+    hmi_hmac_sha256_update(&c, data, len);
+    hmi_hmac_sha256_final(&c, out);
+}
+
+bool hmi_ct_equal(const void *a, const void *b, size_t n)
+{
+    const volatile uint8_t *x = (const volatile uint8_t *)a;
+    const volatile uint8_t *y = (const volatile uint8_t *)b;
+    uint8_t d = 0;
+    for (size_t i = 0; i < n; i++) d |= (uint8_t)(x[i] ^ y[i]);
+    return d == 0;
+}
