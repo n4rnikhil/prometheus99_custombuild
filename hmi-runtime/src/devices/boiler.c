@@ -79,4 +79,5 @@ const hmi_device_profile_t g_profile_boiler = {
     s_compact, N(s_compact),
     NULL, 0, NULL, 0,
     "HMI-BOILER",                                     /* application module: the PLC program's name */
+    false, 0,                                       /* no HMI heartbeat register in this map */
 };

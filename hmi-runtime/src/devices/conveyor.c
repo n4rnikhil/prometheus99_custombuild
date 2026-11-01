@@ -75,4 +75,5 @@ const hmi_device_profile_t g_profile_conveyor = {
     s_compact, N(s_compact),
     NULL, 0, NULL, 0,
     "HMI-CONVEYOR",                                     /* application module: the PLC program's name */
+    false, 0,                                       /* no HMI heartbeat register in this map */
 };

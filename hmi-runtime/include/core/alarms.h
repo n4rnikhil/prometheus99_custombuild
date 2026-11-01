@@ -97,6 +97,11 @@ uint16_t hmi_alarms_acknowledge_all(hmi_alarm_supervisor_t *sup, uint32_t now_ms
  * true if the point was UNACK or RTN_UNACK. The horn is re-evaluated by the next evaluate. */
 bool hmi_alarms_acknowledge_point(hmi_alarm_supervisor_t *sup, uint8_t tag_id, uint32_t now_ms);
 
+/* Alarm summary order (ISA-18.2): highest priority first, then unacknowledged before
+ * acknowledged, then newest first. Writes up to max tag ids of points not in NORMAL; returns the
+ * number written. The renderer and the touch handling both use this, so a row is always the same alarm. */
+uint8_t hmi_alarms_sorted(const hmi_alarm_supervisor_t *sup, uint8_t *out, uint8_t max);
+
 /* Forget the alarm points of a removed device (tags first_tag .. first_tag+count-1).
  * The journal keeps their history; the summary is rebuilt by the next evaluate. */
 void hmi_alarms_clear_range(hmi_alarm_supervisor_t *sup, uint8_t first_tag, uint8_t count);

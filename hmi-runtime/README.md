@@ -43,6 +43,36 @@ per line, `#` for comments. The command line adds to the file. Examples are in
 | `--key <path>`, `--vault <path>` | device key (default `hmi.key`) and PIN vault (default `security.vault`) |
 | `--allow-factory-pins` | **bench only**: roles may sign in with the factory PINs |
 | `--headless` | Linux: no display (Modbus, alarms and log only) |
+| `--horn-gpio <chip>:<line>` | Linux: drive a GPIO line high while unacknowledged alarms exist (buzzer, stack light), e.g. `gpiochip0:17`. The HMI refuses to start if the line cannot be driven |
+
+## Operator interface design
+
+The screens are designed for a worker under stress, possibly gloved, possibly colour-blind, who
+must never wonder how to stop the machine or what a colour means (ISA-101, ISA-18.2, ISO 9241).
+
+| Rule | How it shows |
+|---|---|
+| Colour means something is wrong | Normal and running are grey (running brighter than stopped); colour appears only for alarms and abnormal values. Controls are neutral; the one primary action is a light button, not a coloured one |
+| Red means stop | STOP ALL and device Stop buttons are the only red controls. Resetting a latch is never red |
+| Priority is never colour alone | Critical and stop: red diamond. Warning: amber triangle. Info: blue circle. Always with the word |
+| STOP ALL is always there | Same place on every screen, 40 px high, never covered by a dialog, keyboard key `E` |
+| Every alarm is reachable | The Alarms screen lists all active alarms by priority, then unacknowledged, then newest, four per page on a 7" panel with Previous / Next; History is a separate view |
+| Acknowledge what you read | Each unacknowledged alarm has its own Ack button; Acknowledge all is for a known flood |
+| Instructions are never cut | The banner gives the top alarm and both steps of its guidance on their own lines; a test fails the build if any device's guidance does not fit a 7" panel |
+| Real time | Alarm and event times are local wall-clock time, as in the shift log |
+| Big targets | Header controls 40 px, alarm Ack buttons 38 px, faceplate buttons up to 48 px |
+| No unreadable screens | Below 640x400 the panel shows only the alarm state and STOP ALL, and says which size it needs |
+| Say why | Blocked controls name the interlock (*Blocked: Stop latch*); stale data and offline devices say so; an empty screen explains itself |
+
+## HMI heartbeat (PLC side)
+
+A module can name a heartbeat register (`has_heartbeat`, `heartbeat_reg`). While the device is
+online the HMI writes a counter (1..32767, never 0) there every second. The PLC program should
+treat 5 s without a change as "HMI lost" and go to its safe state, and stay there until an
+operator resets it. The simulated tank program does this on `%MW7`; the integration test checks
+that the pumps stop when the HMI goes silent and do not restart when it comes back. A real PLC
+program needs the same few rungs before its module sets `has_heartbeat`. Drives use their own
+communication-loss fault instead.
 
 ## Driver modules
 
@@ -114,9 +144,9 @@ the time of writing):
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_core` | 8,721 | tags, alarms (incl. per-alarm acknowledge), RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
-| `test_integration` | 478 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery |
-| `test_core` with the MCU profile | 8,060 | the same checks with the small-device limits |
+| `test_core` | 9,642 | tags, alarms (incl. per-alarm acknowledge and summary order), guidance fits a 7" banner, header / alarm-screen geometry and touch-target sizes, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
+| `test_integration` | 486 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery, HMI heartbeat loss stopping the tank |
+| `test_core` with the MCU profile | 8,981 | the same checks with the small-device limits |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery (real sockets on Linux and Windows) |
 
 CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) also builds both Raspberry Pi targets

@@ -66,16 +66,17 @@ hmi_rect_t hmi_layout_dock_tab(int sw, int sh, int idx)
 }
 
 /* Header right-hand group, laid out from the right edge. */
-#define HDR_BTN_Y   12
-#define HDR_BTN_H   32
+#define HDR_BTN_Y   8
+#define HDR_BTN_H   40            /* every header control is a glove-size target */
 #define HDR_GAP     8
-/* Narrow screens (< 900 px) use a compact header: smaller chips, health as a dot. */
+/* Narrow screens (< 900 px) use a compact header. The health status always keeps its words:
+ * a bare coloured dot would make the operator guess. */
 static bool compact(int sw) { return sw < 900; }
-#define W_ESTOP(sw)   (compact(sw) ? 84 : 92)
+#define W_ESTOP(sw)   (compact(sw) ? 104 : 124)
 #define W_ROLE(sw)    (compact(sw) ? 100 : 112)
-#define W_ALARM(sw)   (compact(sw) ? 100 : 116)
-#define W_HEALTH(sw)  (compact(sw) ? 32 : 124)
-#define W_THEME       32
+#define W_ALARM(sw)   (compact(sw) ? 104 : 116)
+#define W_HEALTH(sw)  (compact(sw) ? 116 : 132)
+#define W_THEME       40
 
 hmi_rect_t hmi_layout_estop_button(int sw, int sh)
 {
@@ -133,19 +134,27 @@ hmi_rect_t hmi_layout_token_rect(uint32_t token, hmi_rect_t c)
 
 /* ---------------- Fixed screens ---------------- */
 
+bool hmi_layout_banner_shown(uint8_t screen, bool alarm_active)
+{
+    return alarm_active && screen != SCREEN_ALARM_MATRIX;
+}
+
 hmi_rect_t hmi_layout_alarm_active_card(int sw, int sh, bool banner_active, int nact)
 {
-    hmi_rect_t body = hmi_layout_screen_body(sw, sh, banner_active);
-    int rows = nact ? (nact > 4 ? 4 : nact) : 1;
-    int ah = 46 + rows * HMI_LAYOUT_ALARM_ROW_H;
-    if (ah > body.h / 2) ah = body.h / 2;
-    return mk(body.x, body.y, body.w, ah);
+    (void)nact;
+    return hmi_layout_screen_body(sw, sh, banner_active);
 }
 
 int hmi_layout_alarm_rows(hmi_rect_t card)
 {
-    int n = (card.h - 42 - 4) / HMI_LAYOUT_ALARM_ROW_H;
-    return n < 0 ? 0 : n;
+    int n = (card.h - 42 - HMI_LAYOUT_ALARM_FOOT_H) / HMI_LAYOUT_ALARM_ROW_H;
+    return n < 1 ? 1 : n;
+}
+
+int hmi_layout_history_rows(hmi_rect_t card)
+{
+    int n = (card.h - 42 - HMI_LAYOUT_ALARM_FOOT_H) / HMI_LAYOUT_HISTORY_ROW_H;
+    return n < 1 ? 1 : n;
 }
 
 int hmi_layout_alarm_row_y(hmi_rect_t card, int row)
@@ -155,8 +164,24 @@ int hmi_layout_alarm_row_y(hmi_rect_t card, int row)
 
 hmi_rect_t hmi_layout_alarm_row_ack(hmi_rect_t card, int row)
 {
-    int w = 76, h = HMI_LAYOUT_ALARM_ROW_H - 4;
-    return mk(card.x + card.w - 16 - w, card.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H + 2, w, h);
+    int w = 84, h = HMI_LAYOUT_ALARM_ROW_H - 6;
+    return mk(card.x + card.w - 16 - w, card.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H + 3, w, h);
+}
+
+hmi_rect_t hmi_layout_alarm_tab(int sw, int sh, int view)
+{
+    hmi_rect_t c = hmi_layout_content(sw, sh, false);
+    int bh = 36, by = c.y + (HMI_LAYOUT_TITLE_H - 8 - bh) / 2;
+    int w = 112, x0 = c.x + 104;                  /* right of the "Alarms" title */
+    return mk(x0 + view * (w + 6), by, w, bh);
+}
+
+hmi_rect_t hmi_layout_alarm_page(hmi_rect_t card, int dir)
+{
+    int w = 112, h = HMI_LAYOUT_ALARM_FOOT_H - 12;
+    int y = card.y + card.h - HMI_LAYOUT_ALARM_FOOT_H + 4;
+    int right = card.x + card.w - 16;
+    return dir ? mk(right - w, y, w, h) : mk(right - 2 * w - 8 - 120, y, w, h);   /* page label between */
 }
 
 hmi_rect_t hmi_layout_screen_body(int sw, int sh, bool banner_active)
@@ -183,8 +208,8 @@ hmi_rect_t hmi_layout_screen_button(int sw, int sh, bool banner_active, hmi_hit_
     switch (kind) {
         /* Alarm screen: title-row buttons, primary action right-most */
         case HMI_HIT_ALARM_ACK:     return mk(right - 150, by, 150, bh);
-        case HMI_HIT_ALARM_SILENCE: return mk(right - 150 - 8 - 120, by, 120, bh);
-        case HMI_HIT_ESTOP_RESET:   return mk(right - 150 - 8 - 120 - 8 - 124, by, 124, bh);
+        case HMI_HIT_ALARM_SILENCE: return mk(right - 150 - 8 - 124, by, 124, bh);
+        case HMI_HIT_ESTOP_RESET:   return mk(right - 150 - 8 - 124 - 8 - 112, by, 112, bh);
 
         /* Settings screen: buttons along the bottom of each card */
         case HMI_HIT_SET_ROLE: {
@@ -291,7 +316,7 @@ hmi_rect_t hmi_layout_fp_row(int sw, int sh, int row)
     int x = v.x + v.w + 16;
     int rh = (m.h - FP_TITLE_H - FP_FOOT_H) / HMI_FP_MAX_ROWS;          /* 7 rows always fit */
     if (rh > FP_ROW_H + 6) rh = FP_ROW_H + 6;
-    return mk(x, m.y + FP_TITLE_H + row * rh, m.x + m.w - 16 - x, rh - 6);
+    return mk(x, m.y + FP_TITLE_H + row * rh, m.x + m.w - 16 - x, rh - 2);
 }
 
 hmi_rect_t hmi_layout_fp_ctrl(int sw, int sh, const hmi_device_profile_t *p, int ctrl)
@@ -309,7 +334,7 @@ hmi_rect_t hmi_layout_fp_ctrl(int sw, int sh, const hmi_device_profile_t *p, int
     int text_w = r.w * 36 / 100;
     int bx = r.x + text_w, bw_all = r.w - text_w;
     int bw = (bw_all - (cnt - 1) * 6) / cnt;
-    int bh = r.h - 6 < 40 ? r.h - 6 : 40;
+    int bh = r.h - 2 < 48 ? r.h - 2 : 48;         /* as tall as the row allows, up to 48 px */
     return mk(bx + k * (bw + 6), r.y + (r.h - bh) / 2, bw, bh);
 }
 
@@ -404,11 +429,13 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
                               const uint32_t *tokens, uint8_t ntok,
                               const hmi_device_info_t *devs, uint8_t ndev, uint8_t fp_slot, int x, int y)
 {
-    /* The E-STOP is reachable even while a dialog is open */
+    /* STOP ALL is reachable even while a dialog is open */
     {
         hmi_rect_t e = hmi_layout_estop_button(sw, sh);
         if (y < HMI_LAYOUT_HEADER_H && hit(e, x, y)) return result(HMI_HIT_ESTOP, 0, e);
     }
+    /* A display below the supported size shows only STOP ALL: nothing else may be touched */
+    if (HMI_LAYOUT_TOO_SMALL(sw, sh)) return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
     if (modal != HMI_MODAL_NONE) {
         hmi_rect_t m = hmi_layout_modal(sw, sh, modal);
         hmi_rect_t c = hmi_layout_modal_cancel(sw, sh, modal);
@@ -481,6 +508,17 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
     for (int i = 0; i < nb; i++) {
         hmi_rect_t r = hmi_layout_screen_button(sw, sh, banner_active, btns[i]);
         if (hit(r, x, y)) return result(btns[i], 0, r);
+    }
+    if (screen == SCREEN_ALARM_MATRIX) {
+        for (int t = 0; t < 2; t++) {
+            hmi_rect_t r = hmi_layout_alarm_tab(sw, sh, t);
+            if (hit(r, x, y)) return result(HMI_HIT_ALARM_TAB, (uint8_t)t, r);
+        }
+        hmi_rect_t card = hmi_layout_alarm_active_card(sw, sh, banner_active, 0);
+        for (int d = 0; d < 2; d++) {
+            hmi_rect_t r = hmi_layout_alarm_page(card, d);
+            if (hit(r, x, y)) return result(HMI_HIT_ALARM_PAGE, (uint8_t)d, r);
+        }
     }
 
     /* Device panels (process screen) */

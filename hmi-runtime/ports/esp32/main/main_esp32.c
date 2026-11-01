@@ -26,6 +26,7 @@
 #include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_lcd_panel_io.h"
@@ -47,7 +48,16 @@ static volatile bool          s_repaint = true;
 /* Hooks for the application core                                             */
 /* ------------------------------------------------------------------------- */
 void hal_console_print(const char *text) { fputs(text, stdout); }
-void hal_beep(void)                      {}           /* wire a buzzer GPIO here if the board has one */
+void hal_beep(void)                      {}           /* the steady output below drives the buzzer */
+void hal_horn(bool on)
+{
+#if BOARD_PIN_HORN >= 0
+    static int last = -1;
+    if (last != (int)on) { gpio_set_level(BOARD_PIN_HORN, on ? 1 : 0); last = on; }
+#else
+    (void)on;
+#endif
+}
 void hal_trim_memory(void)               {}
 void hal_request_repaint(void)           { s_repaint = true; }
 void hal_request_quit(void)              { app_stop(); }
@@ -64,6 +74,15 @@ bool hal_console_read_secret(const char *prompt, char *out, size_t cap)
 /* Boards that switch the backlight or reset the touch controller through an IO expander
  * (for example a CH422G) do it here. */
 __attribute__((weak)) void board_init(void) {}
+
+static void horn_init(void)
+{
+#if BOARD_PIN_HORN >= 0
+    gpio_reset_pin(BOARD_PIN_HORN);
+    gpio_set_direction(BOARD_PIN_HORN, GPIO_MODE_OUTPUT);
+    gpio_set_level(BOARD_PIN_HORN, 0);
+#endif
+}
 
 static void display_init(void)
 {
@@ -253,6 +272,7 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     board_init();
+    horn_init();
     storage_init();
     network_init();
 

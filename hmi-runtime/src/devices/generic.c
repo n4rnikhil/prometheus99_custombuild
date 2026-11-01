@@ -67,4 +67,5 @@ const hmi_device_profile_t g_profile_generic = {
     s_generic_compact, (uint8_t)(sizeof(s_generic_compact) / sizeof(s_generic_compact[0])),
     NULL, 0, NULL, 0,
     NULL,
+    false, 0,                                       /* no HMI heartbeat register in this map */
 };

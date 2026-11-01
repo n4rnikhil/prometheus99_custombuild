@@ -165,6 +165,12 @@ typedef struct {
      * A real PLC running some other program is then never driven with a guessed register map;
      * attach it deliberately with --plc <ip>@<module key>. NULL = fixed product map (drives, meters). */
     const char            *match_app;
+    /* HMI heartbeat: while the device is online the HMI writes a counter (1..32767, never 0) to
+     * this holding register every HMI_HEARTBEAT_MS. The PLC program watches it and goes to its
+     * safe state when it stops changing, so a dead HMI or a cut cable is noticed by the machine,
+     * not only by the HMI. false = the device has no such register. */
+    bool                   has_heartbeat;
+    uint16_t               heartbeat_reg;
 } hmi_device_profile_t;
 
 /* Built-in driver modules (src/devices/), most specific first in the registry */

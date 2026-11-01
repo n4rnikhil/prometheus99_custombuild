@@ -137,6 +137,31 @@ uint16_t hmi_alarms_acknowledge_all(hmi_alarm_supervisor_t *sup, uint32_t now_ms
     return count;
 }
 
+static bool summary_before(const hmi_alarm_point_t *a, const hmi_alarm_point_t *b)
+{
+    if (a->peak_severity != b->peak_severity) return a->peak_severity > b->peak_severity;
+    bool ua = a->state == ALARM_PT_UNACK || a->state == ALARM_PT_RTN_UNACK;
+    bool ub = b->state == ALARM_PT_UNACK || b->state == ALARM_PT_RTN_UNACK;
+    if (ua != ub) return ua;
+    return (int32_t)(a->since_ms - b->since_ms) > 0;            /* newer first, wrap-safe */
+}
+
+uint8_t hmi_alarms_sorted(const hmi_alarm_supervisor_t *sup, uint8_t *out, uint8_t max)
+{
+    if (!sup || !out || !max) return 0;
+    uint8_t n = 0;
+    for (int i = 0; i < HMI_MAX_TAGS; i++) {                     /* insertion sort: at most 128 points */
+        const hmi_alarm_point_t *p = &sup->points[i];
+        if (p->state == ALARM_PT_NORMAL) continue;
+        uint8_t k = n < max ? n : (uint8_t)(max - 1);
+        if (n >= max && !summary_before(p, &sup->points[out[max - 1]])) continue;
+        while (k > 0 && summary_before(p, &sup->points[out[k - 1]])) { out[k] = out[k - 1]; k--; }
+        out[k] = (uint8_t)i;
+        if (n < max) n++;
+    }
+    return n;
+}
+
 bool hmi_alarms_acknowledge_point(hmi_alarm_supervisor_t *sup, uint8_t tag_id, uint32_t now_ms)
 {
     if (!sup || tag_id >= HMI_MAX_TAGS) return false;

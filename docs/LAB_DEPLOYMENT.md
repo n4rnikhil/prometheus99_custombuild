@@ -89,6 +89,10 @@ been checked against its device.
    authentication: anyone on that network can write to the PLCs directly, with or without this HMI.
 4. Check that each machine's hardwired emergency stop works on its own. STOP ALL on the HMI is a
    software stop request, not an emergency stop.
-5. For drives commanded over Modbus, set the drive's own communication-loss behaviour (Altivar:
+5. In each PLC program the HMI controls, add the heartbeat rungs (see the runtime README, "HMI
+   heartbeat"): 5 s without a changing heartbeat sets the program's stop latch.
+6. Wire an alarm buzzer or stack light: `--horn-gpio gpiochip0:<line>` on a Pi, `BOARD_PIN_HORN` on
+   an ESP32 board. A PC's own beep is not loud enough on a plant floor.
+7. For drives commanded over Modbus, set the drive's own communication-loss behaviour (Altivar:
    the Modbus TCP / Ethernet timeout and its fault response) so that a drive stops if the HMI or
    the network goes away. The HMI cannot stop a drive it can no longer reach.

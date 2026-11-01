@@ -34,6 +34,7 @@
 #include "hal/net.h"
 #include "renderer/layout.h"
 #include "renderer/micro_renderer.h"
+#include "renderer/font.h"
 
 static int g_fail, g_pass;
 #define CHECK(cond) do { if (cond) g_pass++; else { g_fail++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -191,20 +192,50 @@ static void test_alarm_ack_point(void)
     hmi_tag_registry_reset();
 }
 
+/* Operator guidance must be readable in full on a 7" panel: the banner shows both steps on one
+ * line, and a truncated instruction during an emergency is a design defect, not a cosmetic one. */
+static void test_guidance_fits(void)
+{
+    hmi_rect_t b = hmi_layout_banner(800, 480), ack = hmi_layout_banner_ack(800, 480);
+    int tw = ack.x - 16 - (b.x + 58);
+    for (uint8_t p = 0; p < hmi_profile_count(); p++) {
+        const hmi_device_profile_t *pr = hmi_profile_at(p);
+        for (uint8_t i = 0; pr && i < pr->meta_count; i++) {
+            const hmi_tag_meta_t *m = &pr->meta[i];
+            const char *a1 = m->action1 ? m->action1 : "Check the field device and its wiring";
+            const char *a2 = m->action2 ? m->action2 : "Acknowledge once the cause is understood";
+            char l1[80], l2[80];
+            snprintf(l1, sizeof(l1), "1. %s", a1);
+            snprintf(l2, sizeof(l2), "2. %s", a2);
+            int w1 = hmi_text_width(&hmi_font_body, l1), w2 = hmi_text_width(&hmi_font_body, l2);
+            int w = w1 > w2 ? w1 : w2;
+            bool ok = w <= tw && strlen(l1) < 56 && strlen(l2) < 56;    /* fits the line and the record */
+            if (!ok) printf("  guidance too long (%d px > %d): %s / %s\n", w, tw, pr->key, m->name);
+            CHECK(ok);
+        }
+    }
+}
+
 static void test_alarm_row_geometry(void)
 {
-    static const int sizes[][2] = { { 480, 272 }, { 800, 480 }, { 1024, 600 }, { 1280, 800 }, { 1920, 1080 } };
+    static const int sizes[][2] = { { 640, 400 }, { 800, 480 }, { 1024, 600 }, { 1280, 800 }, { 1920, 1080 } };
     for (unsigned k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
         int sw = sizes[k][0], sh = sizes[k][1];
-        for (int banner = 0; banner < 2; banner++) {
+        CHECK(!HMI_LAYOUT_TOO_SMALL(sw, sh));
+        CHECK(!hmi_layout_banner_shown(SCREEN_ALARM_MATRIX, true));       /* its first row is the banner */
+        CHECK(hmi_layout_banner_shown(SCREEN_PROCESS_OVERVIEW, true) && !hmi_layout_banner_shown(SCREEN_PROCESS_OVERVIEW, false));
+        for (int banner = 0; banner < 1; banner++) {
             for (int nact = 0; nact <= 8; nact++) {
                 hmi_rect_t ca = hmi_layout_alarm_active_card(sw, sh, banner != 0, nact);
                 hmi_rect_t body = hmi_layout_screen_body(sw, sh, banner != 0);
+                CHECK(hmi_layout_alarm_rows(ca) >= (sh >= 480 ? 4 : 2));          /* 4 per page on 7", 2 on 640x400 */
                 CHECK(ca.y >= body.y && ca.y + ca.h <= body.y + body.h);
                 int rows = hmi_layout_alarm_rows(ca);
                 for (int i = 0; i < rows; i++) {
                     hmi_rect_t b = hmi_layout_alarm_row_ack(ca, i);
-                    CHECK(b.x >= ca.x && b.x + b.w <= ca.x + ca.w && b.y >= ca.y && b.y + b.h <= ca.y + ca.h);
+                    CHECK(b.x >= ca.x && b.x + b.w <= ca.x + ca.w && b.y >= ca.y &&
+                          b.y + b.h <= ca.y + ca.h - HMI_LAYOUT_ALARM_FOOT_H);           /* above the pager */
+                    CHECK(b.h >= 36);                                                     /* glove-size target */
                     if (i) { hmi_rect_t p = hmi_layout_alarm_row_ack(ca, i - 1); CHECK(p.y + p.h <= b.y); }
                 }
             }
@@ -399,7 +430,8 @@ static void test_layout(void)
             }
             /* header controls do not overlap each other */
             hmi_rect_t e = hmi_layout_estop_button(w, h), ro = hmi_layout_role_pill(w, h), th = hmi_layout_theme_button(w, h);
-            CHECK(ro.x + ro.w <= e.x && th.x > 200 && th.x + th.w <= ro.x);
+            CHECK(ro.x + ro.w <= e.x && th.x + th.w <= ro.x && th.x >= (w >= 800 ? 200 : 120));
+            CHECK(e.h >= 40 && ro.h >= 40 && th.h >= 40);                  /* glove-size header targets */
             CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0xFF, e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
             for (int x = 0; x < w; x += 7) {
                 hmi_hit_t t = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0xFF, x, h - 5);
@@ -1201,6 +1233,7 @@ test_hal();
     test_security();
     test_alarm_ack_point();
     test_alarm_row_geometry();
+    test_guidance_fits();
     test_auth();
     test_watchdog();
     test_modbus();

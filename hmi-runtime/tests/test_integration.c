@@ -281,6 +281,29 @@ static void test_tank_scenario(void)
 #endif
 }
 
+/* HMI heartbeat: the PLC notices a dead HMI by itself and stops, and nothing restarts on its own */
+static void test_hmi_heartbeat(void)
+{
+    world();
+    CHECK(attach(SIM_TANK, NULL, 100));
+    run(100, 3000);
+    sim_plc_t *t = &g_sim[0];
+    int16_t h1 = t->hr[7];
+    CHECK(h1 != 0);                                          /* the heartbeat reaches %MW7 */
+    run(3000, 6000);
+    CHECK(t->hr[7] != h1);                                   /* and keeps changing */
+    CHECK(t->coils[2] == 0 && t->coils[0] == 1);             /* no false trip while the HMI is alive */
+    /* the HMI dies (or the cable is cut): the PLC keeps scanning, nobody writes %MW7 */
+    for (uint32_t ms = 6000; ms < 12000; ms += 100) sim_step(t);
+    CHECK(t->coils[2] == 1);                                 /* stop latch set by the PLC itself */
+    CHECK(t->coils[0] == 0 && t->coils[1] == 0);             /* pumps off */
+    /* the HMI comes back: the latch stays until an operator resets it deliberately */
+    run(12000, 15000);
+    CHECK(t->coils[2] == 1 && t->coils[0] == 0);
+    CHECK(tag(0, g_profile_tank_skid.estop_tag) == 1);       /* and the HMI reads why (Stop latch tag) */
+    hmi_devmgr_shutdown();
+}
+
 static void test_every_plc_comes_online(void)
 {
     static const sim_type_t types[] = { SIM_ATV340, SIM_ATV630, SIM_CONVEYOR, SIM_BOILER, SIM_PUMPS, SIM_COMPRESSOR, SIM_AHU, SIM_VFD };
@@ -403,6 +426,7 @@ int main(void)
     hmi_timer_init();                                    /* as app_init() does: the link timers need it */
     test_modules_match_devices();
     test_tank_scenario();
+    test_hmi_heartbeat();
     test_every_plc_comes_online();
     test_altivar_control();
     test_meter();

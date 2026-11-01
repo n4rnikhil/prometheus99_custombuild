@@ -9,6 +9,8 @@
  * Map (%MWn = holding register n, %Mn = coil n):
  *   %MW0 level 0.1 %   %MW1 pump A rpm   %MW2 valve %   %MW3 pressure kPa   %MW4 coolant C
  *   %MW5 level setpoint 0.1 %   %MW6 mode (0 Manual, 1 Auto: the PLC runs pump A to hold the level)
+ *   %MW7 HMI heartbeat: the HMI writes a changing counter every second; after 5 s without a
+ *        change the program sets its stop latch (pumps off) until an operator resets it
  *   %M0 pump A   %M1 coolant pump B   %M2 stop latch (set by the hardwired E-stop chain or by STOP ALL)   %M3 fault reset (pulse)   %M4 pump A overload
  */
 
@@ -89,4 +91,5 @@ const hmi_device_profile_t g_profile_tank_skid = {
     s_compact, N(s_compact),
     NULL, 0, NULL, 0,
     "HMI-TANK",                                     /* application module: the PLC program's name */
+    true, 7,                                        /* %MW7: HMI heartbeat (the program stops on loss) */
 };

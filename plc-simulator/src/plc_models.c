@@ -43,7 +43,7 @@ enum { DS_SWITCH_ON_DISABLED, DS_READY, DS_SWITCHED_ON, DS_RUNNING, DS_FAULT };
 #define AV_FAULT_CODE 16      /* simulated "overload" fault code shown in LFT */
 
 static const sim_type_info_t s_types[SIM_TYPE_COUNT] = {
-    [SIM_TANK] = { "Tank skid", "Modicon M340", "Schneider Electric", "BMX P34 2020", "V3.20", "HMI-TANK", true, true, 12, {
+    [SIM_TANK] = { "Tank skid", "Modicon M340", "Schneider Electric", "BMX P34 2020", "V3.20", "HMI-TANK", true, true, 13, {
         R("Tank level",     "%",   LB,      0, 1, 50, 0, 1000),
         R("Pump A speed",   "rpm", DV,      1, 0, 0,  0, 3000),
         R("Valve V-101",    "%",   HW | LB, 2, 0, 5,  0, 100),
@@ -51,6 +51,7 @@ static const sim_type_info_t s_types[SIM_TYPE_COUNT] = {
         R("Coolant temp",   "C",   DV | LB, 4, 0, 5,  -50, 150),
         R("Level setpoint", "%",   HW | LB, 5, 1, 50, 100, 950),
         E("Control mode",          HW | LB, 6, 1, "Manual|Auto"),
+        R("HMI heartbeat",  "",    HW | LB, 7, 0, 0,  0, 32767),
         C("Feed pump A",           HW | LB, 0, BIT(2) | BIT(4)),
         C("Coolant pump B",        HW | LB, 1, BIT(2)),
         C("Stop latch",            HW | LB, 2, 0),
@@ -351,6 +352,15 @@ static void step_tank(sim_plc_t *p)
     int16_t *h = p->hr;
     uint8_t *c = p->coils;
     if (c[3]) { c[4] = 0; c[3] = 0; }                               /* fault reset clears the overload trip */
+    /* HMI heartbeat watchdog (%MW7): 5 s without a change after the HMI has been seen once sets the
+     * stop latch. It stays set until an operator resets it from a working HMI: nothing restarts by itself. */
+    if (h[7] != (int16_t)p->st[2]) { p->st[2] = h[7]; p->st[3] = 0; p->st[4] = 0; }
+    else if (h[7] != 0 && p->st[3] < 1000) p->st[3]++;
+    if (h[7] != 0 && p->st[3] >= 50 && !p->st[4]) {
+        p->st[4] = 1;
+        c[2] = 1;
+        event(p, "HMI heartbeat lost for 5 s: stop latch set");
+    }
     if (c[2]) { c[0] = 0; c[1] = 0; }                               /* stop latch set: pumps off */
     if (c[4]) c[0] = 0;                                             /* overload trips pump A */
     if (h[6] == 1 && !c[2] && !c[4]) {                              /* Auto: hold the level at its setpoint */
@@ -739,7 +749,7 @@ size_t sim_handle(sim_plc_t *p, const uint8_t *adu, size_t len, uint8_t *out, si
             snprintf(msg, sizeof(msg), "HMI wrote CMD = 16#%04X", (unsigned)qv);
             event(p, msg);
             altivar_command(p, (uint16_t)old, qv);
-        } else {
+        } else if (strcmp(row->label, "HMI heartbeat") != 0) {   /* once a second: only its loss is news */
             format_row(row, (int16_t)v, val, sizeof(val));
             snprintf(msg, sizeof(msg), "HMI set %s to %s", row->label, val);
             event(p, msg);

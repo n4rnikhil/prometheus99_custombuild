@@ -18,6 +18,9 @@ void hal_utc_now(char *out, size_t cap);
 /* The same clock as milliseconds since 1970-01-01T00:00:00Z. */
 uint64_t hal_utc_ms(void);
 
+/* Local time minus UTC, in seconds, now (time zone and daylight saving as the OS has them). */
+int32_t  hal_local_offset_s(void);
+
 /* Format a hal_utc_ms() value as "YYYY-MM-DDTHH:MM:SS.mmmZ" (portable, no C library time zone). */
 void hal_utc_format(uint64_t utc_ms, char *out, size_t cap);
 

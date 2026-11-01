@@ -75,4 +75,5 @@ const hmi_device_profile_t g_profile_abb_drive = {
     s_compact, N(s_compact),
     NULL, 0, NULL, 0,
     "HMI-ABB",                                     /* application module: the PLC program's name */
+    false, 0,                                       /* drive: use its own communication-loss fault instead */
 };

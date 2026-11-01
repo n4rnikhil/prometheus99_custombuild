@@ -38,6 +38,16 @@ uint64_t hal_utc_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
 }
 
+int32_t hal_local_offset_s(void)
+{
+    time_t t = time(NULL);
+    struct tm lt, gt;
+    if (!localtime_r(&t, &lt) || !gmtime_r(&t, &gt)) return 0;
+    gt.tm_isdst = lt.tm_isdst;                 /* mktime() reads gt as local: the difference is the offset */
+    time_t back = mktime(&gt);
+    return back == (time_t)-1 ? 0 : (int32_t)difftime(t, back);
+}
+
 bool hal_random(void *out, size_t n)
 {
 #if defined(ESP_PLATFORM)

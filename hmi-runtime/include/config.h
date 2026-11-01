@@ -101,6 +101,9 @@
 #define HMI_MAX_WIDGETS_PER_SCREEN  24
 #define HMI_MAX_SCREENS             5
 #define HMI_TREND_SAMPLES           60     /* 60 s at 1 Hz */
+#ifndef HMI_HEARTBEAT_MS
+#define HMI_HEARTBEAT_MS            1000u  /* HMI -> PLC heartbeat write period (devices that have one) */
+#endif
 #ifndef HMI_ALARM_LOG_SYNC_MS
 /* Audit records reach the OS at once (they survive a crash of the runtime) and the medium at
  * least this often (they survive a power cut). A forced write to an SD card or flash can take

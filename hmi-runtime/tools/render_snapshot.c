@@ -10,7 +10,7 @@
  *   gcc -std=c99 -O2 -I include tools/render_snapshot.c src/core/tags.c src/core/alarms.c \
  *       src/core/security.c src/core/sha256.c src/core/crc32.c src/core/watchdog.c \
  *       src/renderer/layout.c src/renderer/micro_renderer.c src/renderer/font_inter.c \
- *       src/drivers/device_profiles.c src/drivers/profiles/profile_tank_skid.c profile_drive.c profile_generic.c ...
+ *       src/devices/<every module>.c
  *   ./render_snapshot 800 480 out_prefix      -> out_prefix_0.bmp .. out_prefix_5.bmp
  */
 
@@ -132,6 +132,7 @@ int main(int argc, char **argv)
     hmi_alarms_log_event(&alarms, 6400, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "Altivar drive 1 found at 192.168.1.51:502");
     hmi_alarms_evaluate(&alarms, &tags, 31000);
     hmi_security_init(&sec);
+    sec.allow_factory_pins = true;                  /* a rendering bench, not a plant */
     hmi_security_login(&sec, ROLE_OPERATOR, "1111", 0);
     hmi_watchdog_init(&wd, 0);
     hmi_discovery_stats_t ds;
@@ -148,6 +149,7 @@ int main(int argc, char **argv)
         v.active_screen = (uint8_t)(s == SCREEN_COUNT ? SCREEN_PROCESS_OVERVIEW : s);
         if (s == SCREEN_COUNT) v.ndev = 1;          /* extra frame: a single device gets the full layout */
         v.ui_wd_alive = true; v.now_ms = 31000; v.ui_frame_hz = 30;
+        v.utc_ms = 1793541780000ull;                /* 2026-11-01 14:03:00 UTC: wall-clock times on screen */
         char path[512];
         snprintf(path, sizeof(path), "%s_%u.bmp", prefix, (unsigned)s);
         rc |= write_screen(path, w, h, &v);

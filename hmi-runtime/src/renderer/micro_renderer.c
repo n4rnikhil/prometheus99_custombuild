@@ -20,13 +20,13 @@
 #define C_TEXT    COLOR_CHALK_WHITE
 #define C_MUTED   COLOR_SILVER_MUTED
 #define C_TRACK   COLOR_DARK_GRAY
-#define C_TEAL    COLOR_CYAN_ACCENT
-#define C_BLUE    COLOR_BLUE_ACCENT
+#define C_TEAL    COLOR_CYAN_ACCENT    /* simulated-data marker only */
+#define C_INFO    COLOR_BLUE_ACCENT    /* the INFO alarm priority only: blue is not used for controls */
+#define C_NEUTRAL COLOR_SILVER_MUTED   /* analog fills, trends: normal values are grey (ISA-101) */
 #define C_OK      COLOR_EMERALD_OK   /* normal / running: neutral (ISA-101) */
 #define C_ORANGE  COLOR_AMBER_WARN
 #define C_RED     COLOR_CRIMSON_TRIP
 #define C_YELLOW  COLOR_VIBRANT_ORANGE
-#define C_PURPLE  COLOR_PURPLE_SECURE
 #define C_SURF    COLOR_SURFACE_HOVER
 #define C_DIM     COLOR_DIM_TEXT
 #define C_WHITE   COLOR_WHITE_PURE
@@ -412,14 +412,14 @@ static uint8_t sev_color(uint8_t sev)
 {
     if (sev >= ALARM_SEV_CRITICAL) return C_RED;
     if (sev == ALARM_SEV_WARNING) return C_ORANGE;
-    if (sev == ALARM_SEV_INFO) return C_BLUE;
+    if (sev == ALARM_SEV_INFO) return C_INFO;
     return C_OK;
 }
 
 static const char* sev_label(uint8_t sev)
 {
     switch (sev) {
-        case ALARM_SEV_ESTOP:    return "E-Stop";
+        case ALARM_SEV_ESTOP:    return "Stop";
         case ALARM_SEV_CRITICAL: return "Critical";
         case ALARM_SEV_WARNING:  return "Warning";
         case ALARM_SEV_INFO:     return "Info";
@@ -459,11 +459,71 @@ static void fmt_value(char *out, size_t cap, const hmi_view_t *v, uint8_t tag)
     hmi_format_scaled(out, cap, val, m ? m->decimals : 0);
 }
 
-static void fmt_uptime(char *out, size_t cap, uint32_t ms)
+
+/* Wall-clock time of an event that happened at uptime ts_ms. Same day: "14:03:27"; another day:
+ * "11-01 14:03"; no clock on this panel: uptime "+00:00:31". */
+static void fmt_clock(char *out, size_t cap, const hmi_view_t *v, uint32_t ts_ms)
 {
-    uint32_t s = ms / 1000u;
-    snprintf(out, cap, "%02lu:%02lu:%02lu.%03lu", (unsigned long)(s / 3600u), (unsigned long)((s / 60u) % 60u),
-             (unsigned long)(s % 60u), (unsigned long)(ms % 1000u));
+    if (!v->utc_ms) {
+        uint32_t sec = ts_ms / 1000u;
+        snprintf(out, cap, "+%02lu:%02lu:%02lu", (unsigned long)(sec / 3600u), (unsigned long)((sec / 60u) % 60u),
+                 (unsigned long)(sec % 60u));
+        return;
+    }
+    /* signed: an event stamped by the fieldbus thread a moment after the UI read its clock must
+     * not wrap to "49 days ago" */
+    int32_t age = (int32_t)(v->now_ms - ts_ms);
+    if (age < 0) age = 0;
+    int64_t local_now = (int64_t)v->utc_ms + (int64_t)v->tz_offset_s * 1000;
+    int64_t t = local_now - (int64_t)age;
+    if (t < 0) t = 0;
+    int64_t day = t / 86400000, today = local_now / 86400000;
+    uint32_t sod = (uint32_t)((t % 86400000) / 1000);
+    if (day == today) {
+        snprintf(out, cap, "%02u:%02u:%02u", (unsigned)(sod / 3600), (unsigned)(sod / 60 % 60), (unsigned)(sod % 60));
+    } else {                                                /* civil date from the day count */
+        int64_t z = day + 719468, era = z / 146097;
+        unsigned doe = (unsigned)(z - era * 146097);
+        unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+        unsigned d = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9;
+        snprintf(out, cap, "%02u-%02u %02u:%02u", m, d, (unsigned)(sod / 3600), (unsigned)(sod / 60 % 60));
+    }
+}
+
+/* Priority symbols (ISA-101 / ISA-18.2: priority is never shown by colour alone):
+ *   critical and stop  red diamond     warning  amber triangle     info  blue circle */
+static void fill_diamond(hmi_renderer_t *r, int cx, int cy, int s, uint8_t c)
+{
+    for (int dy = -s; dy <= s; dy++) {
+        int half = s - (dy < 0 ? -dy : dy);
+        hmi_draw_rect(r, cx - half, cy + dy, 2 * half + 1, 1, c);
+    }
+}
+
+static void fill_triangle(hmi_renderer_t *r, int cx, int cy, int s, uint8_t c)
+{
+    int h = (s * 2 * 87) / 100 + 1;                        /* equilateral: height = side * 0.87 */
+    int top = cy - (2 * h) / 3;
+    for (int i = 0; i < h; i++) {
+        int half = (i * s) / h;
+        hmi_draw_rect(r, cx - half, top + i, 2 * half + 1, 1, c);
+    }
+}
+
+static void sev_icon(hmi_renderer_t *r, int cx, int cy, int s, uint8_t sev, uint8_t fg)
+{
+    if (sev >= ALARM_SEV_CRITICAL) {
+        fill_diamond(r, cx, cy, s, sev_color(sev));
+        if (s >= 9) { hmi_draw_rect(r, cx - 1, cy - s / 2, 3, s * 2 / 3, fg); hmi_draw_rect(r, cx - 1, cy + s / 3, 3, 3, fg); }
+    } else if (sev == ALARM_SEV_WARNING) {
+        fill_triangle(r, cx, cy, s + 1, sev_color(sev));
+        if (s >= 9) { hmi_draw_rect(r, cx - 1, cy - s / 3, 3, s / 2, C_BG); hmi_draw_rect(r, cx - 1, cy + s / 3 - 1, 3, 3, C_BG); }
+    } else if (sev == ALARM_SEV_INFO) {
+        hmi_draw_circle(r, cx, cy, s * 3 / 4, sev_color(sev));
+    } else {
+        hmi_draw_circle(r, cx, cy, s / 2 > 3 ? s / 2 : 3, C_DIM);
+    }
 }
 
 static bool role_allows(const hmi_view_t *v, hmi_command_t cmd)
@@ -492,9 +552,11 @@ typedef enum { BTN_PRIMARY, BTN_PLAIN, BTN_DANGER, BTN_DISABLED, BTN_FILLED_RED 
 static void button(hmi_renderer_t *r, hmi_rect_t b, const char *label, btn_style_t st)
 {
     if (!band_hits(r, b.y, b.h)) return;
-    uint8_t fill = C_SURF, border = C_LINE, text = C_BLUE;
+    /* ISA-101: controls are neutral. The one primary action is shown by contrast (an inverted,
+     * light fill), not by colour; red is kept for stop actions and alarms are the only other colour. */
+    uint8_t fill = C_SURF, border = C_LINE, text = C_TEXT;
     switch (st) {
-        case BTN_PRIMARY:    fill = C_BLUE; border = C_BLUE; text = C_WHITE; break;
+        case BTN_PRIMARY:    fill = C_TEXT; border = C_TEXT; text = C_BG; break;
         case BTN_FILLED_RED: fill = C_RED;  border = C_RED;  text = C_WHITE; break;
         case BTN_DANGER:     text = C_RED; break;
         case BTN_DISABLED:   text = C_DIM; break;
@@ -633,11 +695,19 @@ static void w_bar(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t 
     uint8_t vc = !ok ? C_DIM : sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_TEXT;
 
     int vw = hmi_text_width(&hmi_font_body_b, txt);
-    text_fit(r, &hmi_font_body, b.x, b.y, b.w - vw - 8, name, C_MUTED);    /* label yields to the value */
-    text_right(r, &hmi_font_body_b, b.x + b.w, b.y, txt, vc);
-
+    int nw = hmi_text_width(&hmi_font_body, name);
     int bh = 8;
     int by = b.y + hmi_font_body.line_h + 5;
+    int bw = b.w;
+    if (nw + 8 + vw <= b.w) {                     /* label and value on one line, bar below */
+        text_fit(r, &hmi_font_body, b.x, b.y, b.w - vw - 8, name, C_MUTED);
+        text_right(r, &hmi_font_body_b, b.x + b.w, b.y, txt, vc);
+    } else {                                      /* narrow: never cut the label - it gets the line */
+        text_fit(r, &hmi_font_body, b.x, b.y, b.w, name, C_MUTED);
+        bw = b.w - vw - 8;
+        text_right(r, &hmi_font_body_b, b.x + b.w, by + bh / 2 - hmi_font_body_b.line_h / 2, txt, vc);
+    }
+    b.w = bw;
     hmi_draw_round_rect(r, b.x, by, b.w, bh, bh / 2, C_TRACK);
     int span = m->max_val - m->min_val;
     if (span <= 0) return;
@@ -646,7 +716,7 @@ static void w_bar(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t 
         if (fw < 0) fw = 0;
         if (fw > b.w) fw = b.w;
         if (fw >= 2) {
-            uint8_t fc = sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_TEAL;
+            uint8_t fc = sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_NEUTRAL;
             hmi_draw_round_rect(r, b.x, by, (int)fw, bh, bh / 2, fc);
         }
     }
@@ -804,12 +874,12 @@ static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_
         if (sv > m->max_val) sv = m->max_val;
         int x = p.x + ((first + i) * (p.w - 1)) / (HMI_TREND_SAMPLES - 1);
         int y = TREND_Y(sv);
-        if (have_prev) hmi_draw_line(r, px_prev, py_prev, x, y, 2, v->data_stale ? C_DIM : C_TEAL);
+        if (have_prev) hmi_draw_line(r, px_prev, py_prev, x, y, 2, v->data_stale ? C_DIM : C_TEXT);
         px_prev = x; py_prev = y;
         have_prev = true;
     }
     reset_clip(r);
-    if (have_prev) hmi_draw_circle(r, px_prev, py_prev, 4, v->data_stale ? C_DIM : C_TEAL);
+    if (have_prev) hmi_draw_circle(r, px_prev, py_prev, 4, v->data_stale ? C_DIM : C_TEXT);
     #undef TREND_Y
 }
 
@@ -830,7 +900,7 @@ static void w_tank(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t
         long lv = val < m->min_val ? 0 : val > m->max_val ? span : val - m->min_val;
         int fh = (int)((lv * in.h) / span);
         uint8_t sev = point_sev(v, tag);
-        uint8_t fc = sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_TEAL;
+        uint8_t fc = sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_NEUTRAL;
         hmi_rect_t clip = { in.x, in.y + in.h - fh, in.w, fh };
         set_clip(r, clip);
         hmi_draw_round_rect(r, in.x, in.y, in.w, in.h, rad - 3, fc);
@@ -944,9 +1014,9 @@ static void device_header(hmi_renderer_t *r, hmi_rect_t p, const hmi_device_info
     char st[40], sub[80];
     uint8_t col;
     device_status(d, st, sizeof(st), &col);
-    const char *open = "Controls >";
+    const char *open = "Details >";
     int ow = hmi_text_width(&hmi_font_body_b, open);
-    text_right(r, &hmi_font_body_b, p.x + p.w - 4, p.y + 7, open, C_BLUE);   /* tap the header: faceplate */
+    text_right(r, &hmi_font_body_b, p.x + p.w - 4, p.y + 7, open, C_TEXT);   /* tap the header: faceplate */
     int stw = hmi_text_width(&hmi_font_body_b, st);
     int right = p.x + p.w - 4 - ow - 14;
     text_right(r, &hmi_font_body_b, right, p.y + 7, st, col);
@@ -968,8 +1038,8 @@ static void render_empty_dashboard(hmi_renderer_t *r, const hmi_view_t *v, hmi_r
         hmi_draw_circle(r, cx, cy, 14 * k - 1, C_BG);
     }
     int a = (int)((v->now_ms / 60u) & 31u);
-    hmi_draw_line(r, cx, cy, cx + (icos(a) * 40) / 256, cy + (isin(a) * 40) / 256, 3, C_BLUE);
-    hmi_draw_circle(r, cx, cy, 4, C_BLUE);
+    hmi_draw_line(r, cx, cy, cx + (icos(a) * 40) / 256, cy + (isin(a) * 40) / 256, 3, C_MUTED);
+    hmi_draw_circle(r, cx, cy, 4, C_MUTED);
 
     hmi_rect_t t1 = { c.x, cy + 54, c.w, 28 };
     text_center(r, &hmi_font_headline, t1, "Searching for PLCs", C_TEXT);
@@ -1021,10 +1091,10 @@ static void render_header(hmi_renderer_t *r, const hmi_view_t *v)
     separator(r, 0, h.h - 1, sw);
 
     /* App mark */
-    hmi_draw_round_rect(r, 16, 13, 30, 30, 9, C_BLUE);
-    hmi_draw_rect(r, 23, 26, 4, 11, C_WHITE);
-    hmi_draw_rect(r, 29, 21, 4, 16, C_WHITE);
-    hmi_draw_rect(r, 35, 17, 4, 20, C_WHITE);
+    hmi_draw_round_rect(r, 16, 13, 30, 30, 9, C_SURF);
+    hmi_draw_rect(r, 23, 26, 4, 11, C_TEXT);
+    hmi_draw_rect(r, 29, 21, 4, 16, C_TEXT);
+    hmi_draw_rect(r, 35, 17, 4, 20, C_TEXT);
 
     hmi_rect_t theme = hmi_layout_theme_button(sw, sh);
     int avail = theme.x - 8 - 56;
@@ -1048,7 +1118,7 @@ static void render_header(hmi_renderer_t *r, const hmi_view_t *v)
     hmi_draw_circle(r, tcx + 4, tcy - 3, 6, C_SURF);
 
     /* System health */
-    const char *ht = "System OK";
+    const char *ht = "HMI OK";                 /* the HMI's own health - not the plant's */
     uint8_t hc = C_OK;
     if (v->data_stale)                          { ht = "Data stale";     hc = C_RED; }
     else if (v->wd && !v->wd->fieldbus_alive)   { ht = "Watchdog trip";  hc = C_RED; }
@@ -1072,24 +1142,34 @@ static void render_header(hmi_renderer_t *r, const hmi_view_t *v)
     } else {
         snprintf(at, sizeof(at), "No alarms");
     }
-    chip(r, hmi_layout_alarm_pill(sw, sh), ac, at, C_TEXT);
+    {
+        hmi_rect_t ap = hmi_layout_alarm_pill(sw, sh);
+        uint8_t hs = (v->alarms && (v->alarms->unacked_count || v->alarms->active_count)) ? v->alarms->highest_severity : 0;
+        if (hs) {                                           /* the priority symbol, not just a dot */
+            hmi_draw_round_frame(r, ap.x, ap.y, ap.w, ap.h, ap.h / 2, C_SURF, ac);
+            sev_icon(r, ap.x + 17, ap.y + ap.h / 2, 7, hs, C_WHITE);
+            text_fit(r, &hmi_font_body_b, ap.x + 30, ap.y + (ap.h - hmi_font_body_b.line_h) / 2, ap.w - 38, at, C_TEXT);
+        } else {
+            chip(r, ap, ac, at, C_TEXT);
+        }
+    }
 
     /* Role */
     static const char * const roles[4] = { "Viewer", "Operator", "Maintenance", "Engineer" };
     int role = v->sec ? (int)v->sec->current_role : 0;
     if (role < 0 || role > 3) role = 0;
-    chip(r, hmi_layout_role_pill(sw, sh), C_PURPLE, roles[role], C_TEXT);
+    chip(r, hmi_layout_role_pill(sw, sh), role ? C_TEXT : C_DIM, roles[role], C_TEXT);
 
     /* STOP ALL: a software stop request to every device. Deliberately not labelled E-STOP and
      * not red-on-yellow: those belong to the hardwired emergency stop (ISO 13850, IEC 60204-1). */
     hmi_rect_t e = hmi_layout_estop_button(sw, sh);
-    hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, e.h / 2, C_RED);
-    text_center(r, &hmi_font_body_b, e, "STOP ALL", C_WHITE);
+    hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, 10, C_RED);
+    text_center(r, &hmi_font_title, e, "STOP ALL", C_WHITE);
 }
 
 static void render_banner(hmi_renderer_t *r, const hmi_view_t *v)
 {
-    if (!v->alarms || !v->alarms->current_action.active) return;
+    if (!v->alarms || !hmi_layout_banner_shown(v->active_screen, v->alarms->current_action.active)) return;
     const hmi_emergency_action_t *a = &v->alarms->current_action;
     hmi_rect_t b = hmi_layout_banner(r->screen_w, r->screen_h);
     if (!band_hits(r, b.y, b.h)) return;
@@ -1099,9 +1179,7 @@ static void render_banner(hmi_renderer_t *r, const hmi_view_t *v)
     hmi_draw_round_frame(r, b.x, b.y, b.w, b.h, 14, C_CARD, unacked ? sc : C_LINE);
 
     int cx = b.x + 32, cy = b.y + b.h / 2;
-    hmi_draw_circle(r, cx, cy, 14, sc);
-    hmi_draw_rect(r, cx - 2 + 1, cy - 8, 3, 10, C_WHITE);
-    hmi_draw_rect(r, cx - 2 + 1, cy + 5, 3, 3, C_WHITE);
+    sev_icon(r, cx, cy, 16, a->severity, C_WHITE);
 
     hmi_rect_t ack = hmi_layout_banner_ack(r->screen_w, r->screen_h);
     int tx = b.x + 58;
@@ -1110,9 +1188,10 @@ static void render_banner(hmi_renderer_t *r, const hmi_view_t *v)
     nice_name(title, sizeof(title), a->title);
     nice_name(s1, sizeof(s1), a->action_step1);
     nice_name(s2, sizeof(s2), a->action_step2);
-    text_fit(r, &hmi_font_title, tx, b.y + 10, tw, title, sc);
-    snprintf(steps, sizeof(steps), "%s     %s", s1, s2);
-    text_fit(r, &hmi_font_body, tx, b.y + 33, tw, steps, C_MUTED);
+    text_fit(r, &hmi_font_title, tx, b.y + 9, tw, title, sc);
+    (void)steps;
+    text_fit(r, &hmi_font_body, tx, b.y + 35, tw, s1, C_TEXT);      /* each step on its own line, in full */
+    text_fit(r, &hmi_font_body, tx, b.y + 56, tw, s2, C_TEXT);
 
     if (unacked) {
         button(r, ack, "Acknowledge", role_allows(v, HMI_CMD_ACK_ALARMS) ? BTN_PRIMARY : BTN_DISABLED);
@@ -1170,8 +1249,9 @@ static void render_dock(hmi_renderer_t *r, const hmi_view_t *v)
     for (int i = 0; i < SCREEN_COUNT; i++) {
         hmi_rect_t t = hmi_layout_dock_tab(sw, sh, i);
         bool on = (i == v->active_screen);
-        uint8_t c = on ? C_BLUE : C_MUTED;
+        uint8_t c = on ? C_TEXT : C_DIM;
         int cx = t.x + t.w / 2;
+        if (on) hmi_draw_rect(r, t.x + t.w / 4, t.y + 1, t.w / 2, 3, C_TEXT);   /* where am I: a bar, not a colour */
         draw_icon(r, (icon_t)i, cx, t.y + 20, c, C_CARD);
         int lw = hmi_text_width(&hmi_font_caption, labels[i]);
         hmi_draw_text(r, &hmi_font_caption, cx - lw / 2, t.y + 36, labels[i], c);
@@ -1327,14 +1407,42 @@ static void render_diagnostics(hmi_renderer_t *r, const hmi_view_t *v, bool bann
     }
 }
 
+static void tab_button(hmi_renderer_t *r, hmi_rect_t b, const char *label, bool on)
+{
+    if (!band_hits(r, b.y, b.h)) return;
+    hmi_draw_round_frame(r, b.x, b.y, b.w, b.h, 10, on ? C_SURF : C_CARD, on ? C_TEXT : C_LINE);
+    text_center(r, &hmi_font_body_b, b, label, on ? C_TEXT : C_MUTED);
+}
+
+/* Prev / "Page n of m" / Next in the card footer; nothing when everything fits on one page. */
+static void pager(hmi_renderer_t *r, hmi_rect_t card, int page, int pages)
+{
+    if (pages <= 1) return;
+    hmi_rect_t pv = hmi_layout_alarm_page(card, 0), nx = hmi_layout_alarm_page(card, 1);
+    if (!band_hits(r, pv.y, pv.h)) return;
+    button(r, pv, "< Previous", page > 0 ? BTN_PLAIN : BTN_DISABLED);
+    button(r, nx, "Next >", page + 1 < pages ? BTN_PLAIN : BTN_DISABLED);
+    char t[32];
+    snprintf(t, sizeof(t), "Page %d of %d", page + 1, pages);
+    hmi_rect_t lab = { pv.x + pv.w, pv.y, nx.x - (pv.x + pv.w), pv.h };
+    text_center(r, &hmi_font_body, lab, t, C_MUTED);
+}
+
 static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
 {
     int sw = r->screen_w, sh = r->screen_h;
-    char b1[64], b2[48];
     const hmi_alarm_supervisor_t *al = v->alarms;
-    if (al) snprintf(b1, sizeof(b1), "%u active, %u unacknowledged", (unsigned)al->active_count, (unsigned)al->unacked_count);
-    else snprintf(b1, sizeof(b1), "no data");
-    screen_title(r, v, "Alarms", (sw >= 900) ? b1 : NULL);
+    char b1[96], b2[48], tm[24];
+
+    /* Title row: the two views, then the actions; the most used action right-most */
+    hmi_rect_t c = hmi_layout_content(sw, sh, banner);
+    if (band_hits(r, c.y, HMI_LAYOUT_TITLE_H))
+        hmi_draw_text(r, &hmi_font_headline, c.x + 2, c.y + 4, "Alarms", C_TEXT);
+    uint8_t order[HMI_MAX_TAGS];
+    uint8_t nact = al ? hmi_alarms_sorted(al, order, HMI_MAX_TAGS) : 0;
+    snprintf(b1, sizeof(b1), "Active (%u)", (unsigned)nact);
+    tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_ACTIVE), b1, v->alarm_view == HMI_ALARM_VIEW_ACTIVE);
+    tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_HISTORY), "History", v->alarm_view == HMI_ALARM_VIEW_HISTORY);
 
     bool can_ack = role_allows(v, HMI_CMD_ACK_ALARMS);
     bool estop = false;
@@ -1346,74 +1454,89 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
            (can_ack && al && al->unacked_count) ? BTN_PRIMARY : BTN_DISABLED);
     button(r, hmi_layout_screen_button(sw, sh, banner, HMI_HIT_ALARM_SILENCE), "Silence horn",
            (can_ack && al && al->horn_sounding) ? BTN_PLAIN : BTN_DISABLED);
+    /* Resetting a latch is not a stop: neutral, never red (red means stop) */
     button(r, hmi_layout_screen_button(sw, sh, banner, HMI_HIT_ESTOP_RESET), "Reset stop",
-           (estop && role_allows(v, HMI_CMD_ESTOP_RESET)) ? BTN_DANGER : BTN_DISABLED);
+           (estop && role_allows(v, HMI_CMD_ESTOP_RESET)) ? BTN_PLAIN : BTN_DISABLED);
 
-    hmi_rect_t body = hmi_layout_screen_body(sw, sh, banner);
-    int nact = 0;
-    if (al) for (int i = 0; i < HMI_MAX_TAGS; i++) if (al->points[i].state != ALARM_PT_NORMAL) nact++;
     hmi_rect_t ca = hmi_layout_alarm_active_card(sw, sh, banner, nact);
-    hmi_rect_t cj = { body.x, body.y + ca.h + HMI_LAYOUT_GAP, body.w, body.h - ca.h - HMI_LAYOUT_GAP };
-
-    int x = ca.x + 16, w = ca.w - 32;
-    int col_name = x + 110, col_val = x + w * 52 / 100, col_state = x + w - 76 - 12;
-    card(r, ca, "Active");
-    if (band_hits(r, ca.y, ca.h)) {
-        if (!nact) {
-            int y = hmi_layout_alarm_row_y(ca, 0);
-            hmi_draw_circle(r, x + 5, y + 8, 4, C_MUTED);         /* ISA-101: normal is not coloured */
-            hmi_draw_text(r, &hmi_font_body, x + 16, y, "No active or unacknowledged alarms", C_MUTED);
-        } else {
-            int rows = hmi_layout_alarm_rows(ca), row = 0;
-            for (int i = 0; i < HMI_MAX_TAGS && row < rows; i++) {
+    if (v->alarm_view == HMI_ALARM_VIEW_ACTIVE) {
+        snprintf(b1, sizeof(b1), "Active alarms - %u unacknowledged", al ? (unsigned)al->unacked_count : 0u);
+        card(r, ca, b1);
+        int per = hmi_layout_alarm_rows(ca);
+        int pages = nact ? (nact + per - 1) / per : 1;
+        int page = v->alarm_page < pages ? v->alarm_page : pages - 1;
+        if (band_hits(r, ca.y, ca.h)) {
+            int x = ca.x + 16, w = ca.w - 32;
+            int ack_x = hmi_layout_alarm_row_ack(ca, 0).x;
+            int col_pri = x + 28, col_name = x + 128, col_time = ack_x - 14;
+            int col_state = col_time - 84, col_val = col_state - 150;
+            if (!nact) {
+                int y = hmi_layout_alarm_row_y(ca, 0);
+                hmi_draw_circle(r, x + 6, y + 9, 4, C_DIM);       /* ISA-101: normal is not coloured */
+                hmi_draw_text(r, &hmi_font_body_b, x + 20, y, "No active alarms", C_MUTED);
+            }
+            for (int row = 0; row < per; row++) {
+                int k = page * per + row;
+                if (k >= nact) break;
+                uint8_t i = order[k];
                 const hmi_alarm_point_t *pt = &al->points[i];
-                if (pt->state == ALARM_PT_NORMAL) continue;
                 int y = hmi_layout_alarm_row_y(ca, row);
-                const hmi_tag_meta_t *m = hmi_tag_get_meta((uint8_t)i);
+                int ry = ca.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H;
+                bool unacked = pt->state == ALARM_PT_UNACK || pt->state == ALARM_PT_RTN_UNACK;
+                if (row) hmi_draw_rect(r, x, ry, w, 1, C_LINE);
+                const hmi_tag_meta_t *m = hmi_tag_get_meta(i);
                 uint8_t sc = sev_color(pt->peak_severity);
-                hmi_draw_circle(r, x + 5, y + 8, 4, sc);
-                hmi_draw_text(r, &hmi_font_body_b, x + 16, y, sev_label(pt->peak_severity), sc);
+                sev_icon(r, x + 9, y + 10, 9, pt->peak_severity, C_WHITE);
+                hmi_draw_text(r, &hmi_font_body_b, col_pri, y, sev_label(pt->peak_severity), sc);
                 if (m && m->group) snprintf(b1, sizeof(b1), "%s: %s", m->group, m->name);
                 else nice_name(b1, sizeof(b1), m ? m->name : "Tag");
-                text_fit(r, &hmi_font_body, col_name, y, col_val - col_name - 70, b1, C_TEXT);
-                fmt_value(b2, sizeof(b2), v, (uint8_t)i);
-                if (m && m->type == TAG_TYPE_ANALOG) {
+                bool analog = m && m->type == TAG_TYPE_ANALOG;
+                text_fit(r, unacked ? &hmi_font_body_b : &hmi_font_body, col_name, y,
+                         (analog ? col_val - 90 : col_state - 10) - col_name, b1, unacked ? C_TEXT : C_MUTED);
+                if (analog) {
+                    fmt_value(b2, sizeof(b2), v, i);
                     char t[72];
                     snprintf(t, sizeof(t), "%s %s", b2, m->unit ? m->unit : "");
                     text_right(r, &hmi_font_body_b, col_val, y, t, C_TEXT);
                 }
-                text_right(r, &hmi_font_body, col_state, y,
-                           state_label(pt->state), pt->state == ALARM_PT_ACKED ? C_MUTED : sc);
-                bool unacked = pt->state == ALARM_PT_UNACK || pt->state == ALARM_PT_RTN_UNACK;
-                if (unacked)
-                    button(r, hmi_layout_alarm_row_ack(ca, row), "Ack", can_ack ? BTN_PLAIN : BTN_DISABLED);
-                row++;
+                const char *stl = pt->state == ALARM_PT_RTN_UNACK ? "Cleared" : unacked ? "New" : "Acknowledged";
+                text_right(r, &hmi_font_body_b, col_state, y, stl, unacked ? sc : C_MUTED);
+                fmt_clock(tm, sizeof(tm), v, pt->since_ms);
+                text_right(r, &hmi_font_body, col_time, y, tm, C_MUTED);
+                if (unacked) button(r, hmi_layout_alarm_row_ack(ca, row), "Ack", can_ack ? BTN_PLAIN : BTN_DISABLED);
             }
         }
-    }
-
-    card(r, cj, "Event journal");
-    if (band_hits(r, cj.y, cj.h)) {
-        int jx = cj.x + 16, jw = cj.w - 32, y = cj.y + 42;
+        pager(r, ca, page, pages);
+    } else {
+        card(r, ca, "Event history - newest first");
         uint8_t n = al ? hmi_alarms_journal_count(al) : 0;
-        if (!n) hmi_draw_text(r, &hmi_font_body, jx, y, "No events recorded", C_MUTED);
-        for (uint8_t i = 0; i < n && y + 18 <= cj.y + cj.h - 6; i++) {
-            const hmi_alarm_record_t *rec = hmi_alarms_journal_newest(al, i);
-            if (!rec) break;
-            fmt_uptime(b2, sizeof(b2), rec->timestamp_ms);
-            hmi_draw_text(r, &hmi_font_body, jx, y, b2, C_MUTED);
-            uint8_t sc = rec->severity >= ALARM_SEV_WARNING ? sev_color(rec->severity) : C_DIM;
-            hmi_draw_circle(r, jx + 104, y + 8, 3, sc);
-            int sx = jx + jw;
-            const char *st = rec->tag_id == HMI_ALARM_TAG_SYSTEM ? "System" :
-                             rec->state == ALARM_PT_NORMAL ? "Event" : state_label(rec->state);
-            int stw = hmi_text_width(&hmi_font_caption, st);
-            hmi_draw_text(r, &hmi_font_caption, sx - stw, y + 2, st, C_DIM);
-            nice_name(b1, sizeof(b1), rec->message);
-            text_fit(r, &hmi_font_body, jx + 116, y, sx - stw - 12 - (jx + 116), b1,
-                     rec->severity >= ALARM_SEV_WARNING ? C_TEXT : C_MUTED);
-            y += 21;
+        int per = hmi_layout_history_rows(ca);
+        int pages = n ? (n + per - 1) / per : 1;
+        int page = v->alarm_page < pages ? v->alarm_page : pages - 1;
+        if (band_hits(r, ca.y, ca.h)) {
+            int jx = ca.x + 16, jw = ca.w - 32, y = ca.y + 44;
+            if (!n) hmi_draw_text(r, &hmi_font_body, jx, y, "No events recorded", C_MUTED);
+            for (int row = 0; row < per; row++) {
+                int k = page * per + row;
+                if (k >= n) break;
+                const hmi_alarm_record_t *rec = hmi_alarms_journal_newest(al, (uint8_t)k);
+                if (!rec) break;
+                fmt_clock(tm, sizeof(tm), v, rec->timestamp_ms);
+                hmi_draw_text(r, &hmi_font_body, jx, y, tm, C_MUTED);
+                if (rec->severity >= ALARM_SEV_WARNING) sev_icon(r, jx + 112, y + 9, 6, rec->severity, C_WHITE);
+                else hmi_draw_circle(r, jx + 112, y + 9, 3, C_DIM);
+                int sx = jx + jw;
+                const char *st = rec->tag_id == HMI_ALARM_TAG_SYSTEM ? "System" :
+                                 rec->state == ALARM_PT_NORMAL ? "Event" : state_label(rec->state);
+                int stw = hmi_text_width(&hmi_font_caption, st);
+                hmi_draw_text(r, &hmi_font_caption, sx - stw, y + 2, st, C_DIM);
+                nice_name(b1, sizeof(b1), rec->message);
+                text_fit(r, &hmi_font_body, jx + 128, y, sx - stw - 12 - (jx + 128), b1,
+                         rec->severity >= ALARM_SEV_WARNING ? C_TEXT : C_MUTED);
+                y += HMI_LAYOUT_HISTORY_ROW_H;
+            }
         }
+        pager(r, ca, page, pages);
     }
 }
 
@@ -1434,7 +1557,7 @@ static void render_settings(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
         static const char * const roles[4] = { "Viewer", "Operator", "Maintenance", "Engineer" };
         int role = v->sec ? (int)v->sec->current_role : 0;
         if (role < 0 || role > 3) role = 0;
-        if (y + rh <= limit) { kv_row(r, x, y, w, "Current role", roles[role], C_PURPLE); y += rh; }
+        if (y + rh <= limit) { kv_row(r, x, y, w, "Current role", roles[role], C_TEXT); y += rh; }
         if (v->sec && v->sec->default_pins && y + rh <= limit) {
             kv_row(r, x, y, w, "PINs", v->sec->allow_factory_pins ? "Factory PINs - BENCH MODE"
                                                                    : "Factory PINs: roles locked", C_ORANGE); y += rh;
@@ -1574,7 +1697,7 @@ static void render_faceplate(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t 
     device_status(d, st, sizeof(st), &col);
     hmi_rect_t close = hmi_layout_modal_cancel(sw, sh, HMI_MODAL_FACEPLATE);
     if (band_hits(r, m.y, 60)) {
-        text_center(r, &hmi_font_body_b, close, "Close", C_BLUE);
+        button(r, close, "Close", BTN_PLAIN);
         hmi_draw_circle(r, m.x + 22, m.y + 22, 6, col);
         int x = hmi_draw_text(r, &hmi_font_title, m.x + 36, m.y + 11, d->label, C_TEXT);
         text_fit(r, &hmi_font_body_b, x + 12, m.y + 13, close.x - 16 - (x + 12), st, col);
@@ -1653,12 +1776,12 @@ static void render_numpad(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
 {
     int sw = r->screen_w, sh = r->screen_h;
     hmi_rect_t cancel = hmi_layout_modal_cancel(sw, sh, HMI_MODAL_NUMPAD);
-    text_center(r, &hmi_font_body_b, cancel, "Cancel", C_BLUE);
+    button(r, cancel, "Cancel", BTN_PLAIN);
     text_fit(r, &hmi_font_title, m.x + 18, m.y + 16, cancel.x - 8 - (m.x + 18), v->np_title ? v->np_title : "Enter value", C_TEXT);
 
     hmi_rect_t dsp = hmi_layout_numpad_display(sw, sh);
     if (band_hits(r, dsp.y, dsp.h)) {
-        hmi_draw_round_frame(r, dsp.x, dsp.y, dsp.w, dsp.h, 10, C_SURF, C_BLUE);
+        hmi_draw_round_frame(r, dsp.x, dsp.y, dsp.w, dsp.h, 10, C_SURF, C_TEXT);
         int ux = dsp.x + dsp.w - 12;
         if (v->np_unit && v->np_unit[0]) {
             text_right(r, &hmi_font_body_b, ux, dsp.y + (dsp.h - hmi_font_body_b.line_h) / 2, v->np_unit, C_MUTED);
@@ -1677,9 +1800,9 @@ static void render_numpad(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
         hmi_rect_t kr = hmi_layout_numpad_key(sw, sh, k);
         if (kr.w == 0 || !band_hits(r, kr.y, kr.h)) continue;
         bool okk = (k == HMI_NP_OK);
-        hmi_draw_round_frame(r, kr.x, kr.y, kr.w, kr.h, 10, okk ? C_BLUE : C_SURF, okk ? C_BLUE : C_LINE);
+        hmi_draw_round_frame(r, kr.x, kr.y, kr.w, kr.h, 10, okk ? C_TEXT : C_SURF, okk ? C_TEXT : C_LINE);
         const hmi_font_t *f = (k <= 9 || k >= HMI_NP_DOT) ? &hmi_font_title : &hmi_font_body_b;
-        text_center(r, f, kr, labels[k], okk ? C_WHITE : C_TEXT);
+        text_center(r, f, kr, labels[k], okk ? C_BG : C_TEXT);
     }
 }
 
@@ -1706,7 +1829,7 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
     if (v->modal == HMI_MODAL_NUMPAD)    { render_numpad(r, v, m); return; }
     if (v->modal == HMI_MODAL_CONFIRM)   { render_confirm(r, v, m); return; }
     hmi_rect_t cancel = hmi_layout_modal_cancel(sw, sh, v->modal);
-    text_center(r, &hmi_font_body_b, cancel, "Cancel", C_BLUE);
+    button(r, cancel, "Cancel", BTN_PLAIN);
 
     int role_now = v->sec ? (int)v->sec->current_role : 0;
     if (v->modal == HMI_MODAL_ROLE) {
@@ -1715,11 +1838,11 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
             hmi_rect_t row = hmi_layout_modal_role(sw, sh, i);
             if (!band_hits(r, row.y, row.h)) continue;
             bool cur = (i == role_now);
-            hmi_draw_round_frame(r, row.x, row.y, row.w, row.h, 10, C_SURF, cur ? C_BLUE : C_LINE);
-            hmi_draw_circle(r, row.x + 18, row.y + row.h / 2, 5, i == 0 ? C_DIM : C_PURPLE);
+            hmi_draw_round_frame(r, row.x, row.y, row.w, row.h, 10, C_SURF, cur ? C_TEXT : C_LINE);
+            hmi_draw_circle(r, row.x + 18, row.y + row.h / 2, 5, i == 0 ? C_DIM : C_TEXT);
             hmi_draw_text(r, &hmi_font_body_b, row.x + 34, row.y + 5, s_role_names[i], C_TEXT);
             hmi_draw_text(r, &hmi_font_caption, row.x + 34, row.y + 23, s_role_desc[i], C_MUTED);
-            if (cur) text_right(r, &hmi_font_caption, row.x + row.w - 14, row.y + 15, "CURRENT", C_BLUE);
+            if (cur) text_right(r, &hmi_font_caption, row.x + row.w - 14, row.y + 15, "CURRENT", C_TEXT);
         }
         return;
     }
@@ -1740,7 +1863,7 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
     }
 
     char lock[48];
-    const char *msg = v->modal_msg ? v->modal_msg : "Enter 4 to 8 digits";
+    const char *msg = v->modal_msg ? v->modal_msg : "Enter your PIN";
     bool err = v->modal_msg_error;
     if (v->lockout_ms) {
         snprintf(lock, sizeof(lock), "Too many attempts - wait %lu s", (unsigned long)((v->lockout_ms + 999u) / 1000u));
@@ -1756,10 +1879,10 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
         if (!band_hits(r, kr.y, kr.h)) continue;
         bool ok = (k == HMI_KEY_OK);
         bool can_ok = v->pin_len >= HMI_PIN_MIN_LEN && !v->lockout_ms;
-        uint8_t fill = ok ? (can_ok ? C_BLUE : C_SURF) : C_SURF;
-        hmi_draw_round_frame(r, kr.x, kr.y, kr.w, kr.h, 10, fill, ok && can_ok ? C_BLUE : C_LINE);
+        uint8_t fill = ok ? (can_ok ? C_TEXT : C_SURF) : C_SURF;
+        hmi_draw_round_frame(r, kr.x, kr.y, kr.w, kr.h, 10, fill, ok && can_ok ? C_TEXT : C_LINE);
         const hmi_font_t *f = (k <= 9) ? &hmi_font_title : &hmi_font_body_b;
-        uint8_t tc = ok ? (can_ok ? C_WHITE : C_DIM) : (v->lockout_ms ? C_DIM : C_TEXT);
+        uint8_t tc = ok ? (can_ok ? C_BG : C_DIM) : (v->lockout_ms ? C_DIM : C_TEXT);
         text_center(r, f, kr, labels[k], tc);
     }
 }
@@ -1767,6 +1890,32 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
 /* ========================================================================= */
 /* Frame dispatch                                                             */
 /* ========================================================================= */
+
+/* Below the supported display size the full layout cannot be drawn without overlap, and an
+ * unreadable HMI is worse than a plain one: show what this panel is, the alarm state and STOP ALL. */
+static void render_too_small(hmi_renderer_t *r, const hmi_view_t *v)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    hmi_draw_rect(r, 0, 0, sw, sh, C_BG);
+    hmi_rect_t e = hmi_layout_estop_button(sw, sh);
+    hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, 10, C_RED);
+    text_center(r, &hmi_font_title, e, "STOP ALL", C_WHITE);
+    text_fit(r, &hmi_font_title, 12, 14, e.x - 24, "Prometheus HMI", C_TEXT);
+    int y = HMI_LAYOUT_HEADER_H + 8;
+    char t[96];
+    if (v->alarms && (v->alarms->unacked_count || v->alarms->active_count)) {
+        sev_icon(r, 22, y + 12, 10, v->alarms->highest_severity, C_WHITE);
+        snprintf(t, sizeof(t), "%u alarm(s), %u unacknowledged", (unsigned)v->alarms->active_count,
+                 (unsigned)v->alarms->unacked_count);
+        text_fit(r, &hmi_font_body_b, 40, y + 2, sw - 52, t, sev_color(v->alarms->highest_severity));
+    } else {
+        text_fit(r, &hmi_font_body_b, 12, y + 2, sw - 24, "No alarms", C_MUTED);
+    }
+    y += 34;
+    snprintf(t, sizeof(t), "This display is %dx%d. The HMI needs %dx%d or larger.", sw, sh, HMI_LAYOUT_MIN_W, HMI_LAYOUT_MIN_H);
+    text_fit(r, &hmi_font_body, 12, y, sw - 24, t, C_MUTED);
+    text_fit(r, &hmi_font_body, 12, y + 22, sw - 24, "Operate the plant from a supported panel.", C_MUTED);
+}
 
 void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t *v)
 {
@@ -1777,12 +1926,20 @@ void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t 
     /* Clear band (rows beyond screen_h in the last band are harmless) */
     memset(r->buffer, (C_BG << 4) | C_BG, (size_t)r->band_h * (size_t)(r->screen_w / 2));
 
-    bool banner = v->alarms && v->alarms->current_action.active;
+    if (HMI_LAYOUT_TOO_SMALL(r->screen_w, r->screen_h)) { render_too_small(r, v); return; }
+    bool banner = v->alarms && hmi_layout_banner_shown(v->active_screen, v->alarms->current_action.active);
     hmi_rect_t content = hmi_layout_content(r->screen_w, r->screen_h, banner);
 
     switch (v->active_screen) {
         case SCREEN_PROCESS_OVERVIEW: render_devices(r, v, content); break;
-        case SCREEN_HOST_TELEMETRY:   render_manifest(r, v, v->tokens_host, v->ntok_host, content, NULL); break;
+        case SCREEN_HOST_TELEMETRY:
+            if (v->ntok_host) render_manifest(r, v, v->tokens_host, v->ntok_host, content, NULL);
+            else if (band_hits(r, content.y, 60)) {           /* never a blank screen: say why */
+                hmi_draw_text(r, &hmi_font_headline, content.x + 2, content.y + 4, "Telemetry", C_TEXT);
+                hmi_draw_text(r, &hmi_font_body, content.x + 2, content.y + 40,
+                              "No host telemetry on this platform.", C_MUTED);
+            }
+            break;
         case SCREEN_FIELD_DIAGNOSTICS: render_diagnostics(r, v, banner); break;
         case SCREEN_ALARM_MATRIX:      render_alarms(r, v, banner); break;
         case SCREEN_SECURITY_SETTINGS: render_settings(r, v, banner); break;
@@ -1797,8 +1954,8 @@ void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t 
         /* keep STOP ALL at full strength: it stays operable over dialogs */
         hmi_rect_t e = hmi_layout_estop_button(r->screen_w, r->screen_h);
         if (band_hits(r, e.y, e.h)) {
-            hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, e.h / 2, C_RED);
-            text_center(r, &hmi_font_body_b, e, "STOP ALL", C_WHITE);
+            hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, 10, C_RED);
+            text_center(r, &hmi_font_title, e, "STOP ALL", C_WHITE);
         }
         render_modal(r, v);
     } else {

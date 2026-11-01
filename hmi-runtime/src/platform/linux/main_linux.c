@@ -10,6 +10,7 @@
  * Shell options (all other options go to the application, see src/app.c):
  *   --fb <device>     framebuffer device (default /dev/fb0, or $HMI_FBDEV)
  *   --headless        no display at all: Modbus, alarms, log and report only (servers, CI)
+ *   --horn-gpio <chip>:<line>   drive a GPIO line high while unacknowledged alarms exist
  * Touch calibration via environment: HMI_TOUCH_SWAP_XY=1, HMI_TOUCH_INVERT_X=1, HMI_TOUCH_INVERT_Y=1
  *
  * Run from a text console (Raspberry Pi OS Lite, or Ctrl+Alt+F2 on a desktop). The user needs
@@ -31,6 +32,7 @@
 #include <linux/fb.h>
 #include <linux/input.h>
 #include <linux/kd.h>
+#include <linux/gpio.h>
 
 #include "app.h"
 #include "hal/platform.h"
@@ -44,6 +46,44 @@ static volatile sig_atomic_t g_repaint = 1;
 
 void hal_console_print(const char *text) { fputs(text, stdout); fflush(stdout); }
 void hal_beep(void)            {}
+
+/* --- Alarm output on a GPIO line (Linux GPIO character device, uAPI v2) ---------------------
+ * --horn-gpio <chip>:<line>, e.g. gpiochip0:17 for BCM 17 on a Raspberry Pi. The line is driven
+ * high while unacknowledged alarms exist: wire a buzzer or a stack-light relay to it. */
+static int s_horn_fd = -1;
+static int s_horn_state = -1;
+
+static bool horn_gpio_open(const char *spec)
+{
+    char chip[64];
+    const char *colon = strrchr(spec, ':');
+    if (!colon || (size_t)(colon - spec) >= sizeof(chip) - 6) return false;
+    unsigned long line = strtoul(colon + 1, NULL, 10);
+    snprintf(chip, sizeof(chip), "/dev/%.*s", (int)(colon - spec), spec);
+    int cfd = open(chip, O_RDONLY | O_CLOEXEC);
+    if (cfd < 0) return false;
+    struct gpio_v2_line_request req;
+    memset(&req, 0, sizeof(req));
+    req.offsets[0] = (uint32_t)line;
+    req.num_lines = 1;
+    req.config.flags = GPIO_V2_LINE_FLAG_OUTPUT;
+    snprintf(req.consumer, sizeof(req.consumer), "industrial_hmi horn");
+    int rc = ioctl(cfd, GPIO_V2_GET_LINE_IOCTL, &req);
+    close(cfd);
+    if (rc < 0 || req.fd < 0) return false;
+    s_horn_fd = req.fd;
+    return true;
+}
+
+void hal_horn(bool on)
+{
+    if (s_horn_fd < 0 || s_horn_state == (int)on) return;
+    struct gpio_v2_line_values v;
+    memset(&v, 0, sizeof(v));
+    v.mask = 1;
+    v.bits = on ? 1 : 0;
+    if (ioctl(s_horn_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &v) == 0) s_horn_state = on;
+}
 void hal_trim_memory(void)     {}
 void hal_request_repaint(void) { g_repaint = 1; }
 void hal_request_quit(void)    { app_stop(); }
@@ -403,6 +443,14 @@ int main(int argc, char **argv)
     for (int i = 0; i < argc && app_argc < 63; i++) {         /* take the shell's own options out */
         if (i > 0 && strcmp(argv[i], "--fb") == 0 && i + 1 < argc) { fbdev = argv[++i]; continue; }
         if (i > 0 && strcmp(argv[i], "--headless") == 0) { headless = true; continue; }
+        if (i > 0 && strcmp(argv[i], "--horn-gpio") == 0 && i + 1 < argc) {
+            const char *spec = argv[++i];
+            if (!horn_gpio_open(spec)) {
+                fprintf(stderr, "industrial_hmi: --horn-gpio %s: cannot drive that GPIO line\n", spec);
+                return 64;                                   /* an alarm output that silently fails is not acceptable */
+            }
+            continue;
+        }
         app_argv[app_argc++] = argv[i];
     }
     app_argv[app_argc] = NULL;

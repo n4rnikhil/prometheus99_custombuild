@@ -59,7 +59,7 @@ static const hmi_tag_meta_t s_meta[] = {
     { AV_REMOTE,     TAG_TYPE_DIGITAL, "Network control",  "",   0, 1, 0, 0, 0, 0, NULL, NULL, NULL },
     { AV_REVERSE,    TAG_TYPE_DIGITAL, "Reverse",          "",   0, 1, 0, 0, 0, 0, NULL, NULL, NULL },
     { AV_COMM,       TAG_TYPE_DIGITAL, "Drive comm loss",  "",   0, 1, 0, 0, 0, ALARM_SEV_CRITICAL,
-      "Check the Ethernet cable and drive power", "Verify the drive IP address and that Modbus TCP is enabled", NULL },
+      "Drive may still be running: check it at the machine", "Then check cable, power, IP address, Modbus TCP", NULL },
 };
 
 static const uint8_t s_status[] = { AV_ETA, AV_FREQ, AV_FREQ_REF, AV_CURRENT };   /* 3201..3204 */
@@ -133,4 +133,5 @@ const hmi_device_profile_t g_profile_altivar = {
     s_more, N(s_more),
     s_bits, N(s_bits),
     NULL,                                                /* fixed product map */
+    false, 0,                                       /* drive: use its own communication-loss fault instead */
 };

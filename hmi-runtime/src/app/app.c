@@ -757,7 +757,7 @@ static void ui_ask_confirm(const ui_cmd_t *c)
         snprintf(g_cf_detail, sizeof(g_cf_detail), "%s  -  writes holding register %u directly", d->label, (unsigned)a->address);
     else
         snprintf(g_cf_detail, sizeof(g_cf_detail), "%s  -  %s", d->label, d->endpoint);
-    g_cf_danger = hmi_act_is_stop(a->kind) || a->command == HMI_CMD_RAW_WRITE;
+    g_cf_danger = hmi_act_is_stop(a->kind);      /* red only for stop actions */
     g_pending_confirm = *c;
     g_pending_confirm.active = true;
     g_modal = HMI_MODAL_CONFIRM;
@@ -772,7 +772,7 @@ static void ui_ask_confirm_system(hmi_command_t cmd, int32_t bit, const char *ti
     snprintf(g_cf_title, sizeof(g_cf_title), "%s", title);
     snprintf(g_cf_detail, sizeof(g_cf_detail), "%s", detail);
     snprintf(g_cf_ok, sizeof(g_cf_ok), "%s", ok);
-    g_cf_danger = true;
+    g_cf_danger = false;                         /* red means stop; a reset is not a stop */
     memset(&g_pending_confirm, 0, sizeof(g_pending_confirm));
     g_pending_confirm.active = true;
     g_pending_confirm.system = true;
@@ -971,10 +971,15 @@ static void ui_first_device_row(int row, uint32_t now_ms)
     ui_toast("No connected device has that control", now_ms);
 }
 
+static uint8_t g_alarm_view;               /* Alarms screen: Active summary or History */
+static uint8_t g_alarm_page;
+
 static bool ui_banner_active(void)
 {
-    return g_have_snapshot && g_snap.alarms.current_action.active;
+    return g_have_snapshot && hmi_layout_banner_shown(g_active_screen, g_snap.alarms.current_action.active);
 }
+
+static int ui_alarm_pages(void);
 
 static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
 {
@@ -1014,6 +1019,17 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
         case HMI_HIT_BANNER_ACK:
         case HMI_HIT_ALARM_ACK:     ui_request(HMI_CMD_ACK_ALARMS, CMD_BIT_ACK, now_ms); break;
         case HMI_HIT_ALARM_SILENCE: ui_request(HMI_CMD_SILENCE_HORN, CMD_BIT_SILENCE, now_ms); break;
+        case HMI_HIT_ALARM_TAB:
+            if (hit->param != g_alarm_view) { g_alarm_view = hit->param; g_alarm_page = 0; }
+            break;
+        case HMI_HIT_ALARM_PAGE:
+        {
+            int pages = ui_alarm_pages();
+            if (g_alarm_page >= pages) g_alarm_page = (uint8_t)(pages - 1);
+            if (hit->param == 0 && g_alarm_page > 0) g_alarm_page--;
+            else if (hit->param == 1 && g_alarm_page + 1 < pages) g_alarm_page++;
+            break;
+        }
         case HMI_HIT_ESTOP_RESET:
             /* ISO 13850 4.1.3: resetting is a deliberate act and must not restart the machine. */
             ui_ask_confirm_system(HMI_CMD_ESTOP_RESET, CMD_BIT_ESTOP_RESET, "Reset the stop latch?",
@@ -1032,18 +1048,40 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
 
 /* Alarms screen: an Ack button on one row acknowledges that alarm only (ISA-18.2). The rows are
  * the same points, in the same order and geometry, as the renderer draws them. */
+/* Pages of the current Alarms view, with the same geometry the renderer uses. */
+static int ui_alarm_pages(void)
+{
+    if (!g_have_snapshot) return 1;
+    hmi_rect_t ca = hmi_layout_alarm_active_card(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active(), 0);
+    int n, per;
+    if (g_alarm_view == HMI_ALARM_VIEW_ACTIVE) {
+        static uint8_t order[HMI_MAX_TAGS];
+        n = hmi_alarms_sorted(&g_snap.alarms, order, HMI_MAX_TAGS);
+        per = hmi_layout_alarm_rows(ca);
+    } else {
+        n = hmi_alarms_journal_count(&g_snap.alarms);
+        per = hmi_layout_history_rows(ca);
+    }
+    return n ? (n + per - 1) / per : 1;
+}
+
 static bool ui_alarm_row_tap(int x, int y, uint32_t now_ms)
 {
     if (g_modal != HMI_MODAL_NONE || g_active_screen != SCREEN_ALARM_MATRIX || !g_have_snapshot) return false;
+    if (g_alarm_view != HMI_ALARM_VIEW_ACTIVE) return false;
     const hmi_alarm_supervisor_t *al = &g_snap.alarms;
-    int nact = 0;
-    for (int i = 0; i < HMI_MAX_TAGS; i++) if (al->points[i].state != ALARM_PT_NORMAL) nact++;
+    static uint8_t order[HMI_MAX_TAGS];
+    uint8_t nact = hmi_alarms_sorted(al, order, HMI_MAX_TAGS);
     if (!nact) return false;
     hmi_rect_t ca = hmi_layout_alarm_active_card(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active(), nact);
-    int rows = hmi_layout_alarm_rows(ca), row = 0;
-    for (int i = 0; i < HMI_MAX_TAGS && row < rows; i++) {
+    int per = hmi_layout_alarm_rows(ca);
+    int pages = (nact + per - 1) / per;
+    int page = g_alarm_page < pages ? g_alarm_page : pages - 1;
+    for (int row = 0; row < per; row++) {
+        int k = page * per + row;
+        if (k >= nact) break;
+        uint8_t i = order[k];
         uint8_t st = al->points[i].state;
-        if (st == ALARM_PT_NORMAL) continue;
         if (hmi_rect_contains(hmi_layout_alarm_row_ack(ca, row), x, y)) {
             if (st != ALARM_PT_UNACK && st != ALARM_PT_RTN_UNACK) return true;   /* nothing to acknowledge */
             ui_request(HMI_CMD_ACK_ALARMS, 0, now_ms);                         /* role check, denial report */
@@ -1051,7 +1089,6 @@ static bool ui_alarm_row_tap(int x, int y, uint32_t now_ms)
                 hal_atomic_or(&g_ack_mask[i / 32], (int32_t)(1u << (i % 32)));
             return true;
         }
-        row++;
     }
     return false;
 }
@@ -1163,6 +1200,14 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
     v->ui_frame_hz     = g_ui_frame_hz;
     v->exe_size_bytes  = g_exe_size;
     v->now_ms          = now_ms;
+    v->utc_ms          = hal_utc_ms();
+    v->tz_offset_s     = hal_local_offset_s();
+    v->alarm_view      = g_alarm_view;
+    {                                            /* alarms can clear while a later page is shown */
+        int pages = ui_alarm_pages();
+        if (g_alarm_page >= pages) g_alarm_page = (uint8_t)(pages - 1);
+    }
+    v->alarm_page      = g_alarm_page;
     v->toast = (g_toast[0] && (uint32_t)(now_ms - g_toast_ms) < TOAST_DURATION_MS) ? g_toast : NULL;
     v->modal = g_modal;
     v->modal_role = g_modal_role;
@@ -1252,7 +1297,8 @@ void app_frame(uint32_t now_ms)
         ui_toast("Inactivity: role dropped to Viewer", now_ms);
     }
 
-    /* Horn: 1 s pulses while unacknowledged alarms exist */
+    /* Horn: a steady output for a wired buzzer / beacon, and 1 s pulses on the panel itself */
+    hal_horn(g_have_snapshot && g_snap.alarms.horn_sounding);
     if (g_have_snapshot && g_snap.alarms.horn_sounding && (uint32_t)(now_ms - g_ui_last_beep_ms) >= 1000u) {
         g_ui_last_beep_ms = now_ms;
         hal_beep();

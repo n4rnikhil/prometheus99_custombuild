@@ -30,6 +30,14 @@ uint64_t hal_utc_ms(void)
     return t < EPOCH_1970 ? 0 : (t - EPOCH_1970) / 10000u;
 }
 
+int32_t hal_local_offset_s(void)
+{
+    TIME_ZONE_INFORMATION tz;
+    DWORD m = GetTimeZoneInformation(&tz);
+    LONG bias = tz.Bias + (m == TIME_ZONE_ID_DAYLIGHT ? tz.DaylightBias : m == TIME_ZONE_ID_STANDARD ? tz.StandardBias : 0);
+    return (int32_t)(-bias * 60);
+}
+
 bool hal_random(void *out, size_t n)
 {
     unsigned char *p = (unsigned char *)out;

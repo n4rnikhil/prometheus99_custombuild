@@ -31,6 +31,11 @@
 /* RGB565 data lines D0..D15 = B3..B7, G2..G7, R3..R7 */
 #define BOARD_PIN_DATA         { 14, 38, 18, 17, 10, 39, 0, 45, 48, 47, 21, 1, 2, 42, 41, 40 }
 
+/* Alarm buzzer / stack-light relay output (active high); -1 = none on this board */
+#ifndef BOARD_PIN_HORN
+#define BOARD_PIN_HORN         (-1)
+#endif
+
 #define BOARD_TOUCH_SDA        8
 #define BOARD_TOUCH_SCL        9
 #define BOARD_TOUCH_I2C_PORT   0

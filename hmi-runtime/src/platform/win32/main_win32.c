@@ -75,6 +75,8 @@ bool hal_console_read_secret(const char *prompt, char *out, size_t cap)
     return ok;
 }
 
+void hal_horn(bool on) { (void)on; }        /* PC speaker pulses via hal_beep(); no wired output */
+
 void hal_beep(void)
 {
     MessageBeep(MB_ICONHAND);

@@ -11,7 +11,11 @@
 #define INDUSTRIAL_HMI_PLATFORM_H
 
 void hal_console_print(const char *text);   /* command-line messages (usage errors, --verify-log result) */
-void hal_beep(void);                        /* alarm horn pulse */
+void hal_beep(void);                        /* alarm horn pulse (1 Hz while the horn sounds) */
+/* Steady alarm output (buzzer, stack light, beacon relay): true while unacknowledged alarms
+ * exist and the horn is not silenced. Called every UI frame. A no-op where nothing is wired. */
+#include <stdbool.h>
+void hal_horn(bool on);
 void hal_trim_memory(void);                 /* give back working-set pages (Windows); no-op elsewhere */
 void hal_request_repaint(void);             /* call app_render() soon */
 void hal_request_quit(void);                /* leave the main loop (--exit-after-ms) */

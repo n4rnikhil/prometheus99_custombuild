@@ -64,6 +64,10 @@ typedef struct {
     uint32_t ui_frame_hz;          /* measured */
     uint32_t exe_size_bytes;       /* measured at startup (0 = unknown) */
     uint32_t now_ms;
+    uint64_t utc_ms;               /* wall clock at now_ms (ms since 1970, UTC); 0 = no clock: show uptime */
+    int32_t  tz_offset_s;          /* local time = UTC + this (operators read local time) */
+    uint8_t  alarm_view;           /* HMI_ALARM_VIEW_ACTIVE / _HISTORY */
+    uint8_t  alarm_page;           /* page of that view (clamped by the renderer) */
     const char *toast;             /* transient one-line message (NULL = none) */
     /* Sign-in dialog */
     uint8_t  modal;                /* hmi_modal_t */

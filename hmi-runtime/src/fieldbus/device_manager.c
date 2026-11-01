@@ -67,6 +67,8 @@ typedef struct {
     uint16_t           pulse_addr;
     int16_t            pulse_value;
     uint32_t           pulse_due_ms;  /* ... at this time */
+    uint32_t           hb_last_ms;    /* last heartbeat write */
+    int16_t            hb_count;      /* 1..32767 */
 } slot_t;
 
 static slot_t        s_slots[HMI_MAX_DEVICES];
@@ -582,6 +584,13 @@ void hmi_devmgr_poll(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint
             queue_write(s, s->pulse_coil, s->pulse_addr, s->pulse_value);
         }
         link_poll(s, tags, alarms, now_ms);
+        const hmi_device_profile_t *pf = s->info.profile;
+        if (pf && pf->has_heartbeat && s->info.state == HMI_DEV_ONLINE &&
+            (uint32_t)(now_ms - s->hb_last_ms) >= HMI_HEARTBEAT_MS) {
+            s->hb_last_ms = now_ms;
+            s->hb_count = (int16_t)(s->hb_count >= 32767 ? 1 : s->hb_count + 1);   /* never 0: 0 = never seen */
+            queue_write(s, false, pf->heartbeat_reg, s->hb_count);
+        }
         if (s->info.state == HMI_DEV_OFFLINE && s_remove_after_ms &&
             (uint32_t)(now_ms - s->info.since_ms) >= s_remove_after_ms) {
             remove_slot(s, tags, alarms, now_ms);

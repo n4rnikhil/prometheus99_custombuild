@@ -95,4 +95,5 @@ const hmi_device_profile_t g_profile_em6400 = {
     s_more, N(s_more),
     NULL, 0,
     NULL,                                                /* fixed product map */
+    false, 0,                                       /* no HMI heartbeat register in this map */
 };

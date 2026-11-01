@@ -19,10 +19,11 @@
 #include "config.h"
 #include "fieldbus/device_info.h"
 
-#define HMI_LAYOUT_MIN_W      640
-#define HMI_LAYOUT_MIN_H      400
+#define HMI_LAYOUT_MIN_W      640   /* smallest display the full HMI is laid out for (5" 800x480 and up) */
+#define HMI_LAYOUT_MIN_H      400   /* below it: a single safe screen, STOP ALL and the alarm count only */
+#define HMI_LAYOUT_TOO_SMALL(sw, sh) ((sw) < HMI_LAYOUT_MIN_W || (sh) < HMI_LAYOUT_MIN_H)
 #define HMI_LAYOUT_HEADER_H   56
-#define HMI_LAYOUT_BANNER_H   62
+#define HMI_LAYOUT_BANNER_H   82    /* title + one line per guidance step: never truncated */
 #define HMI_LAYOUT_DOCK_H     60
 #define HMI_LAYOUT_MARGIN     16
 #define HMI_LAYOUT_GAP        12
@@ -54,7 +55,9 @@ typedef enum {
     HMI_HIT_DEVICE_OPEN,      /* device panel header: open its faceplate; param = device slot */
     HMI_HIT_FP_CTRL,          /* faceplate control; param = index into hmi_profile_fp_controls() */
     HMI_HIT_NUMPAD_KEY,       /* numeric keypad; param = 0..9 or HMI_NP_* */
-    HMI_HIT_CONFIRM_OK        /* confirmation dialog: confirm */
+    HMI_HIT_CONFIRM_OK,       /* confirmation dialog: confirm */
+    HMI_HIT_ALARM_TAB,        /* alarm screen: param 0 = Active, 1 = History */
+    HMI_HIT_ALARM_PAGE        /* alarm screen: param 0 = previous page, 1 = next page */
 } hmi_hit_kind_t;
 
 /* Dialogs drawn over the screen. While one is open only the dialog and the
@@ -106,13 +109,25 @@ hmi_rect_t hmi_layout_token_rect(uint32_t token, hmi_rect_t content);
 /* Non-manifest screens: body below the title row, and their cards */
 hmi_rect_t hmi_layout_screen_body(int sw, int sh, bool banner_active);
 
-/* Alarms screen, "Active" card: shared by the renderer and the touch handling so that a drawn
- * Ack button and its touch area are always the same rectangle. nact = points not in NORMAL. */
-#define HMI_LAYOUT_ALARM_ROW_H   34
+/* The top-alarm banner is shown on every screen except Alarms, whose first row is that alarm.
+ * Renderer and touch handling both ask this, so the content area always agrees. */
+bool       hmi_layout_banner_shown(uint8_t screen, bool alarm_active);
+
+/* Alarms screen: one card that holds either the Active summary or the History (journal),
+ * chosen with two tabs in the title row, with Prev / Next paging in the card footer.
+ * Shared by the renderer and the touch handling, so a drawn button and its touch area are
+ * always the same rectangle. */
+#define HMI_LAYOUT_ALARM_ROW_H   44    /* summary rows: an Ack button big enough for a gloved finger */
+#define HMI_LAYOUT_HISTORY_ROW_H 26
+#define HMI_LAYOUT_ALARM_FOOT_H  52
+enum { HMI_ALARM_VIEW_ACTIVE = 0, HMI_ALARM_VIEW_HISTORY = 1 };
 hmi_rect_t hmi_layout_alarm_active_card(int sw, int sh, bool banner_active, int nact);
-int        hmi_layout_alarm_rows(hmi_rect_t card);                 /* rows that fit */
-int        hmi_layout_alarm_row_y(hmi_rect_t card, int row);       /* text baseline top of a row */
+int        hmi_layout_alarm_rows(hmi_rect_t card);                 /* summary rows per page */
+int        hmi_layout_history_rows(hmi_rect_t card);               /* journal rows per page */
+int        hmi_layout_alarm_row_y(hmi_rect_t card, int row);       /* text top of a summary row */
 hmi_rect_t hmi_layout_alarm_row_ack(hmi_rect_t card, int row);     /* that row's Ack button */
+hmi_rect_t hmi_layout_alarm_tab(int sw, int sh, int view);         /* Active / History tab */
+hmi_rect_t hmi_layout_alarm_page(hmi_rect_t card, int dir);        /* dir 0 = previous, 1 = next */
 /* Settings: idx 0 = access control (left), 1 = system (right) */
 hmi_rect_t hmi_layout_settings_card(int sw, int sh, bool banner_active, int idx);
 
