@@ -40,7 +40,7 @@ static const uint8_t s_regs[]  = { PS_PRESS, PS_SP, PS_FLOW, PS_P1, PS_P2, PS_MO
 static const uint8_t s_coils[] = { PS_P1_RUN, PS_P2_RUN, PS_P1_FLT, PS_P2_FLT };
 
 static const hmi_device_action_t s_actions[] = {
-    HMI_A_MODE (PS_MODE, 5, "Off|Hand|Auto", "Station mode", true),
+    HMI_A_MODE_STOPS (PS_MODE, 5, "Off|Hand|Auto", "Station mode", true),
     HMI_A_SET  (PS_SP, 1, HMI_CMD_SETPOINT, "Set pressure", "Pressure setpoint", 100, 800),
     HMI_A_SET  (PS_HAND, 6, HMI_CMD_SETPOINT, "Set speed", "Hand speed", 0, 100),
     HMI_A_MODE (PS_DUTY, 7, "Pump 1|Pump 2", "Duty pump", true),

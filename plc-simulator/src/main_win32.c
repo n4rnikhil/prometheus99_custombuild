@@ -602,7 +602,24 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
             i++;
         }
     }
-    if (!bench_init(on_bench_log, base)) return 1;
+    /* One bench at a time: a second start (the icon clicked again) brings the running simulator
+     * forward instead of failing on its ports, and still opens the HMI when asked to. */
+    HANDLE one = CreateMutexA(NULL, TRUE, "Local\\PrometheusPlcSimulator");
+    if (one && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND w = FindWindowA("PrometheusPlcSimulator", NULL);
+        if (w) {
+            if (IsIconic(w)) ShowWindow(w, SW_RESTORE);
+            SetForegroundWindow(w);
+        }
+        if (open_hmi_now) open_hmi();          /* the HMI brings its own window forward if it runs */
+        CloseHandle(one);
+        return 0;
+    }
+    if (!bench_init(on_bench_log, base)) {
+        MessageBoxA(NULL, "Windows networking (Winsock) is not available, so the simulator cannot serve Modbus TCP.",
+                    "PLC Simulator", MB_ICONERROR | MB_OK);
+        return 1;
+    }
     bench_set_network(network);
     timeBeginPeriod(1);
 

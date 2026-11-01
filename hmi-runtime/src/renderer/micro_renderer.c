@@ -1516,8 +1516,14 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
     hmi_rect_t c = hmi_layout_content(sw, sh, banner);
     if (band_hits(r, c.y, HMI_LAYOUT_TITLE_H))
         hmi_draw_text(r, &hmi_font_headline, c.x + 2, c.y + 4, "Alarms", C_TEXT);
-    uint8_t order[HMI_MAX_TAGS];
-    uint8_t nact = al ? hmi_alarms_sorted(al, order, HMI_MAX_TAGS) : 0;
+    /* The app sorts once per frame; this runs once per band, so only sort here without it */
+    uint8_t own[HMI_MAX_TAGS];
+    const uint8_t *order = v->alarm_order;
+    uint8_t nact = v->alarm_order_n;
+    if (!order) {
+        nact = al ? hmi_alarms_sorted(al, own, HMI_MAX_TAGS) : 0;
+        order = own;
+    }
     snprintf(b1, sizeof(b1), "Active (%u)", (unsigned)nact);
     tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_ACTIVE), b1, v->alarm_view == HMI_ALARM_VIEW_ACTIVE);
     tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_HISTORY), "History", v->alarm_view == HMI_ALARM_VIEW_HISTORY);

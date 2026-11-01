@@ -323,11 +323,7 @@ static bool is_stopped(uint8_t slot)
     for (uint8_t k = 0; k < p->n_actions; k++) {
         const hmi_device_action_t *a = &p->actions[k];
         if (hmi_act_is_stop(a->kind)) { any = true; if (tag(slot, a->rel_tag) != 0) return false; }
-        else if (a->kind == HMI_ACT_SET_ENUM) {
-            char o[24];
-            hmi_action_option_label(a, 0, o, sizeof(o));
-            if (strcmp(o, "Off") == 0) { any = true; if (tag(slot, a->rel_tag) != 0) return false; }
-        }
+        else if (a->kind == HMI_ACT_SET_ENUM && a->stop_all) { any = true; if (tag(slot, a->rel_tag) != 0) return false; }
     }
     return any || p->estop_coil != 0xFFFFu;
 }

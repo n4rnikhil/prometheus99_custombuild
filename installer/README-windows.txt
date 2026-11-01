@@ -13,4 +13,7 @@ NOTES
   - Bench use only: hmi.cfg allows the factory PINs. On a real plant set site PINs with
     industrial_hmi --set-pin <role> and remove --allow-factory-pins from hmi.cfg.
   - STOP ALL is a software stop, not an emergency stop.
+  - Alarm sound: a two-tone signal on the PC's speakers while an alarm is unacknowledged.
+    Acknowledge or Silence horn stops it. --no-sound in hmi.cfg turns it off.
+  - Opening it again while it runs brings the running window forward (one HMI at a time).
   - alarms.log, hmi.key and security.vault are created in this folder and kept on uninstall.

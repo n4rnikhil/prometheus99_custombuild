@@ -46,6 +46,19 @@ per line, `#` for comments. The command line adds to the file. Examples are in
 | `--headless` | Linux: no display (Modbus, alarms and log only) |
 | `--window`, `--fb <device>` | Linux: a desktop window (default when a desktop session is running; X11, or XWayland on Wayland desktops) / force the framebuffer. libX11 is loaded only when a window is opened, so the same binary runs on machines without it |
 | `--horn-gpio <chip>:<line>` | Linux: drive a GPIO line high while unacknowledged alarms exist (buzzer, stack light), e.g. `gpiochip0:17`. The HMI refuses to start if the line cannot be driven |
+| `--horn-fail-safe` | Linux: invert that line (high = healthy, low = alarm), so a dead panel or a cut wire also sounds a relay-driven horn |
+| `--no-sound` | no alarm tone from the PC's speakers (a quiet bench). A wired horn is not affected |
+
+**Alarm sound.** While unacknowledged alarms exist and the horn is not silenced, the panel plays
+its own two-tone signal (960 / 760 Hz, 0.3 s each, looped) on the default audio output: Windows
+through the sound mixer, Linux through ALSA (PulseAudio / PipeWire on desktops; `HMI_SOUND_DEVICE`
+picks another device, e.g. `plughw:1,0`). It does not depend on the desktop's sound scheme. With
+no audio device the HMI says so once and keeps trying (a headset plugged in later works).
+Acknowledge or **Silence horn** stops it.
+
+**One HMI per data folder.** A second start with the same key, log and vault is refused (exit code
+4): two would break the signed log chain and fight over the PLCs. On Windows the running window
+comes forward instead; the PLC simulator does the same.
 
 ## Operator interface design
 
@@ -69,7 +82,8 @@ must never wonder how to stop the machine or what a colour means (ISA-101, ISA-1
 ## HMI heartbeat (PLC side)
 
 A module can name a heartbeat register (`has_heartbeat`, `heartbeat_reg`). While the device is
-online the HMI writes a counter (1..32767, never 0) there every second. The PLC program should
+online the HMI writes a counter (1..32767, never 0) there every second, but only while its own
+screen loop is alive: a frozen display stops the heartbeat, so the PLC stops the machine. The PLC program should
 treat 5 s without a change as "HMI lost" and go to its safe state, and stay there until an
 operator resets it. The simulated tank program does this on `%MW7`; the integration test checks
 that the pumps stop when the HMI goes silent and do not restart when it comes back. A real PLC
@@ -115,7 +129,11 @@ Every control works the same way, following the faceplate convention of ISA-101 
 6. **Record.** Every command goes into the signed audit log with the role, what and the value.
 
 **STOP ALL** (header, also key `E`) sends a stop request to every device and is never refused,
-whatever the role. It is a software stop, not the machine's emergency stop: that must stay a
+whatever the role. Commands still waiting to be sent are cancelled first (a start queued a moment
+earlier is never sent after the stop), a pulse in progress is released, then each device gets its
+stop latch, every Stop / Off control, and the mode selectors that stop it (`HMI_A_MODE_STOPS` in a
+module) go to 0. Devices that are offline, or that have no way to be stopped, are named in the log
+and on screen. It is a software stop, not the machine's emergency stop: that must stay a
 hardwired device (ISO 13850, IEC 60204-1). **Reset stop** on the Alarms screen needs the Operator
 role, an acknowledged stop alarm and a confirmation, and does not restart anything.
 
@@ -146,9 +164,9 @@ the time of writing):
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_core` | 9,642 | tags, alarms (incl. per-alarm acknowledge and summary order), guidance fits a 7" banner, header / alarm-screen geometry and touch-target sizes, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
-| `test_integration` | 486 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery, HMI heartbeat loss stopping the tank |
-| `test_core` with the MCU profile | 8,981 | the same checks with the small-device limits |
+| `test_core` | 9,475 | tags, alarms (incl. per-alarm acknowledge and summary order), guidance fits a 7" banner, header / alarm-screen geometry and touch-target sizes, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
+| `test_integration` | 513 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery, HMI heartbeat loss stopping the tank, STOP ALL on every machine type (also offline and mid-pulse) |
+| `test_core` with the MCU profile | 8,974 | the same checks with the small-device limits |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery (real sockets on Linux and Windows) |
 
 CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) also builds both Raspberry Pi targets

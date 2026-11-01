@@ -35,8 +35,8 @@ CORE_SRC := src/core/sha256.c src/core/tags.c src/core/alarms.c src/core/alarm_l
             src/fieldbus/device_manager.c src/fieldbus/discovery.c src/fieldbus/modbus_proto.c \
             src/fieldbus/driver_host.c
 HAL_SRC  := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c src/hal/sys_posix.c \
-            src/hal/fs_stdio.c src/hal/thread_posix.c src/hal/gesture.c src/hal/utc_format.c
-APP_SRC  := src/app/app.c src/platform/linux/main_linux.c src/platform/linux/x11_window.c
+            src/hal/fs_stdio.c src/hal/thread_posix.c src/hal/gesture.c src/hal/utc_format.c src/hal/alarm_tone.c
+APP_SRC  := src/app/app.c src/platform/linux/main_linux.c src/platform/linux/x11_window.c src/platform/linux/alsa_sound.c
 
 SAN     := -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 SIM_DIR := ../plc-simulator

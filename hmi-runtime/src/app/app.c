@@ -38,6 +38,7 @@
  *   --set-pin <role>           set a role's site PIN (asked for twice, never on the command line), exit
  *   --allow-factory-pins       BENCH ONLY: let roles sign in with the factory PINs (1111/2222/3333)
  *   --color-scheme <status|high-performance>   normal states green (default) or grey (ISA-101)
+ *   --no-sound                 no alarm tone from this panel (a wired horn output still works)
  */
 
 #include <stdio.h>
@@ -345,6 +346,17 @@ static void fb_handle_device_commands(hmi_tag_table_t *tags, hmi_alarm_superviso
     }
 }
 
+static void fb_discard_device_commands(hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
+{
+    int32_t tail = hal_atomic_load(&g_dev_cmd_tail);
+    int32_t head = hal_atomic_load(&g_dev_cmd_head);
+    if (tail == head) return;
+    char msg[57];
+    snprintf(msg, sizeof(msg), "STOP ALL: %u operator command(s) cancelled", (unsigned)(uint32_t)(head - tail));
+    hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_WARNING, ALARM_PT_NORMAL, msg);
+    hal_atomic_store(&g_dev_cmd_tail, head);
+}
+
 /* Discovery thread -> fieldbus thread */
 static void discovery_found(const hmi_device_candidate_t *c)
 {
@@ -453,6 +465,12 @@ static void fieldbus_thread(void *param)
         /* 2. Operator commands (already authorised by the UI thread) */
         bool stall = false;
         int32_t bits = hal_atomic_exchange(&g_cmd_bits, 0);
+        /* The HMI heartbeat to the PLCs only while the UI thread is alive: a frozen screen must let
+         * the machines go to their safe state, not look like a healthy operator station. */
+        hmi_devmgr_heartbeat_enable((uint32_t)(now_ms - (uint32_t)hal_atomic_load(&g_hb_ui_ms)) < HMI_WATCHDOG_MAX_AGE_MS);
+        /* STOP ALL overrides every operator command still waiting in the UI -> fieldbus ring: a Start
+         * tapped a moment earlier must never reach a machine after the stop. */
+        if (bits & CMD_BIT_ESTOP) fb_discard_device_commands(&alarms, now_ms);
         if (bits) fb_handle_commands(bits, &tags, &alarms, &wd, now_ms, &stall);
         for (int w = 0; w < ACK_WORDS; w++) {
             uint32_t m = (uint32_t)hal_atomic_exchange(&g_ack_mask[w], 0);
@@ -991,6 +1009,8 @@ static bool ui_banner_active(void)
 }
 
 static int ui_alarm_pages(void);
+static uint8_t g_alarm_order[HMI_MAX_TAGS];      /* active alarms in display order, this frame */
+static uint8_t g_alarm_order_n;
 
 static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
 {
@@ -1066,8 +1086,7 @@ static int ui_alarm_pages(void)
     hmi_rect_t ca = hmi_layout_alarm_active_card(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active(), 0);
     int n, per;
     if (g_alarm_view == HMI_ALARM_VIEW_ACTIVE) {
-        static uint8_t order[HMI_MAX_TAGS];
-        n = hmi_alarms_sorted(&g_snap.alarms, order, HMI_MAX_TAGS);
+        n = g_alarm_order_n;                     /* sorted in ui_build_view, this frame */
         per = hmi_layout_alarm_rows(ca);
     } else {
         n = hmi_alarms_journal_count(&g_snap.alarms);
@@ -1214,6 +1233,9 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
     v->utc_ms          = hal_utc_ms();
     v->tz_offset_s     = hal_local_offset_s();
     v->alarm_view      = g_alarm_view;
+    g_alarm_order_n    = g_have_snapshot ? hmi_alarms_sorted(&g_snap.alarms, g_alarm_order, HMI_MAX_TAGS) : 0;
+    v->alarm_order     = g_have_snapshot ? g_alarm_order : NULL;
+    v->alarm_order_n   = g_alarm_order_n;
     {                                            /* alarms can clear while a later page is shown */
         int pages = ui_alarm_pages();
         if (g_alarm_page >= pages) g_alarm_page = (uint8_t)(pages - 1);
@@ -1744,6 +1766,8 @@ static int parse_options(int argc, char **argv)
             copy_str(g_key_path, sizeof(g_key_path), next); i++;
         } else if (strcmp(a, "--allow-factory-pins") == 0) {
             g_allow_factory_pins = true;
+        } else if (strcmp(a, "--no-sound") == 0) {
+            hal_sound_enable(false);
         } else if (strcmp(a, "--color-scheme") == 0 && next) {
             if (strcmp(next, "high-performance") == 0) g_high_performance = true;
             else if (strcmp(next, "status") == 0) g_high_performance = false;
@@ -1830,6 +1854,11 @@ static void write_report(void)
 /* ------------------------------------------------------------------------- */
 int app_init(void)
 {
+    /* Before anything is written: a second HMI on the same files would break the log chain */
+    char lock[HMI_PATH_MAX + 8];
+    snprintf(lock, sizeof(lock), "%s.lock", g_key_path);
+    if (!hal_instance_lock(lock)) return 4;
+
     hmi_timer_init();
     uint32_t now_ms = hmi_timer_get_ms();
 

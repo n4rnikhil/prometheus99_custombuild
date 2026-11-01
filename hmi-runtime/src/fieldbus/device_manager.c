@@ -69,9 +69,12 @@ typedef struct {
     uint32_t           pulse_due_ms;  /* ... at this time */
     uint32_t           hb_last_ms;    /* last heartbeat write */
     int16_t            hb_count;      /* 1..32767 */
+    bool               hb_pending;    /* heartbeat due: own slot, never queued behind / counted as an operator write */
+    bool               hb_inflight;   /* the write on the wire is the heartbeat */
 } slot_t;
 
 static slot_t        s_slots[HMI_MAX_DEVICES];
+static volatile bool s_heartbeat_ok = true;   /* false while the UI is stalled: a frozen screen must not look alive */
 static mb_response_t s_rsp;            /* ~520 bytes, kept off the stack */
 static uint32_t      s_remove_after_ms;
 static bool          s_net_ok;
@@ -210,6 +213,8 @@ static void link_close(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t 
     s->lb_up = false;
     s->connecting = false;
     s->step = STEP_NONE;
+    s->hb_pending = false;
+    s->hb_inflight = false;
     s->rx_len = 0;
     s->next_try_ms = now_ms + s->backoff_ms;
     s->backoff_ms *= 2u;
@@ -290,7 +295,11 @@ static bool on_frame(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *a
 
     if (st == MB_RESP_EXCEPTION) {
         s->info.exceptions++;
-        if (step == STEP_WRITE) { s->info.writes_failed++; return true; }
+        if (step == STEP_WRITE) {
+            if (s->hb_inflight) s->hb_inflight = false;      /* a refused heartbeat is not an operator write */
+            else s->info.writes_failed++;
+            return true;
+        }
         if (s->read_k != s->first_k) {                     /* optional block: only its tags go bad */
             bool coil;
             mark_block(s, tags, block_at(s->info.profile, s->read_k, &coil), QUALITY_COMM_FAULT);
@@ -309,6 +318,7 @@ static bool on_frame(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *a
     s->info.responses++;
     s->backoff_ms = HMI_MODBUS_BACKOFF_MIN_MS;
     if (step == STEP_WRITE) {
+        if (s->hb_inflight) { s->hb_inflight = false; return true; }
         s->info.writes_ok++;
         s->cycle_due_now = true;
         return true;
@@ -375,7 +385,7 @@ static void link_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *
         }
         if (s->step != STEP_NONE && (uint32_t)(now_ms - s->sent_ms) > HMI_MODBUS_TIMEOUT_MS) {
             s->info.timeouts++;
-            if (s->step == STEP_WRITE) s->info.writes_failed++;
+            if (s->step == STEP_WRITE && !s->hb_inflight) s->info.writes_failed++;
             link_close(s, tags, al, now_ms);
         }
         if (s->step != STEP_NONE || !linked(s)) return;
@@ -388,6 +398,13 @@ static void link_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *
         bool ok = w->coil ? send_request(s, STEP_WRITE, MB_FC_WRITE_SINGLE_COIL, w->addr, w->value ? 1u : 0u, now_ms)
                           : send_request(s, STEP_WRITE, MB_FC_WRITE_SINGLE_REG, w->addr, (uint16_t)w->value, now_ms);
         if (!ok) { s->info.writes_failed++; link_close(s, tags, al, now_ms); }
+        return;
+    }
+    if (s->hb_pending && s->info.profile) {               /* operator writes first, then the heartbeat */
+        s->hb_pending = false;
+        s->hb_inflight = true;
+        if (!send_request(s, STEP_WRITE, MB_FC_WRITE_SINGLE_REG, s->info.profile->heartbeat_reg,
+                          (uint16_t)s->hb_count, now_ms)) link_close(s, tags, al, now_ms);
         return;
     }
     if (s->cycle_due_now || (uint32_t)(now_ms - s->last_cycle_ms) >= HMI_MODBUS_POLL_MS) {
@@ -585,11 +602,11 @@ void hmi_devmgr_poll(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint
         }
         link_poll(s, tags, alarms, now_ms);
         const hmi_device_profile_t *pf = s->info.profile;
-        if (pf && pf->has_heartbeat && s->info.state == HMI_DEV_ONLINE &&
+        if (pf && pf->has_heartbeat && s_heartbeat_ok && s->info.state == HMI_DEV_ONLINE &&
             (uint32_t)(now_ms - s->hb_last_ms) >= HMI_HEARTBEAT_MS) {
             s->hb_last_ms = now_ms;
             s->hb_count = (int16_t)(s->hb_count >= 32767 ? 1 : s->hb_count + 1);   /* never 0: 0 = never seen */
-            queue_write(s, false, pf->heartbeat_reg, s->hb_count);
+            s->hb_pending = true;
         }
         if (s->info.state == HMI_DEV_OFFLINE && s_remove_after_ms &&
             (uint32_t)(now_ms - s->info.since_ms) >= s_remove_after_ms) {
@@ -719,11 +736,18 @@ void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, int16_t value, hmi_tag_
     }
 }
 
-static bool option0_is_off(const hmi_device_action_t *a)
+void hmi_devmgr_heartbeat_enable(bool ok) { s_heartbeat_ok = ok; }
+
+/* A device that can be set in motion from the HMI: it must be stopped by STOP ALL */
+static bool can_start(const hmi_device_profile_t *p)
 {
-    char o[24];
-    hmi_action_option_label(a, 0, o, sizeof(o));
-    return (o[0] == 'O' || o[0] == 'o') && (o[1] == 'f' || o[1] == 'F') && (o[2] == 'f' || o[2] == 'F') && o[3] == '\0';
+    if (p->estop_coil != 0xFFFFu) return true;
+    for (uint8_t k = 0; k < p->n_actions; k++) {
+        uint8_t kd = p->actions[k].kind;
+        if (hmi_act_is_start(kd) || kd == HMI_ACT_TOGGLE_COIL || kd == HMI_ACT_TOGGLE_REG || p->actions[k].stop_all)
+            return true;
+    }
+    return false;
 }
 
 uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms, uint8_t *not_stopped)
@@ -734,18 +758,27 @@ uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, u
         slot_t *s = &s_slots[i];
         const hmi_device_profile_t *p = s->info.profile;
         if (s->info.state == HMI_DEV_EMPTY || !p) continue;
-        if (p->estop_coil == 0xFFFFu && p->n_actions == 0) continue;          /* a meter: nothing moves */
+        if (!can_start(p)) {                                                   /* a meter, a passive device */
+            if (p->n_actions)
+                LOG(al, now_ms, ALARM_SEV_INFO, "%s: nothing to stop (no start control)", s->info.label);
+            continue;
+        }
         if (s->info.state != HMI_DEV_ONLINE) {
             LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: OFFLINE, not stopped - stop it at the machine", s->info.label);
             missed++;
             continue;
         }
         /* A stop overrides everything queued before it: never let a queued start run after it */
-        if (s->wq_count || s->pulse_pending)
+        if (s->wq_count)
             LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %u queued command(s) cancelled by STOP ALL", s->info.label,
-                (unsigned)(s->wq_count + (s->pulse_pending ? 1u : 0u)));
+                (unsigned)s->wq_count);
         s->wq_count = 0;
-        s->pulse_pending = false;
+        /* ... but a reset pulse that has started must be completed: its release (0) goes first, or the
+         * reset / trip-reset input of the PLC would be left on */
+        if (s->pulse_pending) {
+            s->pulse_pending = false;
+            queue_write(s, s->pulse_coil, s->pulse_addr, s->pulse_value);
+        }
 
         bool sent = false, failed = false;
         if (p->estop_coil != 0xFFFFu) {
@@ -756,7 +789,7 @@ uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, u
                 bool ok;
                 if (a->kind == HMI_ACT_COIL_OFF)                          ok = queue_write(s, true, a->address, 0);
                 else if (a->kind == HMI_ACT_REG_OFF)                      ok = queue_seq(s, a->address, a->seq, a->seq_len);
-                else if (a->kind == HMI_ACT_SET_ENUM && option0_is_off(a)) ok = queue_write(s, false, a->address, 0);
+                else if (a->kind == HMI_ACT_SET_ENUM && a->stop_all)   ok = queue_write(s, false, a->address, 0);
                 else continue;
                 if (ok) sent = true; else failed = true;
             }

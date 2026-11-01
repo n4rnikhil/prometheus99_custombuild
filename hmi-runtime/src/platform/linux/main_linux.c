@@ -14,6 +14,8 @@
  *                     desktop session is present ($DISPLAY); otherwise the framebuffer is used
  *   --fb <device>     force the framebuffer even on a desktop
  *   --horn-gpio <chip>:<line>   drive a GPIO line high while unacknowledged alarms exist
+ *   --horn-fail-safe  with --horn-gpio: hold the line HIGH while all is well and drop it on an alarm,
+ *                     so a crashed or unpowered HMI also sounds a normally-closed alarm relay
  * Touch calibration via environment: HMI_TOUCH_SWAP_XY=1, HMI_TOUCH_INVERT_X=1, HMI_TOUCH_INVERT_Y=1
  *
  * Run from a text console (Raspberry Pi OS Lite, or Ctrl+Alt+F2 on a desktop). The user needs
@@ -29,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <termios.h>
@@ -39,6 +42,7 @@
 
 #include "app.h"
 #include "x11_window.h"
+#include "alsa_sound.h"
 #include "hal/platform.h"
 #include "hal/sys.h"
 #include "hal/timer.h"
@@ -51,11 +55,27 @@ static volatile sig_atomic_t g_repaint = 1;
 void hal_console_print(const char *text) { fputs(text, stdout); fflush(stdout); }
 void hal_beep(void)            {}
 
+/* One HMI per data folder: an advisory lock on a file next to hmi.key, held until exit (the
+ * kernel drops it when the process ends, also after a crash, so a stale lock cannot block). */
+bool hal_instance_lock(const char *path)
+{
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) return true;                      /* read-only medium: do not block the start */
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) return true;   /* fd stays open: that is the lock */
+    int e = errno;
+    close(fd);
+    if (e != EWOULDBLOCK) return true;
+    fprintf(stderr, "industrial_hmi: already running with this data folder (%s);\n"
+                    "  close that one first, or give this one its own folder with --log, --vault and --key\n", path);
+    return false;
+}
+
 /* --- Alarm output on a GPIO line (Linux GPIO character device, uAPI v2) ---------------------
  * --horn-gpio <chip>:<line>, e.g. gpiochip0:17 for BCM 17 on a Raspberry Pi. The line is driven
  * high while unacknowledged alarms exist: wire a buzzer or a stack-light relay to it. */
 static int s_horn_fd = -1;
 static int s_horn_state = -1;
+static bool s_horn_fail_safe;      /* --horn-fail-safe: line HIGH while healthy, LOW = alarm (a dead HMI alarms) */
 
 static bool horn_gpio_open(const char *spec)
 {
@@ -79,13 +99,16 @@ static bool horn_gpio_open(const char *spec)
     return true;
 }
 
+void hal_sound_enable(bool on) { alsa_sound_enable(on); }
+
 void hal_horn(bool on)
 {
+    alsa_sound_set(on);                                  /* the panel's own tone, if it has audio */
     if (s_horn_fd < 0 || s_horn_state == (int)on) return;
     struct gpio_v2_line_values v;
     memset(&v, 0, sizeof(v));
     v.mask = 1;
-    v.bits = on ? 1 : 0;
+    v.bits = (on != s_horn_fail_safe) ? 1 : 0;
     if (ioctl(s_horn_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &v) == 0) s_horn_state = on;
 }
 void hal_trim_memory(void)     {}
@@ -443,23 +466,27 @@ int main(int argc, char **argv)
     int app_argc = 0;
     const char *fbdev = getenv("HMI_FBDEV") ? getenv("HMI_FBDEV") : "/dev/fb0";
     bool headless = false, force_fb = false, force_window = false, windowed = false;
+    bool horn_gpio_spec_seen = false;
 
     for (int i = 0; i < argc && app_argc < 63; i++) {         /* take the shell's own options out */
         if (i > 0 && strcmp(argv[i], "--fb") == 0 && i + 1 < argc) { fbdev = argv[++i]; force_fb = true; continue; }
         if (i > 0 && strcmp(argv[i], "--window") == 0) { force_window = true; continue; }
         if (i > 0 && strcmp(argv[i], "--headless") == 0) { headless = true; continue; }
+        if (i > 0 && strcmp(argv[i], "--horn-fail-safe") == 0) { s_horn_fail_safe = true; continue; }
         if (i > 0 && strcmp(argv[i], "--horn-gpio") == 0 && i + 1 < argc) {
             const char *spec = argv[++i];
             if (!horn_gpio_open(spec)) {
                 fprintf(stderr, "industrial_hmi: --horn-gpio %s: cannot drive that GPIO line\n", spec);
                 return 64;                                   /* an alarm output that silently fails is not acceptable */
             }
+            horn_gpio_spec_seen = true;
             continue;
         }
         app_argv[app_argc++] = argv[i];
     }
     app_argv[app_argc] = NULL;
 
+    if (horn_gpio_spec_seen) { s_horn_state = -1; hal_horn(false); }   /* drive the healthy level now */
     install_signals();
     int rc = app_parse_args(app_argc, app_argv);
     if (rc >= 0) return rc;
@@ -471,15 +498,18 @@ int main(int argc, char **argv)
     if (!headless && !force_fb && (force_window || x11_available())) {
         windowed = x11_open(sw, sh, "Prometheus HMI");
         if (!windowed && force_window) {
-            fprintf(stderr, "industrial_hmi: --window: no desktop session or no libX11 on this system\n");
+            fprintf(stderr, "industrial_hmi: --window: %s\n", x11_failure());
             app_shutdown();
             return 1;
         }
+        if (!windowed) fprintf(stderr, "industrial_hmi: desktop window unavailable (%s); trying the framebuffer\n",
+                               x11_failure());
         if (windowed) app_resize(sw, sh);
     }
     if (!headless && !windowed) {
         if (!fb_open(fbdev)) {
-            fprintf(stderr, "industrial_hmi: no usable display; use --headless to run without one\n");
+            fprintf(stderr, "industrial_hmi: no usable display (framebuffer %s cannot be opened); "
+                            "use --headless to run without one\n", fbdev);
             fb_close();
             app_shutdown();
             return 1;
@@ -493,6 +523,8 @@ int main(int argc, char **argv)
         input_scan();
     }
     if (!app_start_workers()) { fb_close(); app_shutdown(); return 2; }
+    if (!headless && !alsa_sound_start())
+        fprintf(stderr, "industrial_hmi: no libasound: alarm tone off (a --horn-gpio output still works)\n");
 
     uint32_t last_scan = hmi_timer_get_ms();
     while (windowed && app_running()) {                       /* desktop window */
@@ -539,6 +571,7 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < MAX_INPUTS; i++) if (s_in[i].fd >= 0) { close(s_in[i].fd); s_in[i].fd = -1; }
     app_shutdown();
+    alsa_sound_stop();
     if (windowed) x11_close(); else fb_close();
     return 0;
 }

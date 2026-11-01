@@ -67,16 +67,19 @@ static bool host_poll_cyclic(hmi_tag_table_t *tags, uint32_t now_ms)
     hal_host_stats_poll(&hs);
 
     /* CPU load is an alarm point: a burst (our own start-up, a short job) must not annunciate.
-     * The first reading only sets the baseline; after it, a 4-sample moving average is shown
-     * and alarmed, so only sustained load reaches the HH limit (ISA-18.2: no nuisance alarms). */
-    static int32_t cpu_avg = -1;
+     * The first reading only sets the OS baseline. After it the load is smoothed (moving average,
+     * weight 1/4), and nothing is published until 6 samples (3 s) have been averaged, so a
+     * start-up burst has decayed and only sustained load reaches the HH limit (ISA-18.2). */
+    static int32_t cpu_avg;
+    static uint8_t cpu_n;                              /* samples taken, saturates */
     if (hs.cpu_ok) {
-        if (cpu_avg < 0) {
-            cpu_avg = 0;                                   /* baseline sample: not published */
-        } else {
-            cpu_avg = cpu_avg == 0 ? hs.cpu_pct : (cpu_avg * 3 + hs.cpu_pct + 2) / 4;
-            hmi_tag_write_analog(tags, HOST_TAG_CPU_LOAD, (int16_t)cpu_avg, QUALITY_GOOD);
+        if (cpu_n == 0)      { cpu_n = 1; }            /* baseline: the OS counters, not a load value */
+        else if (cpu_n == 1) { cpu_avg = hs.cpu_pct; cpu_n = 2; }
+        else {
+            cpu_avg = (cpu_avg * 3 + hs.cpu_pct + 2) / 4;
+            if (cpu_n < 255) cpu_n++;
         }
+        if (cpu_n >= 7) hmi_tag_write_analog(tags, HOST_TAG_CPU_LOAD, (int16_t)cpu_avg, QUALITY_GOOD);
     } else {
         hmi_tag_set_quality(tags, HOST_TAG_CPU_LOAD, QUALITY_COMM_FAULT);
     }

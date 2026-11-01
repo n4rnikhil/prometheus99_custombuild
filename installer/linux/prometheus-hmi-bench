@@ -1,9 +1,14 @@
 #!/bin/sh
-# Bench: start the PLC simulator (a drive, a tank, a meter), then the HMI; stop the simulator
-# when the HMI window is closed.
+# Bench: start the PLC simulator (a drive, a tank, a meter), then the HMI. A simulator that is
+# already running is used as it is; the one started here is stopped when the HMI window closes.
 APP_DIR="$(dirname "$(readlink -f "$0")")"   # the real folder, also when started through a link
-"$APP_DIR/plc_simulator_cli" --add atv340 --add tank --add meter >/dev/null 2>&1 &
-SIM=$!
-sleep 1
+SIM=
+if ! pgrep -u "$(id -u)" -f '(^|/)plc_simulator_cli( |$)' >/dev/null 2>&1; then
+    "$APP_DIR/plc_simulator_cli" --add atv340 --add tank --add meter >/dev/null 2>&1 &
+    SIM=$!
+    sleep 1
+fi
 "$APP_DIR/prometheus-hmi" "$@"
-kill "$SIM" 2>/dev/null
+rc=$?
+[ -n "$SIM" ] && kill "$SIM" 2>/dev/null
+exit "$rc"

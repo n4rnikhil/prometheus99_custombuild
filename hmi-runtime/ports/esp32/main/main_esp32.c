@@ -49,6 +49,8 @@ static volatile bool          s_repaint = true;
 /* ------------------------------------------------------------------------- */
 void hal_console_print(const char *text) { fputs(text, stdout); }
 void hal_beep(void)                      {}           /* the steady output below drives the buzzer */
+bool hal_instance_lock(const char *path) { (void)path; return true; }   /* one firmware image */
+void hal_sound_enable(bool on) { (void)on; }        /* no speaker: the buzzer pin is the horn */
 void hal_horn(bool on)
 {
 #if BOARD_PIN_HORN >= 0

@@ -32,6 +32,11 @@ bool hal_random(void *out, size_t n);
 void     hal_exe_dir(char *out, size_t cap);
 uint32_t hal_exe_size(void);
 
+/* The alarm tone (two-tone, 0.6 s, loops cleanly): 16-bit mono PCM at `rate` Hz, or the same as a
+ * complete WAV file image. Return the samples / bytes written (0 = buffer too small). */
+size_t hal_alarm_tone_pcm(int16_t *out, size_t max_samples, uint32_t rate);
+size_t hal_alarm_tone_wav(uint8_t *out, size_t cap, uint32_t rate);
+
 /* Overwrite memory in a way the optimiser may not remove (PINs). */
 static inline void hal_secure_zero(void *p, size_t n)
 {

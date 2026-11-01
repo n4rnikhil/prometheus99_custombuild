@@ -8,9 +8,11 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>
 #include <windowsx.h>
 #include <psapi.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "app.h"
@@ -28,27 +30,90 @@ static int  g_modal_depth;       /* > 0 while Windows runs a drag / resize / men
 /* ------------------------------------------------------------------------- */
 /* Hooks for the application core                                             */
 /* ------------------------------------------------------------------------- */
-void hal_console_print(const char *text)
+/* Console output for a GUI-subsystem exe. Decided once, on the first message:
+ *   output redirected to a file or pipe   -> write there
+ *   started from cmd / PowerShell          -> attach to that console
+ *   started by a double-click              -> a console of our own, kept open at exit until Enter
+ * (Attaching on every call printed only the first message: the later attaches fail.) */
+static int    s_console;          /* 0 not decided, 1 redirected / parent console, 2 own console, -1 none */
+static HANDLE s_console_out = INVALID_HANDLE_VALUE;
+
+static HANDLE open_conout(void)
 {
-    /* GUI-subsystem exe: attach to the parent console if there is one. */
-    if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {
-        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-        DWORD written;
-        if (h && h != INVALID_HANDLE_VALUE) WriteFile(h, text, (DWORD)strlen(text), &written, NULL);
+    return CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                       OPEN_EXISTING, 0, NULL);
+}
+
+static void console_pause(void)              /* atexit: let the operator read an own console */
+{
+    if (s_console != 2 || s_console_out == INVALID_HANDLE_VALUE) return;
+    static const char msg[] = "\r\nPress Enter to close this window.";
+    DWORD n = 0;
+    WriteFile(s_console_out, msg, (DWORD)(sizeof(msg) - 1), &n, NULL);
+    HANDLE in = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, 0, NULL);
+    if (in != INVALID_HANDLE_VALUE) {
+        char line[8];
+        ReadFile(in, line, sizeof(line), &n, NULL);
+        CloseHandle(in);
     }
 }
 
+static void use_own_console(HANDLE out)
+{
+    static bool pause_registered;
+    if (s_console == 1 && s_console_out != INVALID_HANDLE_VALUE && GetFileType(s_console_out) != FILE_TYPE_CHAR)
+        return;                                  /* output goes to a file / pipe: keep it there */
+    if (s_console_out != INVALID_HANDLE_VALUE && s_console_out != out && GetFileType(s_console_out) == FILE_TYPE_CHAR)
+        CloseHandle(s_console_out);
+    s_console_out = out;
+    s_console = out != INVALID_HANDLE_VALUE ? 2 : -1;
+    if (s_console == 2 && !pause_registered) { pause_registered = true; atexit(console_pause); }
+}
+
+void hal_console_print(const char *text)
+{
+    if (s_console == 0) {
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD type = (h && h != INVALID_HANDLE_VALUE) ? GetFileType(h) : FILE_TYPE_UNKNOWN;
+        if (type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE) {
+            s_console_out = h;
+            s_console = 1;
+        } else if (AttachConsole(ATTACH_PARENT_PROCESS) || GetLastError() == ERROR_ACCESS_DENIED /* attached */) {
+            s_console_out = open_conout();
+            s_console = s_console_out != INVALID_HANDLE_VALUE ? 1 : -1;
+        } else if (AllocConsole()) {
+            SetConsoleTitleA("Prometheus HMI");
+            use_own_console(open_conout());
+        } else {
+            s_console = -1;
+        }
+    }
+    if (s_console < 0 || s_console_out == INVALID_HANDLE_VALUE) return;
+    DWORD written;
+    WriteFile(s_console_out, text, (DWORD)strlen(text), &written, NULL);
+}
+
 /* A GUI-subsystem exe cannot safely share the parent shell's input (cmd.exe does not wait for it
- * and reads the same keystrokes). Ask in a console window of our own instead. */
+ * and reads the same keystrokes). Ask in a console window of our own instead; the messages that
+ * follow (the result of --set-pin) go to the same window, which stays open until Enter. */
 bool hal_console_read_secret(const char *prompt, char *out, size_t cap)
 {
     if (!out || cap < 2) return false;
-    FreeConsole();
-    if (!AllocConsole()) return false;
+    if (s_console != 2) {
+        if (s_console == 1 && s_console_out != INVALID_HANDLE_VALUE && GetFileType(s_console_out) == FILE_TYPE_CHAR) {
+            CloseHandle(s_console_out);
+            s_console_out = INVALID_HANDLE_VALUE;
+            s_console = 0;
+        }
+        FreeConsole();
+        if (!AllocConsole()) return false;
+        SetConsoleTitleA("Prometheus HMI");
+        use_own_console(open_conout());
+    }
     HANDLE in = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                             OPEN_EXISTING, 0, NULL);
-    HANDLE con = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                             OPEN_EXISTING, 0, NULL);
+    HANDLE con = open_conout();
     bool ok = false;
     DWORD mode = 0, n = 0;
     if (in != INVALID_HANDLE_VALUE && con != INVALID_HANDLE_VALUE && GetConsoleMode(in, &mode)) {
@@ -75,11 +140,58 @@ bool hal_console_read_secret(const char *prompt, char *out, size_t cap)
     return ok;
 }
 
-void hal_horn(bool on) { (void)on; }        /* PC speaker pulses via hal_beep(); no wired output */
-
-void hal_beep(void)
+/* One HMI per data folder: two would interleave the signed audit log and fight over the PLCs.
+ * A second start (a double-click on the icon while it runs) brings the running window forward. */
+bool hal_instance_lock(const char *path)
 {
-    MessageBeep(MB_ICONHAND);
+    uint32_t h = 2166136261u;                    /* FNV-1a of the path, case-insensitive */
+    for (const char *p = path; *p; p++) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c == '/') c = '\\';
+        h = (h ^ (uint8_t)c) * 16777619u;
+    }
+    char name[64];
+    snprintf(name, sizeof(name), "Local\\PrometheusHMI-%08lx", (unsigned long)h);
+    HANDLE m = CreateMutexA(NULL, TRUE, name);   /* kept until the process exits */
+    if (m && GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(m);
+        HWND w = FindWindowA("IndustrialHMI_WinClass", NULL);
+        if (w) {
+            if (IsIconic(w)) ShowWindow(w, SW_RESTORE);
+            SetForegroundWindow(w);
+        }
+        return false;
+    }
+    return true;                                 /* no mutex at all: do not block the start */
+}
+
+/* Alarm sound: the HMI's own two-tone signal, looped through the default audio output while the
+ * horn sounds. MessageBeep() is not used: it plays the user's "Critical Stop" sound, which may be
+ * muted, a soft ding, or off in the sound scheme. --no-sound turns it off (a quiet bench). */
+static uint8_t s_alarm_wav[44 + 2 * 8000];   /* 0.6 s at 11025 Hz fits: 13230 bytes + header */
+static bool    s_sound_on = true;
+static int     s_sound_state = -1;
+
+void hal_horn(bool on)
+{
+    if (!s_sound_on || s_sound_state == (int)on) return;
+    s_sound_state = on;
+    if (on) {
+        if (!s_alarm_wav[0] && !hal_alarm_tone_wav(s_alarm_wav, sizeof(s_alarm_wav), 11025u)) return;
+        PlaySoundA((LPCSTR)s_alarm_wav, NULL, SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+    } else {
+        PlaySoundA(NULL, NULL, 0);
+    }
+}
+
+void hal_beep(void) {}                       /* the looped tone above is the horn */
+
+void hal_sound_enable(bool on)
+{
+    if (!on && s_sound_state == 1) PlaySoundA(NULL, NULL, 0);
+    s_sound_on = on;
+    s_sound_state = -1;
 }
 
 void hal_trim_memory(void)

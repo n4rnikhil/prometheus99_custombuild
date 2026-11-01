@@ -71,6 +71,7 @@ typedef struct {
     bool        confirm;      /* ask "Are you sure?" before sending */
     const int16_t *seq;       /* REG_ON / REG_OFF / PULSE_REG: values written to `address` */
     uint8_t     seq_len;      /* 1..HMI_MAX_SEQ */
+    bool        stop_all;     /* SET_ENUM: STOP ALL writes option 0 ("Off") - declared, not guessed from the label */
 } hmi_device_action_t;
 
 /* Constructors for driver modules (designated initialisers; need core/security.h for HMI_CMD_*) */
@@ -86,6 +87,10 @@ typedef struct {
 #define HMI_A_SET(rel, reg, cmd, lbl, log, mn, mx) \
     { .rel_tag = (rel), .kind = HMI_ACT_SET_REG, .command = (cmd), .block_tag = HMI_REL_NONE, \
       .address = (reg), .label = (lbl), .log_name = (log), .min = (mn), .max = (mx) }
+/* A mode selector whose option 0 stops the equipment ("Off|Hand|Auto"): STOP ALL selects it */
+#define HMI_A_MODE_STOPS(rel, reg, opts, log, conf) \
+    { .rel_tag = (rel), .kind = HMI_ACT_SET_ENUM, .command = HMI_CMD_OPERATE, .block_tag = HMI_REL_NONE, \
+      .address = (reg), .label = "Mode", .log_name = (log), .options = (opts), .confirm = (conf), .stop_all = true }
 #define HMI_A_MODE(rel, reg, opts, log, conf) \
     { .rel_tag = (rel), .kind = HMI_ACT_SET_ENUM, .command = HMI_CMD_OPERATE, .block_tag = HMI_REL_NONE, \
       .address = (reg), .label = "Mode", .log_name = (log), .options = (opts), .confirm = (conf) }

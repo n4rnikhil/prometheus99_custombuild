@@ -15,5 +15,6 @@ void x11_present_band(void *ctx, const uint8_t *band, int y, int rows, int width
 void x11_flush(void);
 bool x11_events(void);                               /* deliver input to the app; true = repaint */
 void x11_close(void);
+const char *x11_failure(void);                       /* why x11_open() returned false */
 
 #endif

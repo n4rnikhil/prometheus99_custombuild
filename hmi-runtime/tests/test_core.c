@@ -1058,6 +1058,32 @@ static void test_log_sync_policy(void)
     hal_file_remove(path);
 }
 
+/* The alarm tone: two halves at 960 Hz and 760 Hz, a valid WAV image for the Windows player */
+static void test_alarm_tone(void)
+{
+    static int16_t pcm[11025];
+    size_t n = hal_alarm_tone_pcm(pcm, sizeof(pcm) / sizeof(pcm[0]), 11025u);
+    CHECK(n == 2u * (11025u * 3u / 10u));
+    int z1 = 0, z2 = 0, peak = 0;
+    size_t half = n / 2;
+    for (size_t i = 1; i < n; i++) {
+        bool cross = (pcm[i - 1] < 0) != (pcm[i] < 0);
+        if (cross) { if (i < half) z1++; else z2++; }
+        int a = pcm[i] < 0 ? -pcm[i] : pcm[i];
+        if (a > peak) peak = a;
+    }
+    /* zero crossings = 2 x frequency x 0.3 s */
+    CHECK(z1 > 2 * 940 * 3 / 10 && z1 < 2 * 980 * 3 / 10);
+    CHECK(z2 > 2 * 740 * 3 / 10 && z2 < 2 * 780 * 3 / 10);
+    CHECK(peak > 10000 && peak < 32767);                         /* loud, not clipped */
+    CHECK(pcm[0] == 0 && (pcm[n - 1] < 600 && pcm[n - 1] > -600));  /* ramps: no click when it loops */
+    static uint8_t wav[44 + 2 * 8000];
+    size_t wn = hal_alarm_tone_wav(wav, sizeof(wav), 11025u);
+    CHECK(wn == 44u + 2u * n && memcmp(wav, "RIFF", 4) == 0 && memcmp(wav + 8, "WAVEfmt ", 8) == 0);
+    CHECK(wav[24] == (uint8_t)(11025u & 0xFF) && wav[34] == 16 && memcmp(wav + 36, "data", 4) == 0);
+    CHECK(hal_alarm_tone_wav(wav, 40, 11025u) == 0);
+}
+
 static void test_color_scheme(void)
 {
     static hmi_renderer_t r;
@@ -1272,6 +1298,7 @@ test_hal();
     test_device_key();
     test_utc_format();
     test_color_scheme();
+    test_alarm_tone();
     test_log_sync_policy();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

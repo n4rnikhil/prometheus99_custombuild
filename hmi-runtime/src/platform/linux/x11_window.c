@@ -29,6 +29,7 @@
 #include "app.h"
 #include "config.h"
 #include "app_icon.h"
+#include "renderer/layout.h"
 
 /* --- libX11 entry points, resolved with dlsym --- */
 #define X11_FUNCS(F) \
@@ -65,6 +66,7 @@ static Atom      s_wm_delete;
 static int       s_w, s_h;
 static int       s_rshift, s_gshift, s_bshift;
 static bool      s_mouse_down;
+static const char *s_why = "no desktop session ($DISPLAY is not set)";
 
 /* one band at the widest supported frame: HMI_DISPLAY_MAX_BUF_SIZE bytes of 4-bpp = 2x pixels */
 static uint32_t  s_px[HMI_DISPLAY_MAX_BUF_SIZE * 2];
@@ -99,16 +101,19 @@ bool x11_available(void)
 
 bool x11_open(int w, int h, const char *title)
 {
-    if (!x11_available() || !load_x11()) return false;
+    if (!x11_available()) return false;
+    if (!load_x11()) { s_why = "libX11 is not installed (Debian/Ubuntu: apt install libx11-6)"; return false; }
     s_dpy = p_XOpenDisplay(NULL);
-    if (!s_dpy) return false;
+    if (!s_dpy) { s_why = "cannot connect to the X display in $DISPLAY"; dlclose(s_lib); s_lib = NULL; return false; }
     int scr = DefaultScreen(s_dpy);
     s_vis = DefaultVisual(s_dpy, scr);
     s_depth = DefaultDepth(s_dpy, scr);
     if (s_vis->class != TrueColor || (s_depth != 24 && s_depth != 32)) {
-        fprintf(stderr, "industrial_hmi: the X display is not 24/32-bit true colour\n");
+        s_why = "the X display is not 24/32-bit true colour";
         p_XCloseDisplay(s_dpy);
         s_dpy = NULL;
+        dlclose(s_lib);
+        s_lib = NULL;
         return false;
     }
     s_rshift = mask_shift(s_vis->red_mask);
@@ -130,8 +135,8 @@ bool x11_open(int w, int h, const char *title)
     XSizeHints hints;
     memset(&hints, 0, sizeof(hints));
     hints.flags = PMinSize;
-    hints.min_width = 640;                                    /* HMI_LAYOUT_MIN_W x HMI_LAYOUT_MIN_H */
-    hints.min_height = 400;
+    hints.min_width = HMI_LAYOUT_MIN_W;
+    hints.min_height = HMI_LAYOUT_MIN_H;
     p_XSetWMNormalHints(s_dpy, s_win, &hints);
 
     static unsigned long icon[2 + HMI_APP_ICON_W * HMI_APP_ICON_H_PX];   /* format 32 = C long */
@@ -261,7 +266,10 @@ void x11_close(void)
     if (s_lib) { dlclose(s_lib); s_lib = NULL; }
 }
 
+const char *x11_failure(void) { return s_why; }
+
 #else  /* no X11 headers at build time: desktop window not available in this build */
+const char *x11_failure(void) { return "this build has no desktop window support"; }
 
 bool x11_available(void) { return false; }
 bool x11_open(int w, int h, const char *title) { (void)w; (void)h; (void)title; return false; }

@@ -59,12 +59,17 @@ uint8_t hmi_devmgr_estop(bool trip, hmi_tag_table_t *tags, hmi_alarm_supervisor_
 /* STOP ALL: every attached device that can move is told to stop.
  *   - pending writes of each device (starts, setpoints, reset pulses) are cancelled first, so a
  *     command queued a moment earlier can never restart the machine after the stop
+ *   - a pending reset pulse is completed (its release is sent first), never left half-way
  *   - a device with a stop latch gets the latch; any other device gets every Stop control of its
- *     module, and every mode selector whose first option is "Off" is set to Off
+ *     module, and every mode selector declared stop_all is set to its option 0 ("Off")
  *   - devices that cannot be reached (offline) or have no stop control are logged as CRITICAL:
  *     the operator must stop them at the machine
- * Read-only devices (meters: no controls) are not counted. Returns the devices stopped;
+ * Devices that cannot start anything (meters, passive devices) are not counted. Returns the devices stopped;
  * *not_stopped (optional) receives the devices that could not be stopped. */
+/* The HMI heartbeat (to PLC programs that have one) is only sent while this is true: the app
+ * passes the UI thread's liveness, so a frozen screen lets the PLC go to its safe state. */
+void hmi_devmgr_heartbeat_enable(bool ok);
+
 uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms, uint8_t *not_stopped);
 
 /* Copy the state of all slots (EMPTY ones included) for publishing. */

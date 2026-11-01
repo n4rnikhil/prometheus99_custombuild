@@ -39,7 +39,7 @@ static const uint8_t s_coils[] = { AH_FAN_RUN, AH_DIRTY, AH_FIRE };
 static const hmi_device_action_t s_actions[] = {
     HMI_A_START(AH_FAN_RUN, 0, AH_FIRE, "Start fan", "Supply fan", false),
     HMI_A_STOP (AH_FAN_RUN, 0, "Stop fan", "Supply fan", false),
-    HMI_A_MODE (AH_MODE, 5, "Off|Heat|Cool|Auto", "Unit mode", false),
+    HMI_A_MODE_STOPS (AH_MODE, 5, "Off|Heat|Cool|Auto", "Unit mode", false),
     HMI_A_SET  (AH_SP, 1, HMI_CMD_SETPOINT, "Set temp", "Supply setpoint", 120, 300),
     HMI_A_SET  (AH_FAN_SP, 4, HMI_CMD_SETPOINT, "Set fan", "Fan speed setpoint", 20, 100),
 };
