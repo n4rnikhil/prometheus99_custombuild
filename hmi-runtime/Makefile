@@ -1,7 +1,7 @@
 # ===========================================================================
 #  Prometheus HMI Runtime - Linux / Raspberry Pi build (GNU make, any C99 compiler)
 #
-#    make                      industrial_hmi (framebuffer + evdev, no GUI libraries)
+#    make                      industrial_hmi (desktop window via libX11 at run time, or framebuffer + evdev)
 #    make test                 every suite: unit, MCU profile, integration, Modbus faults,
 #                              all under AddressSanitizer + UBSan
 #    make test-fast            unit tests only, no sanitizers

@@ -1456,12 +1456,22 @@ static void render_diagnostics(hmi_renderer_t *r, const hmi_view_t *v, bool bann
             hmi_draw_text(r, &hmi_font_body, x, y, "No PLC connected", C_MUTED);
         } else {
             hmi_draw_text(r, &hmi_font_caption, cx1, y, "ADDR", C_DIM);
-            hmi_draw_text(r, &hmi_font_caption, cx2, y, d0->label, C_DIM);
             text_right(r, &hmi_font_caption, cx3 + w * 8 / 100, y, "VALUE", C_DIM);
             text_right(r, &hmi_font_caption, cx4, y, "RAW", C_DIM);
             y += 18;
             separator(r, x, y - 3, w);
             const hmi_device_profile_t *p = d0->profile;
+            /* The name column starts after the widest address (%MW3201 is wider than %MW12) */
+            int addr_w = 0;
+            for (int blk = 0; blk < 2; blk++) {
+                const hmi_block_map_t *bm = blk == 0 ? &p->regs : &p->coils;
+                if (!bm->count) continue;
+                snprintf(b1, sizeof(b1), blk == 0 ? "%%MW%u" : "%%M%u", (unsigned)(bm->start + bm->count - 1));
+                int tw = hmi_text_width(&hmi_font_body, b1);
+                if (tw > addr_w) addr_w = tw;
+            }
+            if (cx1 + addr_w + 12 > cx2) cx2 = cx1 + addr_w + 12;
+            text_fit(r, &hmi_font_caption, cx2, y - 18, cx3 - cx2 - 36, d0->label, C_DIM);
             for (int blk = 0; blk < 2; blk++) {
                 const hmi_block_map_t *bm = blk == 0 ? &p->regs : &p->coils;
                 for (uint8_t i = 0; i < bm->count && y + 18 <= c3.y + c3.h - 8; i++) {
