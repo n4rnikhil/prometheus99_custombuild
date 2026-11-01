@@ -169,8 +169,8 @@ the time of writing):
 | `test_core` with the MCU profile | 8,974 | the same checks with the small-device limits |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery (real sockets on Linux and Windows) |
 
-CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) also builds both Raspberry Pi targets
-and runs the suites on them under qemu, and runs `cppcheck`.
+The Raspberry Pi targets (`make CC=aarch64-linux-gnu-gcc`, `make CC=arm-linux-gnueabihf-gcc`, see
+the top of the Makefile) pass the same suites under qemu, and `cppcheck` runs clean.
 
 The live discovery test (`tests/test_modbus_live.c`) needs `tests/modbus_plc_sim.py` running and
 checks plug-and-play over real sockets: discovery, meter filtering, a valve write reaching the

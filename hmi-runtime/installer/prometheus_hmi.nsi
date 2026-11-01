@@ -1,5 +1,5 @@
 ; Prometheus HMI - Windows installer (NSIS 3, https://nsis.sourceforge.io)
-;   makensis /DSTAGE=<folder with the built files> /DVERSION=6.1 installer\prometheus_hmi.nsi
+;   makensis /DSTAGE=<folder with the built files> /DVERSION=6.1 hmi-runtime\installer\prometheus_hmi.nsi
 ; Per-user install: no administrator rights, and the runtime can write its log, key and vault
 ; next to the executable.
 

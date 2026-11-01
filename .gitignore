@@ -1,9 +1,5 @@
-# Build outputs. Executables are never committed: a binary in git cannot be checked against the
-# source it claims to come from. Publish builds as releases, with checksums, from CI.
-*.exe
-industrial_hmi.exe
-plc_simulator.exe
-plc_simulator_cli.exe
+# Build outputs (industrial_hmi.exe, plc_simulator.exe and plc_simulator_cli.exe are tracked as
+# ready-to-run files: download the folder and double-click)
 **/tests/*.exe
 **/tools/*.exe
 plc-simulator/plc_simulator_cli
@@ -68,5 +64,5 @@ hmi-runtime/industrial_hmi
 plc-simulator/plc_simulator_cli
 **/tests/test_plc_models
 
-# Release output (installer/build_*_release.sh)
+# Release output (hmi-runtime/installer/build_*_release.sh)
 dist/

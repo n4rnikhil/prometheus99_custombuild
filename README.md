@@ -32,6 +32,8 @@ industrial_hmi/
 │   ├── ports/esp32/             ESP-IDF project (not yet compiled)
 │   ├── tests/                   unit, integration, MCU-profile and fault-injection tests
 │   ├── examples/                site configuration files (hmi.cfg)
+│   ├── installer/               Windows installer and Linux / Raspberry Pi packages
+│   ├── industrial_hmi.exe       ready to run (Windows)
 │   ├── build.bat, Makefile      Windows and Linux builds
 │   └── measure.bat              runtime audit (loop rate, memory)
 ├── plc-simulator/               the bench of simulated PLCs
@@ -42,8 +44,8 @@ industrial_hmi/
 │   │   ├── main_win32.c         window app (Windows)
 │   │   └── main_console.c       console app (Windows, Linux, Raspberry Pi)
 │   ├── tests/                   device-model tests
+│   ├── plc_simulator.exe        ready to run (Windows), plc_simulator_cli.exe for a console
 │   └── build.bat, Makefile
-├── .github/workflows/ci.yml     Linux, Raspberry Pi (qemu) and Windows builds and tests
 ├── docs/
 │   ├── LAB_DEPLOYMENT.md        running the HMI on the lab panels: what works, what does not
 │   ├── img/                     screenshots
@@ -56,6 +58,11 @@ links the simulator's device models, so `build.bat test` needs `plc-simulator/` 
 
 ## Install and run
 
+**Windows, straight from this folder (no install):** double-click
+`plc-simulator\plc_simulator.exe`, then press **Open HMI** in its window. The simulator starts a
+tank; add a drive and a meter with its buttons. The HMI finds them by itself within a few seconds.
+To start the HMI on its own: `hmi-runtime\industrial_hmi.exe --config examples\bench.cfg`.
+
 | Computer | Install | Then |
 |---|---|---|
 | **Windows 10/11** | run `Prometheus-HMI-Setup-<version>.exe` (no administrator rights needed) | double-click **Prometheus HMI** on the desktop: the PLC simulator opens with a drive, a tank and a meter, then the HMI |
@@ -63,7 +70,7 @@ links the simulator's device models, so `build.bat test` needs `plc-simulator/` 
 | **Raspberry Pi** (64-bit or 32-bit OS) | the same with `prometheus-hmi-raspberrypi-arm64` / `-armhf` | with a desktop: the menu entry; on a bare panel the HMI draws to the screen directly |
 
 Sign in: tap **Viewer** at the top, choose **Operator**, PIN **1111** (bench only). The release files
-are built by `installer/build_windows_release.sh` and `installer/build_linux_release.sh` (and by CI).
+are built by `hmi-runtime/installer/build_windows_release.sh` and `hmi-runtime/installer/build_linux_release.sh`.
 
 ## Build from source
 
