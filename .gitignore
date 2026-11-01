@@ -1,6 +1,7 @@
 # Build outputs (industrial_hmi.exe itself is tracked as release artefact)
-tests/*.exe
-tools/*.exe
+**/tests/*.exe
+**/tools/*.exe
+plc-simulator/plc_simulator_cli
 *.o
 *.obj
 *.pdb
@@ -49,4 +50,7 @@ Desktop.ini
 # unit-test scratch files and Linux build outputs
 hmi_test_*
 /industrial_hmi
-tests/test_core
+hmi-runtime/industrial_hmi
+**/tests/test_core
+plc-simulator/plc_simulator_cli
+**/tests/test_plc_models
