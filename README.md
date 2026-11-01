@@ -53,6 +53,8 @@ the HMI's integration test only, to check that each driver matches the device it
   matching driver module; devices that come and go are tracked automatically.
 - Communication loss is detected per device, raised as an alarm, and recovered without operator
   action.
+- Up to 8 devices per HMI, paged on small screens. Devices listed with `--plc` get a place first;
+  any further device is named, raised as a warning, and reported by STOP ALL as not stopped.
 
 **Operator interface (ISA-101)**
 - Process overview, per-device faceplates, diagnostics, telemetry, alarms and settings screens.
@@ -156,6 +158,7 @@ Test mode is for the bench only. See [Commissioning a real plant](#commissioning
 |---|---|
 | See a device in detail | tap **Details** on its card |
 | Operate a device | tap the control on its faceplate; the panel asks for the PIN of the role it needs |
+| See more devices | up to 8 devices per HMI; on a small screen use **Next >** at the bottom of the Process screen |
 | Change a setpoint | tap **Set ...**, type the value in the keypad (the allowed range is shown) |
 | Stop everything | press **STOP ALL** (top right) or the `E` key |
 | Handle an alarm | read the banner guidance, then **Ack** the alarm on the Alarms screen |
@@ -288,9 +291,9 @@ Both write SHA-256 checksums to `dist/SHA256SUMS.txt`.
 
 | Suite | Checks | Covers |
 |---|---:|---|
-| `test_core` | 9,475 | tags, alarms and summary order, layouts and touch-target sizes, access control and commissioning, HMAC-SHA256 / HKDF test vectors, signed vault and audit log (forgery, truncation, wrong key), Modbus codec, renderer bounds, alarm tone |
-| `test_core` (MCU profile) | 8,974 | the same checks with the small-device limits |
-| `test_integration` | 513 | the runtime driving the simulator's device models: every control, STOP ALL on every machine type, drive faults and resets, link loss and recovery, heartbeat loss |
+| `test_core` | 11,513 | tags, alarms and summary order, layouts and touch-target sizes, access control and commissioning, HMAC-SHA256 / HKDF test vectors, signed vault and audit log (forgery, truncation, wrong key), Modbus codec, renderer bounds, alarm tone |
+| `test_core` (MCU profile) | 8,999 | the same checks with the small-device limits |
+| `test_integration` | 558 | the runtime driving the simulator's device models: every control, STOP ALL on every machine type and on 8 devices at once, devices beyond the limit, reset pulses, drive faults and resets, link loss and recovery, heartbeat loss |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery over real sockets |
 | `test_plc_models` | 1,243 | the simulator's device models |
 

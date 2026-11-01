@@ -41,6 +41,11 @@ typedef void (*hmi_discovery_found_fn)(const hmi_device_candidate_t *c);
 /* Configuration (call before the thread starts). false = malformed spec, or the targets of all
  * specs together would exceed HMI_DISCOVERY_MAX_TARGETS (refused rather than silently truncated). */
 bool hmi_discovery_add(const char *spec, bool explicit_target);
+/* Explicit single-address targets (--plc ip[:port]), for the device manager's slot reservation:
+ * hmi_discovery_explicit_count() is the number of configured targets to walk with
+ * hmi_discovery_explicit_at(), which is false for a range or an automatic target. Read-only while running. */
+uint8_t hmi_discovery_explicit_count(void);
+bool    hmi_discovery_explicit_at(uint8_t i, char host[16], uint16_t *port, uint8_t *unit);
 void hmi_discovery_clear(void);                 /* forget every configured target (not while the thread runs) */
 void hmi_discovery_add_defaults(void);          /* localhost: 502 and 1502-1509 */
 uint32_t hmi_discovery_target_count(void);

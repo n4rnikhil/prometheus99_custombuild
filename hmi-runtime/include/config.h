@@ -82,11 +82,11 @@
 /* Tag id map: 0..31 runtime (8..11 host telemetry, 13 HMI watchdog),
  * then HMI_MAX_DEVICES blocks of HMI_DEVICE_TAG_SPAN tags, one per plugged-in PLC. */
 #ifndef HMI_MAX_DEVICES
-#define HMI_MAX_DEVICES             4      /* PLCs on the dashboard at once (1..4) */
+#define HMI_MAX_DEVICES             8      /* PLCs, drives and meters attached at once (1..9) */
 #endif
 #define HMI_DEVICE_TAG_BASE         32
 #define HMI_DEVICE_TAG_SPAN         24
-#define HMI_MAX_TAGS                (HMI_DEVICE_TAG_BASE + HMI_MAX_DEVICES * HMI_DEVICE_TAG_SPAN)  /* 128 x 8 B = 1 KB */
+#define HMI_MAX_TAGS                (HMI_DEVICE_TAG_BASE + HMI_MAX_DEVICES * HMI_DEVICE_TAG_SPAN)  /* 8 devices: 224 x 8 B */
 #define HMI_DEV_TAG(slot, rel)      ((uint8_t)(HMI_DEVICE_TAG_BASE + (slot) * HMI_DEVICE_TAG_SPAN + (rel)))
 
 /* --- Plug and play --- */
@@ -225,8 +225,8 @@ typedef enum {
     ALARM_LATCH_ACKNOWLEDGED = 2    /* all acknowledged, at least one still active */
 } hmi_alarm_latch_t;
 
-#if HMI_MAX_DEVICES < 1 || HMI_MAX_DEVICES > 4
-#error "HMI_MAX_DEVICES must be 1..4 (dashboard layout and tag map)"
+#if HMI_MAX_DEVICES < 1 || HMI_MAX_DEVICES > 9
+#error "HMI_MAX_DEVICES must be 1..9 (tag ids are 8-bit: 32 + 9 x 24 = 248)"
 #endif
 
 #endif /* INDUSTRIAL_HMI_CONFIG_H */

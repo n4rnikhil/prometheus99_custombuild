@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "fieldbus/device_manager.h"
+#include "fieldbus/discovery.h"
 #include "fieldbus/modbus_proto.h"
 #include "hal/timer.h"
 #include "hal/net.h"
@@ -419,6 +420,56 @@ static void link_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *
 /* ========================================================================= */
 /* Slots                                                                      */
 /* ========================================================================= */
+/* Devices found on the network that could not be attached because every place is in use (or kept
+ * for a --plc device). STOP ALL cannot reach them: each one is named in the log, and STOP ALL counts
+ * it as NOT stopped. Discovery reports them again every sweep; one not seen for a while is dropped. */
+#define OVERFLOW_MAX       16
+#define OVERFLOW_FORGET_MS 15000u
+#define OVERFLOW_RELOG_MS  300000u
+typedef struct { bool used; char host[16]; uint16_t port; uint8_t unit; uint32_t seen_ms, logged_ms; } overflow_t;
+static overflow_t s_over[OVERFLOW_MAX];
+
+static void overflow_note(const hmi_device_candidate_t *c, hmi_alarm_supervisor_t *alarms, uint32_t now_ms,
+                          const char *why)
+{
+    overflow_t *e = NULL, *spare = NULL;
+    for (int i = 0; i < OVERFLOW_MAX; i++) {
+        overflow_t *o = &s_over[i];
+        if (o->used && o->port == c->port && o->unit == c->unit && strcmp(o->host, c->host) == 0) { e = o; break; }
+        if (!o->used || (uint32_t)(now_ms - o->seen_ms) >= OVERFLOW_FORGET_MS) { if (!spare) spare = o; }
+    }
+    if (!e) {
+        if (!spare) return;                  /* more than OVERFLOW_MAX: the count in the log still says so */
+        e = spare;
+        memset(e, 0, sizeof(*e));
+        e->used = true;
+        snprintf(e->host, sizeof(e->host), "%s", c->host);
+        e->port = c->port;
+        e->unit = c->unit;
+    }
+    e->seen_ms = now_ms;
+    if (e->logged_ms == 0 || (uint32_t)(now_ms - e->logged_ms) >= OVERFLOW_RELOG_MS) {
+        e->logged_ms = now_ms ? now_ms : 1;
+        LOG(alarms, now_ms, ALARM_SEV_WARNING, "%s:%u NOT shown: %s", c->host, (unsigned)c->port, why);
+    }
+}
+
+static void overflow_forget(const char *host, uint16_t port, uint8_t unit)
+{
+    for (int i = 0; i < OVERFLOW_MAX; i++) {
+        overflow_t *o = &s_over[i];
+        if (o->used && o->port == port && o->unit == unit && strcmp(o->host, host) == 0) o->used = false;
+    }
+}
+
+uint8_t hmi_devmgr_unattached(uint32_t now_ms)
+{
+    uint8_t n = 0;
+    for (int i = 0; i < OVERFLOW_MAX; i++)
+        if (s_over[i].used && (uint32_t)(now_ms - s_over[i].seen_ms) < OVERFLOW_FORGET_MS) n++;
+    return n;
+}
+
 static int free_slot(uint32_t now_ms)
 {
     for (int i = 0; i < HMI_MAX_DEVICES; i++) {
@@ -508,6 +559,7 @@ static void copy_identity(slot_t *s, const char *vendor, const char *product)
 void hmi_devmgr_init(uint32_t remove_after_ms)
 {
     memset(s_slots, 0, sizeof(s_slots));
+    memset(s_over, 0, sizeof(s_over));
     for (int i = 0; i < HMI_MAX_DEVICES; i++) { s_slots[i].sock = HAL_SOCK_INVALID; s_slots[i].info.slot = (uint8_t)i; }
     s_remove_after_ms = remove_after_ms;
     if (!s_net_ok) s_net_ok = hal_net_init();
@@ -557,25 +609,50 @@ const hmi_device_profile_t *hmi_devmgr_module_for(const hmi_device_candidate_t *
                          : hmi_profile_match(NULL, NULL, NULL);
 }
 
+/* Places still kept for --plc devices that are not attached yet (other than c itself) */
+static int reserved_slots(const hmi_device_candidate_t *c)
+{
+    int n = 0;
+    for (uint8_t i = 0; i < hmi_discovery_explicit_count(); i++) {
+        char host[16]; uint16_t port; uint8_t unit;
+        if (!hmi_discovery_explicit_at(i, host, &port, &unit)) continue;
+        if (port == c->port && unit == c->unit && strcmp(host, c->host) == 0) continue;
+        if (!hmi_devmgr_is_attached(host, port, unit)) n++;
+    }
+    return n;
+}
+
+static int free_slot_count(uint32_t now_ms)
+{
+    int n = 0;
+    for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+        const slot_t *s = &s_slots[i];
+        if (s->info.state == HMI_DEV_EMPTY &&
+            !(s->ever_freed && (uint32_t)(now_ms - s->freed_ms) < HMI_DEVICE_SLOT_COOLDOWN_MS)) n++;
+    }
+    return n;
+}
+
 bool hmi_devmgr_attach(const hmi_device_candidate_t *c, hmi_tag_table_t *tags,
                        hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
 {
     if (!c || hmi_devmgr_is_attached(c->host, c->port, c->unit)) return false;
+    const hmi_device_profile_t *p = hmi_devmgr_module_for(c);
+    if (!p->auto_attach && !c->explicit_target) return false;     /* only PLCs attach on their own */
     int i = free_slot(now_ms);
     if (i < 0) {
-        static uint32_t last_full_log;
-        if ((uint32_t)(now_ms - last_full_log) > 30000u || last_full_log == 0) {
-            last_full_log = now_ms ? now_ms : 1;
-            LOG(alarms, now_ms, ALARM_SEV_WARNING, "Device %s:%u ignored: all %d slots used", c->host,
-                (unsigned)c->port, HMI_MAX_DEVICES);
-        }
+        char why[40];
+        snprintf(why, sizeof(why), "all %d places in use", HMI_MAX_DEVICES);
+        overflow_note(c, alarms, now_ms, why);
+        return false;
+    }
+    if (!c->explicit_target && free_slot_count(now_ms) <= reserved_slots(c)) {
+        overflow_note(c, alarms, now_ms, "place kept for a --plc device");
         return false;
     }
     uint32_t ip;
     if (!hal_ip_parse(c->host, &ip)) return false;
-
-    const hmi_device_profile_t *p = hmi_devmgr_module_for(c);
-    if (!p->auto_attach && !c->explicit_target) return false;     /* only PLCs attach on their own */
+    overflow_forget(c->host, c->port, c->unit);
     slot_t *s = &s_slots[i];
     bind_slot(s, (uint8_t)i, p, tags, now_ms);
     s->info.transport = HMI_TRANSPORT_TCP;
@@ -596,10 +673,12 @@ void hmi_devmgr_poll(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint
     for (int i = 0; i < HMI_MAX_DEVICES; i++) {
         slot_t *s = &s_slots[i];
         if (s->info.state == HMI_DEV_EMPTY) continue;
-        if (s->pulse_pending && (int32_t)(now_ms - s->pulse_due_ms) >= 0) {   /* release a reset button */
+        /* Release a reset button. Kept pending while the queue is full or the link is down, and sent
+         * as soon as it can be: a lost release would leave the PLC's reset input on. */
+        if (s->pulse_pending && (int32_t)(now_ms - s->pulse_due_ms) >= 0 &&
+            s->info.state == HMI_DEV_ONLINE && s->wq_count < HMI_MODBUS_WRITE_QUEUE &&
+            queue_write(s, s->pulse_coil, s->pulse_addr, s->pulse_value))
             s->pulse_pending = false;
-            queue_write(s, s->pulse_coil, s->pulse_addr, s->pulse_value);
-        }
         link_poll(s, tags, alarms, now_ms);
         const hmi_device_profile_t *pf = s->info.profile;
         if (pf && pf->has_heartbeat && s_heartbeat_ok && s->info.state == HMI_DEV_ONLINE &&
@@ -701,7 +780,11 @@ void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, int16_t value, hmi_tag_
         case HMI_ACT_PULSE_REG: {
             bool coil = a->kind == HMI_ACT_PULSE_COIL;
             if (!coil && (!a->seq || a->seq_len < 2)) return;
-            ok = queue_write(s, coil, a->address, coil ? 1 : a->seq[0]);
+            if (s->pulse_pending) {          /* another reset still held: release it first, never drop it */
+                if (HMI_MODBUS_WRITE_QUEUE - s->wq_count < 2) { ok = false; s->info.writes_failed++; }
+                else { queue_write(s, s->pulse_coil, s->pulse_addr, s->pulse_value); s->pulse_pending = false; }
+            }
+            if (!s->pulse_pending) ok = queue_write(s, coil, a->address, coil ? 1 : a->seq[0]);
             if (ok) {
                 s->pulse_pending = true;
                 s->pulse_coil = coil;
@@ -802,6 +885,13 @@ uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, u
                 sent ? "stop only partly sent" : failed ? "stop write FAILED" : "no stop control");
             missed++;
         }
+    }
+    /* Machines on the network this HMI could not take on: STOP ALL does not reach them */
+    for (int i = 0; i < OVERFLOW_MAX; i++) {
+        const overflow_t *o = &s_over[i];
+        if (!o->used || (uint32_t)(now_ms - o->seen_ms) >= OVERFLOW_FORGET_MS) continue;
+        LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s:%u not on this HMI - stop it at the machine", o->host, (unsigned)o->port);
+        missed++;
     }
     if (not_stopped) *not_stopped = missed;
     return stopped;

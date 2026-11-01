@@ -69,6 +69,9 @@ uint8_t hmi_devmgr_estop(bool trip, hmi_tag_table_t *tags, hmi_alarm_supervisor_
 /* The HMI heartbeat (to PLC programs that have one) is only sent while this is true: the app
  * passes the UI thread's liveness, so a frozen screen lets the PLC go to its safe state. */
 void hmi_devmgr_heartbeat_enable(bool ok);
+/* Devices seen on the network in the last 15 s that are not attached (every place in use, or kept
+ * for a --plc device). STOP ALL cannot reach them and counts them as not stopped. */
+uint8_t hmi_devmgr_unattached(uint32_t now_ms);
 
 uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms, uint8_t *not_stopped);
 

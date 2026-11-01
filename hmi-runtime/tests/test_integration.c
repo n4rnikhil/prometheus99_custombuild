@@ -23,6 +23,7 @@
 #include "devices/device_profile.h"
 #include "fieldbus/device_info.h"
 #include "fieldbus/device_manager.h"
+#include "fieldbus/discovery.h"
 #include "fieldbus/modbus_proto.h"
 #include "hal/timer.h"
 #include "plc_models.h"
@@ -146,8 +147,14 @@ static int g_nsim;
 static hmi_tag_table_t g_t;
 static hmi_alarm_supervisor_t g_al;
 
+static int8_t g_last_coil[64];          /* last value the HMI wrote to each coil (FC05), -1 = none */
+
 static size_t sim_server(void *ctx, const uint8_t *req, size_t len, uint8_t *rsp, size_t cap)
 {
+    if (len >= 12 && req[7] == 0x05) {
+        uint16_t a = (uint16_t)((req[8] << 8) | req[9]);
+        if (a < sizeof(g_last_coil)) g_last_coil[a] = req[10] ? 1 : 0;
+    }
     return sim_handle((sim_plc_t *)ctx, req, len, rsp, cap);
 }
 
@@ -391,6 +398,85 @@ static void test_stop_all_every_machine(void)
     hmi_devmgr_shutdown();
 }
 
+/* More devices than the 4 a small screen shows: all of them attach, and STOP ALL stops every one */
+static void test_eight_devices(void)
+{
+#if HMI_MAX_DEVICES >= 8
+    static const sim_type_t all[] = { SIM_ATV340, SIM_TANK, SIM_CONVEYOR, SIM_COMPRESSOR,
+                                      SIM_ATV630, SIM_BOILER, SIM_PUMPS, SIM_AHU };
+    stop_all_group(all, 8, "eight");
+#endif
+}
+
+static hmi_device_candidate_t candidate(const char *host, uint16_t port, sim_type_t type, bool explicit_target)
+{
+    hmi_device_candidate_t c;
+    memset(&c, 0, sizeof(c));
+    snprintf(c.host, sizeof(c.host), "%s", host);
+    c.port = port;
+    c.unit = 1;
+    c.identified = true;
+    c.explicit_target = explicit_target;
+    const sim_type_info_t *ti = sim_type_info(type);
+    snprintf(c.id.vendor, sizeof(c.id.vendor), "%s", ti->vendor);
+    snprintf(c.id.product, sizeof(c.id.product), "%s", ti->product);
+    snprintf(c.id.app, sizeof(c.id.app), "%s", ti->app ? ti->app : "");
+    return c;
+}
+
+/* Every place in use: a further PLC is named, raises "Devices not shown", and STOP ALL counts it as
+ * NOT stopped instead of reporting success. A --plc device gets a place ahead of auto-found ones. */
+static void test_device_overflow(void)
+{
+    world();
+    for (int i = 0; i < HMI_MAX_DEVICES; i++) CHECK(attach(SIM_TANK, NULL, 100));
+    run(100, 2000);
+    hmi_device_candidate_t extra = candidate("10.9.9.9", 502, SIM_TANK, false);
+    CHECK(!hmi_devmgr_attach(&extra, &g_t, &g_al, 2000));
+    CHECK(journal_has("10.9.9.9:502 NOT shown"));
+    CHECK(hmi_devmgr_unattached(2000) == 1);
+    uint8_t missed = 0;
+    CHECK(hmi_devmgr_stop_all(&g_t, &g_al, 2000, &missed) == HMI_MAX_DEVICES && missed == 1);
+    CHECK(journal_has("10.9.9.9:502 not on this HMI"));
+    CHECK(hmi_devmgr_unattached(2000 + 20000) == 0);        /* gone from the network: forgotten */
+    hmi_devmgr_shutdown();
+
+#if HMI_MAX_DEVICES >= 2
+    world();
+    hmi_discovery_clear();
+    CHECK(hmi_discovery_add("10.9.9.10:502", true));          /* --plc 10.9.9.10 */
+    for (int i = 0; i < HMI_MAX_DEVICES - 1; i++) CHECK(attach(SIM_TANK, NULL, 100));
+    hmi_device_candidate_t auto_c = candidate("10.9.9.11", 502, SIM_TANK, false);
+    CHECK(!hmi_devmgr_attach(&auto_c, &g_t, &g_al, 200));    /* the last place is kept ... */
+    CHECK(journal_has("place kept for a --plc device"));
+    hmi_device_candidate_t mine = candidate("10.9.9.10", 502, SIM_METER, true);
+    CHECK(hmi_devmgr_attach(&mine, &g_t, &g_al, 200));       /* ... for the configured device */
+    hmi_discovery_clear();
+    hmi_devmgr_shutdown();
+#endif
+}
+
+/* Two reset buttons pressed within the pulse time: both inputs are released (never left on) */
+static void test_reset_pulses(void)
+{
+    world();
+    memset(g_last_coil, -1, sizeof(g_last_coil));
+    CHECK(attach(SIM_CONVEYOR, NULL, 100));
+    run(100, 2000);
+    const hmi_device_profile_t *p = prof_of(0);
+    uint8_t jam = 0xFF, count = 0xFF;
+    for (uint8_t k = 0; p && k < p->n_actions; k++) {
+        if (p->actions[k].kind != HMI_ACT_PULSE_COIL) continue;
+        if (jam == 0xFF) jam = k; else count = k;
+    }
+    CHECK(jam != 0xFF && count != 0xFF);
+    hmi_devmgr_action(0, jam, 0, &g_t, &g_al, 2000);
+    hmi_devmgr_action(0, count, 0, &g_t, &g_al, 2001);         /* second reset while the first is held */
+    run(2000, 4000);
+    CHECK(g_last_coil[p->actions[jam].address] == 0 && g_last_coil[p->actions[count].address] == 0);
+    hmi_devmgr_shutdown();
+}
+
 static void test_every_plc_comes_online(void)
 {
     static const sim_type_t types[] = { SIM_ATV340, SIM_ATV630, SIM_CONVEYOR, SIM_BOILER, SIM_PUMPS, SIM_COMPRESSOR, SIM_AHU, SIM_VFD };
@@ -515,6 +601,9 @@ int main(void)
     test_tank_scenario();
     test_hmi_heartbeat();
     test_stop_all_every_machine();
+    test_eight_devices();
+    test_device_overflow();
+    test_reset_pulses();
     test_every_plc_comes_online();
     test_altivar_control();
     test_meter();

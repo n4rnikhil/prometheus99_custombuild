@@ -194,8 +194,9 @@ works, but nothing else can be changed.
 2. Choose the role.
 3. Enter the PIN on the keypad and press **OK**.
 
-You can also simply tap the control you need: if your role is too low, the HMI asks for the PIN of
-the role that control requires, then carries out the action.
+On a device faceplate you can also simply tap the control you need: if your role is too low, the
+HMI asks for the PIN of the role that control requires, then carries out the action. Buttons on the
+Alarms screen (**Ack**, **Silence horn**, **Reset stop**) stay greyed out until you sign in.
 
 | Role | Can do |
 |---|---|
@@ -228,6 +229,16 @@ offline the card is removed (configurable with `--remove-after-ms`); it returns 
 when the device comes back.
 
 On small displays the cards become compact summary cards showing the main value and its state.
+
+**More devices than fit on the screen.** One HMI handles up to **8 devices** (PLCs, drives and
+meters). Large screens show them all at once; on a 7-inch panel four fit, and **< Previous** /
+**Next >** buttons at the bottom of the Process screen show the others (*Devices 5–8 of 8*).
+Alarms from every device appear in the alarm banner and on the Alarms screen whatever page is shown.
+
+If more than 8 devices are found, the extra ones are **not shown and not controlled**: the HMI raises
+a **Devices not shown** warning, names each one in Alarms → History (*192.168.10.51:502 NOT shown*),
+and STOP ALL reports them as not stopped. Devices listed with `--plc` always get a place before
+devices found by scanning. Use a second HMI for the other machines.
 
 ## 9. Operating a device
 
@@ -327,7 +338,8 @@ When pressed, the HMI:
 1. cancels every command that has not been sent yet;
 2. sends each device its stop: the stop latch, every Stop/Off control and the stopping mode;
 3. shows a **Stop** alarm for each machine whose PLC holds it in a stop latch;
-4. reports any device it could not stop (offline, or no stop control) — stop those at the machine.
+4. reports any device it could not stop — offline, no stop control, or found on the network but not
+   on this HMI (more than 8 devices) — stop those at the machine.
 
 **Restarting after a stop**
 
@@ -536,8 +548,9 @@ start it again with `--allow-factory-pins` or from the simulator.
 ## 19. Audit log
 
 The HMI writes every alarm, event, sign-in and command to `alarms.log`. Each record is chained to
-the previous one and signed with the panel's device key, so deleted, changed or inserted records
-can be detected.
+the previous one and signed with the panel's device key, so records that are changed, inserted or
+deleted inside the log are detected. A chain cannot show records cut off the **end** of the newest
+file, or a whole old file deleted: copy the log off the panel regularly if that matters.
 
 To check a log:
 
@@ -570,6 +583,7 @@ device key that wrote the log.
 | Problem | Cause and solution |
 |---|---|
 | **No devices appear** | Check the network cable and IP addresses. Check the `--scan` range in `hmi.cfg`. Devices that do not identify themselves (energy meters, unknown devices) must be listed with `--plc`. With the simulator, make sure it is running and that its devices are plugged in. |
+| **"Devices not shown" warning** | More than 8 devices were found. The extra ones are not on this HMI and STOP ALL does not reach them; their addresses are in Alarms → History. Narrow the `--scan` range, list the important devices with `--plc`, or use a second HMI. |
 | **A device shows Offline** | The device does not answer: check power, cable, IP address and port. The HMI reconnects by itself. |
 | **Cannot sign in with 1111** | The panel is commissioned (a site PIN exists), or the HMI was started without test mode. Use the site PIN, or see section 18 to return a bench PC to test mode. |
 | **"PIN entry locked for 30 s"** | Three wrong PINs. Wait 30 seconds. |

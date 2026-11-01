@@ -69,6 +69,23 @@ static bool parse_ipv4(const char *s, size_t n, uint32_t *out)
     return hal_ip_parse(buf, out);
 }
 
+/* Explicit single-address targets (--plc): the device manager keeps a place for each one */
+uint8_t hmi_discovery_explicit_count(void)
+{
+    return s_nranges;
+}
+
+bool hmi_discovery_explicit_at(uint8_t i, char host[16], uint16_t *port, uint8_t *unit)
+{
+    if (i >= s_nranges) return false;
+    const range_t *rg = &s_ranges[i];
+    if (!rg->explicit_target || rg->ip_first != rg->ip_last || rg->port_first != rg->port_last) return false;
+    hal_ip_format(rg->ip_first, host);
+    *port = rg->port_first;
+    *unit = rg->unit;
+    return true;
+}
+
 bool hmi_discovery_add(const char *spec, bool explicit_target)
 {
     if (!spec || s_nranges >= HMI_DISCOVERY_MAX_RANGES) return false;

@@ -65,9 +65,10 @@ static void test_tags_registry(void)
     hmi_tag_registry_reset();
     CHECK(HMI_MAX_TAGS == HMI_DEVICE_TAG_BASE + HMI_MAX_DEVICES * HMI_DEVICE_TAG_SPAN);
     CHECK(HMI_DEV_TAG(HMI_MAX_DEVICES - 1, HMI_DEVICE_TAG_SPAN - 1) == HMI_MAX_TAGS - 1);
-#if HMI_MAX_DEVICES == 4
-    CHECK(HMI_MAX_TAGS == 128 && HMI_DEV_TAG(3, 23) == 127);
+#if HMI_MAX_DEVICES == 8
+    CHECK(HMI_MAX_TAGS == 224 && HMI_DEV_TAG(7, 23) == 223);
 #endif
+    CHECK(HMI_MAX_TAGS <= 255);                          /* tag ids are 8-bit */
     CHECK(hmi_tag_register_meta(T_META, 2));
     hmi_tag_bind_meta(HMI_DEV_TAG(HMI_MAX_DEVICES - 1, 0), &T_META[0]);
     CHECK(hmi_tag_get_meta(HMI_DEV_TAG(HMI_MAX_DEVICES - 1, 0)) == &T_META[0]);
@@ -382,9 +383,9 @@ static void make_devices(hmi_device_info_t *d, int n)
         d[i].state = (uint8_t)(i == 2 ? HMI_DEV_OFFLINE : HMI_DEV_ONLINE);
         d[i].slot = (uint8_t)i;
         d[i].transport = HMI_TRANSPORT_TCP;
-        d[i].profile = prof[i];
+        d[i].profile = i < 4 ? prof[i] : hmi_profile_at((uint8_t)(i % hmi_profile_count()));
         d[i].remove_in_ms = i == 2 ? 4200 : 0;
-        snprintf(d[i].label, sizeof(d[i].label), "%s %d", prof[i]->name, i + 1);
+        snprintf(d[i].label, sizeof(d[i].label), "%s %d", d[i].profile->name, i + 1);
         snprintf(d[i].endpoint, sizeof(d[i].endpoint), "127.0.0.1:%d", 1502 + i);
         if (i != 2) snprintf(d[i].product, sizeof(d[i].product), "BMX P34 2020");
     }
@@ -400,13 +401,32 @@ static void test_layout(void)
             hmi_rect_t c = hmi_layout_content(w, h, banner != 0);
             CHECK(c.w > 0 && c.h > 0 && c.y >= HMI_LAYOUT_HEADER_H && c.y + c.h <= h - HMI_LAYOUT_DOCK_H);
 
-            /* 1..4 devices: panels tile the content area without overlap; every button hits its absolute tag */
+            /* 1..HMI_MAX_DEVICES devices: the panels of a page tile the content area without overlap
+             * (and clear of the pager); every button hits its absolute tag */
             for (int n = 1; n <= HMI_MAX_DEVICES; n++) {
                 make_devices(devs, n);
-                for (int a = 0; a < n; a++) {
+                int per = hmi_layout_devices_per_page(c, n);
+                CHECK(per >= 1 && per <= n && (n <= 4 ? per == n : per >= 4));
+                if (per < n) {                                    /* pages: Previous / Next below the cards */
+                    hmi_rect_t ar = hmi_layout_process_area(c, n);
+                    for (int dir = 0; dir < 2; dir++) {
+                        hmi_rect_t pg = hmi_layout_device_pager(c, dir);
+                        CHECK(pg.h >= 40 && pg.w >= 100 && pg.y >= ar.y + ar.h && pg.y + pg.h <= c.y + c.h);
+                        hmi_hit_t ph_ = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE,
+                                                            NULL, 0, devs, (uint8_t)n, 0, 0xFF, pg.x + pg.w / 2, pg.y + pg.h / 2);
+                        CHECK(ph_.kind == HMI_HIT_DEVICE_PAGE && ph_.param == dir);
+                    }
+                    hmi_rect_t h0 = hmi_layout_device_open(hmi_layout_device_panel(c, n, 0));   /* page 2 shows devs[per] */
+                    hmi_hit_t p2 = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE,
+                                                       NULL, 0, devs, (uint8_t)n, 1, 0xFF, h0.x + h0.w / 2, h0.y + h0.h / 2);
+                    CHECK(p2.kind == HMI_HIT_DEVICE_OPEN && p2.param == devs[per].slot);
+                    CHECK(hmi_layout_device_panel(c, n, per).w == 0);
+                }
+                for (int a = 0; a < per; a++) {
                     hmi_rect_t pa = hmi_layout_device_panel(c, n, a);
-                    CHECK(pa.w > 0 && pa.h > 0 && pa.x >= c.x && pa.y >= c.y && pa.x + pa.w <= c.x + c.w && pa.y + pa.h <= c.y + c.h);
-                    for (int b2 = a + 1; b2 < n; b2++) {
+                    hmi_rect_t ar = hmi_layout_process_area(c, n);
+                    CHECK(pa.w > 0 && pa.h > 0 && pa.x >= ar.x && pa.y >= ar.y && pa.x + pa.w <= ar.x + ar.w && pa.y + pa.h <= ar.y + ar.h);
+                    for (int b2 = a + 1; b2 < per; b2++) {
                         hmi_rect_t pb = hmi_layout_device_panel(c, n, b2);
                         bool overlap = pa.x < pb.x + pb.w && pb.x < pa.x + pa.w && pa.y < pb.y + pb.h && pb.y < pa.y + pa.h;
                         CHECK(!overlap);
@@ -414,7 +434,7 @@ static void test_layout(void)
                     hmi_rect_t body = hmi_layout_device_body(pa);
                     if (hmi_layout_device_summary(pa)) {          /* too small for widgets: one big tap target */
                         hmi_hit_t sh_ = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE,
-                                                            NULL, 0, devs, (uint8_t)n, 0xFF, pa.x + pa.w / 2, pa.y + pa.h / 2);
+                                                            NULL, 0, devs, (uint8_t)n, 0, 0xFF, pa.x + pa.w / 2, pa.y + pa.h / 2);
                         CHECK(sh_.kind == HMI_HIT_DEVICE_OPEN && sh_.param == devs[a].slot);
                         continue;
                     }
@@ -426,67 +446,67 @@ static void test_layout(void)
                         hmi_rect_t r = hmi_layout_token_rect(tk[i], body);
                         CHECK(r.x >= body.x && r.x + r.w <= body.x + body.w && r.y >= body.y && r.y + r.h <= body.y + body.h);
                         hmi_hit_t hit = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE,
-                                                            NULL, 0, devs, (uint8_t)n, 0xFF, r.x + r.w / 2, r.y + r.h / 2);
+                                                            NULL, 0, devs, (uint8_t)n, 0, 0xFF, r.x + r.w / 2, r.y + r.h / 2);
                         CHECK(hit.kind == HMI_HIT_WIDGET_BUTTON && hit.param == HMI_DEV_TAG(devs[a].slot, hmi_token_get_tag(tk[i])));
                         CHECK(hmi_profile_action(devs[a].profile, hmi_token_get_tag(tk[i])) != NULL);
                     }
                 }
                 if (!hmi_layout_device_summary(hmi_layout_device_panel(c, n, 0)))
                     CHECK(hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE, NULL, 0,
-                                              devs, (uint8_t)n, 0xFF, c.x + 30, c.y + 46).kind == HMI_HIT_NONE);
+                                              devs, (uint8_t)n, 0, 0xFF, c.x + 30, c.y + 46).kind == HMI_HIT_NONE);
             }
             /* header controls do not overlap each other */
             hmi_rect_t e = hmi_layout_estop_button(w, h), ro = hmi_layout_role_pill(w, h), th = hmi_layout_theme_button(w, h);
             CHECK(ro.x + ro.w <= e.x && th.x + th.w <= ro.x && th.x >= (w >= 800 ? 200 : 120));
             CHECK(e.h >= 40 && ro.h >= 40 && th.h >= 40);                  /* glove-size header targets */
-            CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0xFF, e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
+            CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF, e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
             for (int x = 0; x < w; x += 7) {
-                hmi_hit_t t = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0xFF, x, h - 5);
+                hmi_hit_t t = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF, x, h - 5);
                 CHECK(t.kind == HMI_HIT_NAV_TAB && t.param < SCREEN_COUNT);
             }
             hmi_hit_kind_t ab[] = { HMI_HIT_ALARM_ACK, HMI_HIT_ALARM_SILENCE, HMI_HIT_ESTOP_RESET };
             for (int i = 0; i < 3; i++) {
                 hmi_rect_t r = hmi_layout_screen_button(w, h, banner != 0, ab[i]);
-                CHECK(hmi_layout_hit_test(w, h, SCREEN_ALARM_MATRIX, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0xFF, r.x + r.w / 2, r.y + r.h / 2).kind == ab[i]);
+                CHECK(hmi_layout_hit_test(w, h, SCREEN_ALARM_MATRIX, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF, r.x + r.w / 2, r.y + r.h / 2).kind == ab[i]);
             }
             hmi_hit_kind_t sb[] = { HMI_HIT_SET_ROLE, HMI_HIT_SET_THEME, HMI_HIT_SET_WD_TEST, HMI_HIT_SET_WD_RESET };
             for (int i = 0; i < 4; i++) {
                 hmi_rect_t r = hmi_layout_screen_button(w, h, banner != 0, sb[i]);
                 CHECK(r.w >= 60 && r.h >= HMI_MIN_TOUCH_TARGET_PX - 2 * HMI_LAYOUT_TOUCH_SLOP);
-                CHECK(hmi_layout_hit_test(w, h, SCREEN_SECURITY_SETTINGS, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0xFF, r.x + r.w / 2, r.y + r.h / 2).kind == sb[i]);
+                CHECK(hmi_layout_hit_test(w, h, SCREEN_SECURITY_SETTINGS, banner != 0, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF, r.x + r.w / 2, r.y + r.h / 2).kind == sb[i]);
             }
             /* Dialogs */
             make_devices(devs, 2);
             for (uint8_t md = HMI_MODAL_ROLE; md <= HMI_MODAL_PIN; md++) {
                 hmi_rect_t m = hmi_layout_modal(w, h, md);
                 CHECK(m.x >= 0 && m.y >= HMI_LAYOUT_HEADER_H && m.x + m.w <= w && m.y + m.h <= h);
-                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, NULL, 0, 0xFF, e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
+                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, NULL, 0, 0, 0xFF, e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
                 hmi_rect_t cn = hmi_layout_modal_cancel(w, h, md);
-                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, NULL, 0, 0xFF, cn.x + 4, cn.y + 4).kind == HMI_HIT_MODAL_CANCEL);
-                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, devs, (uint8_t)(HMI_MAX_DEVICES < 2 ? HMI_MAX_DEVICES : 2), 0xFF, 3, h - 5).kind == HMI_HIT_MODAL_CANCEL);
+                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, NULL, 0, 0, 0xFF, cn.x + 4, cn.y + 4).kind == HMI_HIT_MODAL_CANCEL);
+                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, devs, (uint8_t)(HMI_MAX_DEVICES < 2 ? HMI_MAX_DEVICES : 2), 0, 0xFF, 3, h - 5).kind == HMI_HIT_MODAL_CANCEL);
             }
             for (int key = 0; key <= HMI_KEY_OK; key++) {
                 hmi_rect_t kr = hmi_layout_modal_key(w, h, key);
-                hmi_hit_t kh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_PIN, NULL, 0, NULL, 0, 0xFF, kr.x + kr.w / 2, kr.y + kr.h / 2);
+                hmi_hit_t kh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_PIN, NULL, 0, NULL, 0, 0, 0xFF, kr.x + kr.w / 2, kr.y + kr.h / 2);
                 CHECK(kh.kind == HMI_HIT_MODAL_KEY && kh.param == key && kr.h >= 40);
             }
             for (int rl = 0; rl < HMI_ROLE_COUNT; rl++) {
                 hmi_rect_t rr = hmi_layout_modal_role(w, h, rl);
-                hmi_hit_t rh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_ROLE, NULL, 0, NULL, 0, 0xFF, rr.x + 10, rr.y + 10);
+                hmi_hit_t rh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_ROLE, NULL, 0, NULL, 0, 0, 0xFF, rr.x + 10, rr.y + 10);
                 CHECK(rh.kind == HMI_HIT_MODAL_ROLE && rh.param == rl);
             }
             /* device panel header opens the faceplate of that device */
             make_devices(devs, 1);
             hmi_rect_t ph = hmi_layout_device_open(hmi_layout_device_panel(c, 1, 0));
-            hmi_hit_t oh = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE, NULL, 0, devs, 1, 0xFF,
+            hmi_hit_t oh = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE, NULL, 0, devs, 1, 0, 0xFF,
                                                ph.x + ph.w / 2, ph.y + ph.h / 2);
             CHECK(oh.kind == HMI_HIT_DEVICE_OPEN && oh.param == devs[0].slot);
             /* new dialogs fit the screen and keep the E-STOP reachable */
             for (uint8_t md = HMI_MODAL_FACEPLATE; md <= HMI_MODAL_CONFIRM; md++) {
                 hmi_rect_t m = hmi_layout_modal(w, h, md);
                 CHECK(m.w > 0 && m.x >= 0 && m.y >= HMI_LAYOUT_HEADER_H && m.x + m.w <= w && m.y + m.h <= h);
-                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, devs, 1, devs[0].slot, e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
-                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, devs, 1, devs[0].slot, 2, h - 2).kind == HMI_HIT_MODAL_CANCEL);
+                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, devs, 1, 0, devs[0].slot, e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
+                CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, md, NULL, 0, devs, 1, 0, devs[0].slot, 2, h - 2).kind == HMI_HIT_MODAL_CANCEL);
             }
             /* faceplate of every driver module: buttons inside their row, no overlap, every one hit-tests */
             for (uint8_t pi = 0; pi < hmi_profile_count(); pi++) {
@@ -503,7 +523,7 @@ static void test_layout(void)
                         hmi_rect_t nb = hmi_layout_fp_ctrl(w, h, devs[0].profile, q + 1);
                         CHECK(br.x + br.w <= nb.x);
                     }
-                    hmi_hit_t fh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_FACEPLATE, NULL, 0, devs, 1, devs[0].slot,
+                    hmi_hit_t fh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_FACEPLATE, NULL, 0, devs, 1, 0, devs[0].slot,
                                                        br.x + br.w / 2, br.y + br.h / 2);
                     CHECK(fh.kind == HMI_HIT_FP_CTRL && fh.param == q);
                 }
@@ -517,15 +537,15 @@ static void test_layout(void)
             for (int key = 0; key < HMI_NP_KEYS; key++) {
                 hmi_rect_t kr = hmi_layout_numpad_key(w, h, key);
                 CHECK(kr.w > 40 && kr.h >= 30 && kr.x >= nm.x && kr.x + kr.w <= nm.x + nm.w && kr.y + kr.h <= nm.y + nm.h);
-                hmi_hit_t kh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NUMPAD, NULL, 0, NULL, 0, 0xFF, kr.x + kr.w / 2, kr.y + kr.h / 2);
+                hmi_hit_t kh = hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_NUMPAD, NULL, 0, NULL, 0, 0, 0xFF, kr.x + kr.w / 2, kr.y + kr.h / 2);
                 CHECK(kh.kind == HMI_HIT_NUMPAD_KEY && kh.param == key);
             }
             CHECK(hmi_layout_numpad_key(w, h, HMI_NP_KEYS).w == 0);
             /* confirmation: Confirm and Cancel */
             hmi_rect_t ok = hmi_layout_confirm_button(w, h, true), no = hmi_layout_confirm_button(w, h, false);
             CHECK(no.x + no.w <= ok.x && ok.h >= 40);
-            CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_CONFIRM, NULL, 0, NULL, 0, 0xFF, ok.x + 5, ok.y + 5).kind == HMI_HIT_CONFIRM_OK);
-            CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_CONFIRM, NULL, 0, NULL, 0, 0xFF, no.x + 5, no.y + 5).kind == HMI_HIT_MODAL_CANCEL);
+            CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_CONFIRM, NULL, 0, NULL, 0, 0, 0xFF, ok.x + 5, ok.y + 5).kind == HMI_HIT_CONFIRM_OK);
+            CHECK(hmi_layout_hit_test(w, h, 0, banner != 0, HMI_MODAL_CONFIRM, NULL, 0, NULL, 0, 0, 0xFF, no.x + 5, no.y + 5).kind == HMI_HIT_MODAL_CANCEL);
             CHECK(hmi_layout_modal_cancel(w, h, HMI_MODAL_CONFIRM).w == 0);
         }
     }

@@ -164,9 +164,9 @@ the time of writing):
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_core` | 9,475 | tags, alarms (incl. per-alarm acknowledge and summary order), guidance fits a 7" banner, header / alarm-screen geometry and touch-target sizes, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
-| `test_integration` | 513 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery, HMI heartbeat loss stopping the tank, STOP ALL on every machine type (also offline and mid-pulse) |
-| `test_core` with the MCU profile | 8,974 | the same checks with the small-device limits |
+| `test_core` | 11,513 | tags, alarms (incl. per-alarm acknowledge and summary order), guidance fits a 7" banner, header / alarm-screen geometry and touch-target sizes, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
+| `test_integration` | 558 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery, HMI heartbeat loss stopping the tank, STOP ALL on every machine type (also offline and mid-pulse) |
+| `test_core` with the MCU profile | 8,999 | the same checks with the small-device limits |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery (real sockets on Linux and Windows) |
 
 The Raspberry Pi targets (`make CC=aarch64-linux-gnu-gcc`, `make CC=arm-linux-gnueabihf-gcc`, see

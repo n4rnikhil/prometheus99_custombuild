@@ -57,7 +57,8 @@ typedef enum {
     HMI_HIT_NUMPAD_KEY,       /* numeric keypad; param = 0..9 or HMI_NP_* */
     HMI_HIT_CONFIRM_OK,       /* confirmation dialog: confirm */
     HMI_HIT_ALARM_TAB,        /* alarm screen: param 0 = Active, 1 = History */
-    HMI_HIT_ALARM_PAGE        /* alarm screen: param 0 = previous page, 1 = next page */
+    HMI_HIT_ALARM_PAGE,       /* alarm screen: param 0 = previous page, 1 = next page */
+    HMI_HIT_DEVICE_PAGE       /* process screen: param 0 = previous page, 1 = next page */
 } hmi_hit_kind_t;
 
 /* Dialogs drawn over the screen. While one is open only the dialog and the
@@ -144,7 +145,9 @@ hmi_rect_t hmi_layout_modal_key(int sw, int sh, int key);        /* key 0..11, s
 /* --- Plug-and-play dashboard ---
  * The process screen is split into one panel per present device:
  *   1 -> full area; 2 -> side by side (or stacked on tall screens);
- *   3 -> three columns on wide screens, else 2 x 2; 4 -> 2 x 2.
+ *   3 -> three columns on wide screens, else 2 x 2; 4 -> 2 x 2;
+ *   5 or more -> a grid of readable cards (2..4 columns, 2..3 rows by screen size), with
+ *   Previous / Next pages at the bottom when the grid cannot hold them all.
  * Each panel = a header row (device name, address, status) + a body that shows the
  * profile's full manifest, or its compact manifest when the body is small. */
 #define HMI_LAYOUT_DEVICE_HEADER_H 34
@@ -155,7 +158,12 @@ bool hmi_layout_device_summary(hmi_rect_t panel);
 #define HMI_LAYOUT_COMPACT_W       620
 #define HMI_LAYOUT_COMPACT_H       260
 
+#define HMI_LAYOUT_DEV_PAGER_H     40
+/* content = the screen's content area, ndev = devices present, idx = position ON THE PAGE */
 hmi_rect_t hmi_layout_device_panel(hmi_rect_t content, int ndev, int idx);
+int        hmi_layout_devices_per_page(hmi_rect_t content, int ndev);   /* ndev when no pages are needed */
+hmi_rect_t hmi_layout_process_area(hmi_rect_t content, int ndev);       /* content minus the pager row */
+hmi_rect_t hmi_layout_device_pager(hmi_rect_t content, int which);      /* 0 = previous, 1 = next */
 hmi_rect_t hmi_layout_device_body(hmi_rect_t panel);
 bool       hmi_layout_device_compact(hmi_rect_t body);
 /* The manifest a device shows in a body of this size */
@@ -177,11 +185,13 @@ hmi_rect_t hmi_layout_confirm_button(int sw, int sh, bool ok);       /* ok = Con
 /* Topmost interactive element at (x, y).
  *   tokens/ntok : manifest of a fixed-manifest screen (telemetry), may be NULL/0
  *   devs/ndev   : present devices in display order (process screen), may be NULL/0
+ *   dev_page    : process-screen page shown (clamped to the last page)
  *   modal       : hmi_modal_t currently open (HMI_MODAL_NONE for none)
  *   fp_slot     : device slot of the open faceplate (looked up in devs)
  * HMI_HIT_WIDGET_BUTTON returns the ABSOLUTE tag id of the button. */
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
                               const uint32_t *tokens, uint8_t ntok,
-                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t fp_slot, int x, int y);
+                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t dev_page, uint8_t fp_slot,
+                              int x, int y);
 
 #endif /* INDUSTRIAL_HMI_LAYOUT_H */

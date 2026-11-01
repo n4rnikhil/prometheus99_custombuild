@@ -4,7 +4,7 @@
  *
  * Map: %MW0 belt speed 0.1 m/min, %MW1 speed setpoint 0.1 m/min, %MW2 item count,
  * %MW3 motor current 0.1 A, %MW4 throughput items/min; %M0 run, %M1 jam detected,
- * %M2 pull-cord stop (E-stop), %M3 jam reset (pulse), %M4 counter reset (pulse).
+ * %M2 stop latch (set by the pull-cord or by STOP ALL), %M3 jam reset (pulse), %M4 counter reset (pulse).
  */
 
 #include "devices/device_profile.h"
@@ -23,7 +23,7 @@ static const hmi_tag_meta_t s_meta[] = {
     { CV_RATE,    TAG_TYPE_ANALOG,  "Throughput",     "/min",  0, 200,    0,   0, 0, 0, NULL, NULL, NULL },
     { CV_RUN,     TAG_TYPE_DIGITAL, "Conveyor",       "",      0, 1,      0,   0, 0, 0, NULL, NULL, NULL },
     { CV_JAM,     TAG_TYPE_DIGITAL, "Jam detected",   "",      0, 1,      0,   0, 0, ALARM_SEV_WARNING, "Clear the jam at the transfer point", "Press Reset jam, then Start", NULL },
-    { CV_CORD,    TAG_TYPE_DIGITAL, "Pull-cord stop", "",      0, 1,      0,   0, 0, ALARM_SEV_ESTOP,   "Find out who pulled the cord and why", "Re-arm the cord at the line, ack, then Reset stop", NULL },
+    { CV_CORD,    TAG_TYPE_DIGITAL, "Stop latch",     "",      0, 1,      0,   0, 0, ALARM_SEV_ESTOP,   "Pull-cord pulled, or STOP ALL? Check the line", "Re-arm the cord if pulled, ack, then Reset stop", NULL },
     { CV_COMM,    TAG_TYPE_DIGITAL, "PLC comm loss",  "",      0, 1,      0,   0, 0, ALARM_SEV_CRITICAL, "Check the Ethernet cable and PLC power", "Verify the PLC address and port", NULL },
 };
 

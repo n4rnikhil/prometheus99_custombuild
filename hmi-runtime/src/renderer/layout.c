@@ -372,19 +372,60 @@ hmi_rect_t hmi_layout_confirm_button(int sw, int sh, bool ok)
 
 /* ---------------- Plug-and-play dashboard ---------------- */
 
+/* Grid of the process screen. Up to 4 devices keep the hand-tuned layouts; more devices get a
+ * grid in which every card stays readable (about 380 x 170 px or more), and pages when even that
+ * grid cannot hold them all. */
+static void dev_grid(hmi_rect_t c, int n, int *cols, int *rows)
+{
+    *cols = 1; *rows = 1;
+    if (n == 2) { if (c.w * 5 >= c.h * 6) *cols = 2; else *rows = 2; }
+    else if (n == 3) { if (c.w >= 1100) *cols = 3; else { *cols = 2; *rows = 2; } }
+    else if (n == 4) { *cols = 2; *rows = 2; }
+    else if (n > 4) {
+        int cw = c.w / 380, rh = c.h / 170;
+        *cols = cw < 2 ? 2 : cw > 4 ? 4 : cw;
+        *rows = rh < 2 ? 2 : rh > 3 ? 3 : rh;
+        while (*rows > 2 && (*rows - 1) * *cols >= n) (*rows)--;     /* no empty rows ... */
+        while (*cols > 2 && (*cols - 1) * *rows >= n) (*cols)--;     /* ... or columns */
+    }
+}
+
+hmi_rect_t hmi_layout_process_area(hmi_rect_t c, int n)
+{
+    int cols, rows;
+    dev_grid(c, n, &cols, &rows);
+    if (n <= cols * rows) return c;
+    return mk(c.x, c.y, c.w, c.h - HMI_LAYOUT_DEV_PAGER_H - HMI_LAYOUT_GAP);
+}
+
+int hmi_layout_devices_per_page(hmi_rect_t c, int n)
+{
+    if (n <= 0) return 0;
+    int cols, rows;
+    dev_grid(hmi_layout_process_area(c, n), n, &cols, &rows);
+    return cols * rows < n ? cols * rows : n;
+}
+
+hmi_rect_t hmi_layout_device_pager(hmi_rect_t c, int which)
+{
+    int w = c.w / 4 < 170 ? c.w / 4 : 170;
+    int y = c.y + c.h - HMI_LAYOUT_DEV_PAGER_H;
+    return which ? mk(c.x + c.w - w, y, w, HMI_LAYOUT_DEV_PAGER_H) : mk(c.x, y, w, HMI_LAYOUT_DEV_PAGER_H);
+}
+
 hmi_rect_t hmi_layout_device_panel(hmi_rect_t c, int n, int idx)
 {
     if (n <= 0 || idx < 0 || idx >= n) return mk(0, 0, 0, 0);
-    int cols = 1, rows = 1;
-    if (n == 2) { if (c.w * 5 >= c.h * 6) cols = 2; else rows = 2; }
-    else if (n == 3) { if (c.w >= 1100) cols = 3; else { cols = 2; rows = 2; } }
-    else if (n >= 4) { cols = 2; rows = 2; }
+    hmi_rect_t a = hmi_layout_process_area(c, n);
+    int cols, rows;
+    dev_grid(a, n, &cols, &rows);
+    if (idx >= cols * rows) return mk(0, 0, 0, 0);
     int col = idx % cols, row = idx / cols;
     int g = HMI_LAYOUT_GAP;
-    int x0 = c.x + (col * (c.w + g)) / cols;
-    int x1 = c.x + ((col + 1) * (c.w + g)) / cols - g;
-    int y0 = c.y + (row * (c.h + g)) / rows;
-    int y1 = c.y + ((row + 1) * (c.h + g)) / rows - g;
+    int x0 = a.x + (col * (a.w + g)) / cols;
+    int x1 = a.x + ((col + 1) * (a.w + g)) / cols - g;
+    int y0 = a.y + (row * (a.h + g)) / rows;
+    int y1 = a.y + ((row + 1) * (a.h + g)) / rows - g;
     return mk(x0, y0, x1 - x0, y1 - y0);
 }
 
@@ -432,7 +473,8 @@ static hmi_hit_t result(hmi_hit_kind_t k, uint8_t param, hmi_rect_t r)
 
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
                               const uint32_t *tokens, uint8_t ntok,
-                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t fp_slot, int x, int y)
+                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t dev_page, uint8_t fp_slot,
+                              int x, int y)
 {
     /* STOP ALL is reachable even while a dialog is open */
     {
@@ -529,8 +571,19 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
     /* Device panels (process screen) */
     if (screen == SCREEN_PROCESS_OVERVIEW && devs) {
         hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
-        for (uint8_t d = 0; d < ndev; d++) {
-            hmi_rect_t panel = hmi_layout_device_panel(c, ndev, d);
+        int per = hmi_layout_devices_per_page(c, ndev);
+        int first = 0;
+        if (per > 0 && per < ndev) {
+            for (int dir = 0; dir < 2; dir++) {
+                hmi_rect_t r = hmi_layout_device_pager(c, dir);
+                if (hit(r, x, y)) return result(HMI_HIT_DEVICE_PAGE, (uint8_t)dir, r);
+            }
+            int pages = (ndev + per - 1) / per;
+            first = (dev_page < pages ? dev_page : pages - 1) * per;
+        }
+        for (uint8_t k = 0; per > 0 && k < per && first + k < ndev; k++) {
+            uint8_t d = (uint8_t)(first + k);
+            hmi_rect_t panel = hmi_layout_device_panel(c, ndev, k);
             hmi_rect_t head = hmi_layout_device_open(panel);
             if (hmi_rect_contains(head, x, y)) return result(HMI_HIT_DEVICE_OPEN, devs[d].slot, head);
             if (hmi_layout_device_summary(panel)) {                 /* summary card: all of it opens the faceplate */

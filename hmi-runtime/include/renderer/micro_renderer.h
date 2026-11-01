@@ -70,6 +70,7 @@ typedef struct {
     int32_t  tz_offset_s;          /* local time = UTC + this (operators read local time) */
     uint8_t  alarm_view;           /* HMI_ALARM_VIEW_ACTIVE / _HISTORY */
     uint8_t  alarm_page;           /* page of that view (clamped by the renderer) */
+    uint8_t  device_page;          /* process screen page when there are more devices than fit */
     const uint8_t *alarm_order;    /* active alarms in display order, sorted once per frame; NULL: */
     uint8_t  alarm_order_n;        /*   the renderer sorts them itself (alarm_order_n entries) */
     const char *toast;             /* transient one-line message (NULL = none) */

@@ -143,9 +143,12 @@ static const hmi_plc_driver_t *g_host_driver;
 
 /* System alarm points owned by the runtime itself */
 #define SYS_TAG_WATCHDOG 13
+#define SYS_TAG_CAPACITY 14                      /* devices on the network that this HMI cannot show */
 static const hmi_tag_meta_t s_system_meta[] = {
     { SYS_TAG_WATCHDOG, TAG_TYPE_DIGITAL, "HMI watchdog failover", "", 0, 1, 0, 0, 0, ALARM_SEV_CRITICAL,
       "A control loop stalled; check the HMI host for overload", "Maintenance: reset the failover latch in Settings", NULL },
+    { SYS_TAG_CAPACITY, TAG_TYPE_DIGITAL, "Devices not shown", "", 0, 1, 0, 0, 0, ALARM_SEV_WARNING,
+      "STOP ALL cannot reach them: stop at the machine", "Their addresses are in Alarms > History", NULL },
 };
 static bool     g_discovery_on = true;
 static char     g_cfg_note[64];                  /* "Site config hmi.cfg: 6 options" for the journal */
@@ -455,6 +458,12 @@ static void fieldbus_thread(void *param)
             hmi_tag_write_digital(&tags, SYS_TAG_WATCHDOG, true, QUALITY_GOOD);   /* latched until reset */
         } else if (hmi_tag_read_quality(&tags, SYS_TAG_WATCHDOG) != QUALITY_GOOD) {
             hmi_tag_write_digital(&tags, SYS_TAG_WATCHDOG, false, QUALITY_GOOD);  /* first iteration */
+        }
+        {                                        /* machines on the network this HMI could not take on */
+            bool over = hmi_devmgr_unattached(now_ms) > 0;
+            if (hmi_tag_read_quality(&tags, SYS_TAG_CAPACITY) != QUALITY_GOOD ||
+                (hmi_tag_read_value(&tags, SYS_TAG_CAPACITY) != 0) != over)
+                hmi_tag_write_digital(&tags, SYS_TAG_CAPACITY, over, QUALITY_GOOD);
         }
 
         /* 1. Own heartbeat, and the UI heartbeat as seen from here */
@@ -1002,6 +1011,7 @@ static void ui_first_device_row(int row, uint32_t now_ms)
 
 static uint8_t g_alarm_view;               /* Alarms screen: Active summary or History */
 static uint8_t g_alarm_page;
+static uint8_t g_dev_page;                       /* process screen page (more devices than fit) */
 
 static bool ui_banner_active(void)
 {
@@ -1053,6 +1063,16 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
         case HMI_HIT_ALARM_TAB:
             if (hit->param != g_alarm_view) { g_alarm_view = hit->param; g_alarm_page = 0; }
             break;
+        case HMI_HIT_DEVICE_PAGE:
+        {
+            hmi_rect_t c = hmi_layout_content(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active());
+            int per = hmi_layout_devices_per_page(c, g_ndev);
+            int pages = per > 0 ? (g_ndev + per - 1) / per : 1;
+            if (g_dev_page >= pages) g_dev_page = (uint8_t)(pages - 1);
+            if (hit->param == 0 && g_dev_page > 0) g_dev_page--;
+            else if (hit->param == 1 && g_dev_page + 1 < pages) g_dev_page++;
+            break;
+        }
         case HMI_HIT_ALARM_PAGE:
         {
             int pages = ui_alarm_pages();
@@ -1241,6 +1261,13 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
         if (g_alarm_page >= pages) g_alarm_page = (uint8_t)(pages - 1);
     }
     v->alarm_page      = g_alarm_page;
+    {                                            /* devices can leave while a later page is shown */
+        int per = hmi_layout_devices_per_page(hmi_layout_content(g_renderer.screen_w, g_renderer.screen_h,
+                                                                 ui_banner_active()), g_ndev);
+        int pages = per > 0 ? (g_ndev + per - 1) / per : 1;
+        if (g_dev_page >= pages) g_dev_page = (uint8_t)(pages - 1);
+    }
+    v->device_page     = g_dev_page;
     v->toast = (g_toast[0] && (uint32_t)(now_ms - g_toast_ms) < TOAST_DURATION_MS) ? g_toast : NULL;
     v->modal = g_modal;
     v->modal_role = g_modal_role;
@@ -1383,7 +1410,7 @@ void app_pointer_up(int x, int y)
         const uint32_t *tok = ui_active_tokens(&ntok);
         hmi_hit_t hit = hmi_layout_hit_test(g_renderer.screen_w, g_renderer.screen_h, g_active_screen,
                                             ui_banner_active(), g_modal, tok, ntok,
-                                            g_dev_view, g_ndev, g_fp_slot, tx, ty);
+                                            g_dev_view, g_ndev, g_dev_page, g_fp_slot, tx, ty);
         ui_dispatch_hit(&hit, now_ms);
     }
     hal_request_repaint();
@@ -1537,6 +1564,14 @@ static int run_set_pin(void)
 {
     static hmi_security_ctx_t sec;
     char out[260];
+    /* A running HMI keeps the PINs it loaded at start: changing them under it would leave the old
+     * ones (or bench mode) in force until a restart. Same lock as the HMI itself. */
+    char lock[HMI_PATH_MAX + 8];
+    snprintf(lock, sizeof(lock), "%s.lock", g_key_path);
+    if (!hal_instance_lock(lock)) {
+        hal_console_print("The HMI is running: close it first, then set the PIN.\r\n");
+        return 4;
+    }
     hmi_security_init(&sec);
     hmi_key_status_t ks = device_key_setup(true, &sec);
     if (ks != HMI_KEY_LOADED && ks != HMI_KEY_CREATED) {

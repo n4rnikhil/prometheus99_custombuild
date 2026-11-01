@@ -81,7 +81,7 @@ static bool horn_gpio_open(const char *spec)
 {
     char chip[64];
     const char *colon = strrchr(spec, ':');
-    if (!colon || (size_t)(colon - spec) >= sizeof(chip) - 6) return false;
+    if (!colon || (size_t)(colon - spec) >= sizeof(chip) - 6) { errno = EINVAL; return false; }
     unsigned long line = strtoul(colon + 1, NULL, 10);
     snprintf(chip, sizeof(chip), "/dev/%.*s", (int)(colon - spec), spec);
     int cfd = open(chip, O_RDONLY | O_CLOEXEC);
@@ -93,7 +93,9 @@ static bool horn_gpio_open(const char *spec)
     req.config.flags = GPIO_V2_LINE_FLAG_OUTPUT;
     snprintf(req.consumer, sizeof(req.consumer), "industrial_hmi horn");
     int rc = ioctl(cfd, GPIO_V2_GET_LINE_IOCTL, &req);
+    int e = errno;
     close(cfd);
+    errno = e;
     if (rc < 0 || req.fd < 0) return false;
     s_horn_fd = req.fd;
     return true;
@@ -476,7 +478,12 @@ int main(int argc, char **argv)
         if (i > 0 && strcmp(argv[i], "--horn-gpio") == 0 && i + 1 < argc) {
             const char *spec = argv[++i];
             if (!horn_gpio_open(spec)) {
-                fprintf(stderr, "industrial_hmi: --horn-gpio %s: cannot drive that GPIO line\n", spec);
+                if (errno == EBUSY)
+                    fprintf(stderr, "industrial_hmi: --horn-gpio %s: the line is in use - is the HMI already "
+                                    "running? (or another program holds it)\n", spec);
+                else
+                    fprintf(stderr, "industrial_hmi: --horn-gpio %s: cannot drive that GPIO line (%s)\n", spec,
+                            strerror(errno));
                 return 64;                                   /* an alarm output that silently fails is not acceptable */
             }
             horn_gpio_spec_seen = true;
