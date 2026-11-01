@@ -11,7 +11,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install analysis tools
         run: sudo apt-get update && sudo apt-get install -y cppcheck gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf qemu-user libx11-dev python3-pil gcc-mingw-w64-x86-64 nsis
       - name: PLC simulator - build and model tests
@@ -51,11 +51,12 @@ jobs:
   windows:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
+          suppress-deprecation-warnings: msystem-mingw64
           path-type: inherit
       - name: Add MinGW to PATH
         shell: pwsh

@@ -6,6 +6,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-$ROOT/dist}
 mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)          # absolute: the builds below run in other folders
 # Built in a scratch copy of the sources: the developer's tree (and its test builds) is not touched
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/prometheus-release.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT INT TERM

@@ -5,6 +5,8 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-$ROOT/dist}
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)          # absolute: the builds below run in other folders
 STAGE=$OUT/stage
 CC=x86_64-w64-mingw32-gcc
 RC=x86_64-w64-mingw32-windres
