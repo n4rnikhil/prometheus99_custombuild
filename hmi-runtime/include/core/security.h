@@ -81,6 +81,7 @@ typedef enum {
     HMI_CMD_SETPOINT,          /* OPERATOR+: process setpoints */
     HMI_CMD_TUNE,              /* MAINTENANCE+: tuning values (ramp times, limits) */
     HMI_CMD_RAW_WRITE,         /* ENGINEER: write any register of an unrecognised device */
+    HMI_CMD_EMERGENCY_RESET,   /* MAINTENANCE+: leave the EMERGENCY screen (machines stay stopped) */
     HMI_CMD_COUNT
 } hmi_command_t;
 

@@ -594,6 +594,48 @@ static void test_link_loss(void)
     hmi_devmgr_shutdown();
 }
 
+/* EMERGENCY: each device's stop outcome is recorded, a device that was offline is stopped the
+ * moment it comes back, and the reset forgets the outcomes without restarting anything. */
+static void test_emergency_outcomes(void)
+{
+    enum { AV_RUN = 9 };
+    world();
+    hmi_devmgr_init(60000);                                  /* keep the offline device attached */
+    CHECK(attach(SIM_ATV340, NULL, 100));
+    CHECK(attach(SIM_METER, "em6400", 100));
+    run(100, 1500);
+    static hmi_device_info_t d[HMI_MAX_DEVICES];
+    hmi_devmgr_publish(d, 1500);
+    CHECK(d[0].state == HMI_DEV_ONLINE && d[0].stop_result == HMI_STOP_NONE && tag(0, AV_RUN) == 1);
+    /* the drive's link dies, then EMERGENCY is pressed */
+    g_sim[0].freeze = true;
+    uint32_t t = 1500;
+    do { run(t, t + 10); t += 10; hmi_devmgr_publish(d, t); } while (d[0].state != HMI_DEV_OFFLINE && t < 12000);
+    uint8_t missed = 0;
+    CHECK(hmi_devmgr_stop_all(&g_t, &g_al, t, &missed) == 0 && missed == 1);
+    hmi_devmgr_publish(d, t);
+    CHECK(d[0].stop_result == HMI_STOP_OFFLINE && d[1].stop_result == HMI_STOP_NOTHING);
+    CHECK(hmi_devmgr_stop_pending(&g_al, t) == 0);          /* still offline: nothing to do yet */
+    /* the drive answers again: still running, because the stop never reached it ... */
+    g_sim[0].freeze = false;
+    uint32_t t2 = t;
+    do { run(t2, t2 + 10); t2 += 10; hmi_devmgr_publish(d, t2); } while (d[0].state != HMI_DEV_ONLINE && t2 < t + 15000);
+    CHECK(d[0].state == HMI_DEV_ONLINE && tag(0, AV_RUN) == 1);
+    /* ... until the EMERGENCY loop stops it, once */
+    CHECK(hmi_devmgr_stop_pending(&g_al, t2) == 1);
+    CHECK(hmi_devmgr_stop_pending(&g_al, t2) == 0);
+    hmi_devmgr_publish(d, t2);
+    CHECK(d[0].stop_result == HMI_STOP_SENT);
+    run(t2, t2 + 3000);
+    CHECK(tag(0, AV_RUN) == 0);
+    /* reset: the outcomes are forgotten, the drive stays stopped */
+    hmi_devmgr_stop_clear();
+    run(t2 + 3000, t2 + 4000);
+    hmi_devmgr_publish(d, t2 + 4000);
+    CHECK(d[0].stop_result == HMI_STOP_NONE && d[1].stop_result == HMI_STOP_NONE && tag(0, AV_RUN) == 0);
+    hmi_devmgr_shutdown();
+}
+
 int main(void)
 {
     hmi_timer_init();                                    /* as app_init() does: the link timers need it */
@@ -608,6 +650,7 @@ int main(void)
     test_altivar_control();
     test_meter();
     test_link_loss();
+    test_emergency_outcomes();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

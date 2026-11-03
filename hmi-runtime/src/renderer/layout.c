@@ -476,12 +476,12 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
                               const hmi_device_info_t *devs, uint8_t ndev, uint8_t dev_page, uint8_t fp_slot,
                               int x, int y)
 {
-    /* STOP ALL is reachable even while a dialog is open */
+    /* EMERGENCY is reachable even while a dialog is open */
     {
         hmi_rect_t e = hmi_layout_estop_button(sw, sh);
         if (y < HMI_LAYOUT_HEADER_H && hit(e, x, y)) return result(HMI_HIT_ESTOP, 0, e);
     }
-    /* A display below the supported size shows only STOP ALL: nothing else may be touched */
+    /* A display below the supported size shows only EMERGENCY: nothing else may be touched */
     if (HMI_LAYOUT_TOO_SMALL(sw, sh)) return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
     if (modal != HMI_MODAL_NONE) {
         hmi_rect_t m = hmi_layout_modal(sw, sh, modal);
@@ -613,5 +613,70 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
             if (hit(r, x, y)) return result(HMI_HIT_WIDGET_BUTTON, hmi_token_get_tag(tokens[i]), r);
         }
     }
+    return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
+}
+
+/* ---------------- EMERGENCY screen ---------------- */
+
+#define EMERG_TITLE_H 96          /* headline (28) + 2 message lines (2 x 24) + gaps */
+#define EMERG_RESET_W 340
+#define EMERG_RESET_H 52
+
+hmi_rect_t hmi_layout_emergency_title(int sw, int sh)
+{
+    (void)sh;
+    return mk(HMI_LAYOUT_MARGIN, HMI_LAYOUT_HEADER_H + 10, sw - 2 * HMI_LAYOUT_MARGIN, EMERG_TITLE_H);
+}
+
+hmi_rect_t hmi_layout_emergency_reset(int sw, int sh)
+{
+    int w = EMERG_RESET_W;
+    if (w > sw - 2 * HMI_LAYOUT_MARGIN) w = sw - 2 * HMI_LAYOUT_MARGIN;
+    if (w < 0) w = 0;
+    int y = sh - HMI_LAYOUT_MARGIN - EMERG_RESET_H;
+    hmi_rect_t t = hmi_layout_emergency_title(sw, sh);
+    if (y < t.y + t.h) y = t.y + t.h;                     /* tiny displays: below the title, possibly off screen */
+    return mk((sw - w) / 2, y, w, EMERG_RESET_H);
+}
+
+hmi_rect_t hmi_layout_emergency_list(int sw, int sh)
+{
+    hmi_rect_t t = hmi_layout_emergency_title(sw, sh);
+    hmi_rect_t r = hmi_layout_emergency_reset(sw, sh);
+    int y = t.y + t.h + 8;
+    int h = r.y - 10 - y;
+    if (h < 0) h = 0;
+    return mk(HMI_LAYOUT_MARGIN, y, sw - 2 * HMI_LAYOUT_MARGIN, h);
+}
+
+int hmi_layout_emergency_cols(int sw, int sh)
+{
+    (void)sh;
+    return sw >= 1100 ? 2 : 1;
+}
+
+int hmi_layout_emergency_rows(int sw, int sh)
+{
+    hmi_rect_t l = hmi_layout_emergency_list(sw, sh);
+    return l.h / HMI_LAYOUT_EMERG_ROW_H;
+}
+
+hmi_rect_t hmi_layout_emergency_row(int sw, int sh, int idx)
+{
+    int rows = hmi_layout_emergency_rows(sw, sh), cols = hmi_layout_emergency_cols(sw, sh);
+    if (idx < 0 || rows <= 0 || idx >= rows * cols) return mk(0, 0, 0, 0);
+    hmi_rect_t l = hmi_layout_emergency_list(sw, sh);
+    int gap = 16;
+    int cw = (l.w - gap * (cols - 1)) / cols;
+    int c = idx / rows, r = idx % rows;
+    return mk(l.x + c * (cw + gap), l.y + r * HMI_LAYOUT_EMERG_ROW_H, cw, HMI_LAYOUT_EMERG_ROW_H - 4);
+}
+
+hmi_hit_t hmi_layout_emergency_hit_test(int sw, int sh, int x, int y)
+{
+    hmi_rect_t e = hmi_layout_estop_button(sw, sh);
+    if (y < HMI_LAYOUT_HEADER_H && hit(e, x, y)) return result(HMI_HIT_ESTOP, 0, e);
+    hmi_rect_t r = hmi_layout_emergency_reset(sw, sh);
+    if (r.w > 0 && r.y + r.h <= sh && hit(r, x, y)) return result(HMI_HIT_EMERGENCY_RESET, 0, r);
     return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
 }

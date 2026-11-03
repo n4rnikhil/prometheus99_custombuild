@@ -16,7 +16,7 @@ Operator panel and PLC simulator for machines controlled over Modbus TCP.
 8. [Process screen](#8-process-screen)
 9. [Operating a device](#9-operating-a-device)
 10. [Alarms](#10-alarms)
-11. [STOP ALL and restarting after a stop](#11-stop-all-and-restarting-after-a-stop)
+11. [EMERGENCY and restarting after a stop](#11-emergency-and-restarting-after-a-stop)
 12. [Diagnostics screen](#12-diagnostics-screen)
 13. [Telemetry screen](#13-telemetry-screen)
 14. [Settings screen](#14-settings-screen)
@@ -52,11 +52,11 @@ The package contains two programs:
 
 ## 2. Safety information
 
-> **STOP ALL is not an emergency stop.**
-> STOP ALL sends stop requests to the machines over the network. It depends on this software, the
-> PC, the network and the PLC program. Every machine must have its own hardwired emergency stop
-> as required by ISO 13850 and IEC 60204-1. In an emergency, use the hardwired emergency stop
-> first.
+> **The EMERGENCY button is a software stop, not a certified emergency stop.**
+> It sends stop requests to the machines over the network. It depends on this software, the PC,
+> the network and the PLC program. Every machine must have its own hardwired emergency stop as
+> required by ISO 13850 and IEC 60204-1. In an emergency, press the hardwired emergency stop as
+> well.
 
 - This software is **not a safety system** and is not certified to IEC 61508, IEC 62061 or
   ISO 13849. Safety functions belong in the machine's safety circuits and safety PLC.
@@ -161,7 +161,7 @@ it draws directly to the screen (framebuffer); on a server, start it with `--hea
 | **Health indicator** | the HMI's own health: **HMI OK**, **PLC offline**, **Data stale**, **Watchdog trip**, **UI stalled** or **Failover latch** |
 | **Alarm indicator** | **No alarms**, *n* **active**, or *n* **unack.** (unacknowledged); its colour and shape show the highest priority |
 | **Role indicator** | the signed-in role (**Viewer**, **Operator**, **Maintenance**, **Engineer**). Tap it to sign in or switch role |
-| **STOP ALL** | stops every device (see section 11) |
+| **EMERGENCY** | stops every device and locks the panel on the red EMERGENCY screen (see section 11) |
 
 **Alarm banner** — appears under the header while an alarm needs attention. It shows the most
 important alarm and two numbered steps telling the operator what to do.
@@ -176,7 +176,7 @@ important alarm and two numbered steps telling the operator what to do.
 | Green | normal, running, online |
 | Grey | stopped, idle, not available |
 | Amber | warning, abnormal but not critical |
-| Red | alarm, stop, offline, fault — and the STOP ALL / Stop buttons |
+| Red | alarm, stop, offline, fault — and the EMERGENCY / Stop buttons |
 | Blue | information |
 
 Colour is never the only signal: alarm priority is also shown by shape and by a word.
@@ -185,7 +185,7 @@ which shows normal states in grey instead of green.
 
 ## 7. Signing in and user roles
 
-Without signing in, the HMI runs as **Viewer**: everything can be seen and **STOP ALL** always
+Without signing in, the HMI runs as **Viewer**: everything can be seen and **EMERGENCY** always
 works, but nothing else can be changed.
 
 **To sign in**
@@ -200,9 +200,9 @@ Alarms screen (**Ack**, **Silence horn**, **Reset stop**) stay greyed out until 
 
 | Role | Can do |
 |---|---|
-| **Viewer** | watch all screens; STOP ALL |
+| **Viewer** | watch all screens; EMERGENCY |
 | **Operator** | start and stop devices, change setpoints and modes, acknowledge alarms, silence the horn, reset a stop |
-| **Maintenance** | everything an Operator can, plus tuning parameters and resetting the watchdog failover |
+| **Maintenance** | everything an Operator can, plus tuning parameters, resetting the watchdog failover and resetting an EMERGENCY |
 | **Engineer** | everything, plus raw register writes and watchdog tests |
 
 **Rules**
@@ -237,7 +237,7 @@ Alarms from every device appear in the alarm banner and on the Alarms screen wha
 
 If more than 8 devices are found, the extra ones are **not shown and not controlled**: the HMI raises
 a **Devices not shown** warning, names each one in Alarms → History (*192.168.10.51:502 NOT shown*),
-and STOP ALL reports them as not stopped. Devices listed with `--plc` always get a place before
+and EMERGENCY reports them as not stopped. Devices listed with `--plc` always get a place before
 devices found by scanning. Use a second HMI for the other machines.
 
 ## 9. Operating a device
@@ -326,20 +326,35 @@ example:
 
 **Acknowledge** on the banner acknowledges that alarm.
 
-## 11. STOP ALL and restarting after a stop
+## 11. EMERGENCY and restarting after a stop
 
-<p align="center"><img src="img/stop_all.png" alt="After STOP ALL" width="640"></p>
+<p align="center"><img src="img/emergency.png" alt="The EMERGENCY screen" width="640"></p>
 
-**STOP ALL** is the red button at the top right of every screen (keyboard: **E**). It works in
-every situation: without signing in, with a dialog open, on any screen.
+**EMERGENCY** is the red button at the top right of every screen (keyboard: **E**). Anyone can
+press it, in every situation: without signing in, with a dialog open, on any screen.
 
 When pressed, the HMI:
 
 1. cancels every command that has not been sent yet;
 2. sends each device its stop: the stop latch, every Stop/Off control and the stopping mode;
-3. shows a **Stop** alarm for each machine whose PLC holds it in a stop latch;
-4. reports any device it could not stop — offline, no stop control, or found on the network but not
-   on this HMI (more than 8 devices) — stop those at the machine.
+3. turns the whole panel **red** and shows, machine by machine, **Stop sent**, **Nothing to stop**
+   (meters) or **NOT STOPPED** — offline, no stop control, or found on the network but not on this
+   HMI (more than 8 devices). Stop those at the machine;
+4. stays on the red screen. Nothing else can be operated. A machine that comes back online, or
+   is found, while the EMERGENCY lasts is stopped as soon as it answers;
+5. stops sending the HMI heartbeat, so PLC programs that watch it stop their machines as well.
+
+Pressing EMERGENCY again sends the stop again. The press and the reset are both recorded in the
+signed audit log with the role that was signed in.
+
+**Leaving the EMERGENCY screen**
+
+1. Make the area safe. Use the hardwired emergency stop at each machine as well.
+2. Press **Reset EMERGENCY (Maintenance)** at the bottom of the red screen. If Maintenance is not
+   signed in, the panel asks for the Maintenance PIN.
+3. Confirm. The panel returns to normal. **The machines stay stopped**: the reset sends nothing to them.
+
+<p align="center"><img src="img/stop_all.png" alt="After the reset: stop alarm" width="640"></p>
 
 **Restarting after a stop**
 
@@ -392,7 +407,7 @@ frame buffer and display refresh rate.
 
 | Key | Action |
 |---|---|
-| **E** | STOP ALL (always works) |
+| **E** | EMERGENCY (always works) |
 | **1** – **5** | Process, Diagnostics, Telemetry, Alarms, Settings |
 | **Tab** / **Shift+Tab**, **←** / **→** | next / previous screen |
 | **A** or **Space** | acknowledge all alarms |
@@ -540,7 +555,7 @@ Do this once, before the HMI is used on real machines.
    logic to the PLC program (the HMI writes a changing counter every second; the PLC stops the
    machine when it has not changed for 5 seconds).
 6. **Separate the network.** Put the HMI and the controllers in their own network zone.
-7. **Test** STOP ALL, every machine's stop, the alarm sound and the hardwired emergency stops.
+7. **Test** EMERGENCY and its reset, every machine's stop, the alarm sound and the hardwired emergency stops.
 
 **Returning a bench PC to test mode:** close the HMI, delete `security.vault` (keep `hmi.key`) and
 start it again with `--allow-factory-pins` or from the simulator.
@@ -583,7 +598,7 @@ device key that wrote the log.
 | Problem | Cause and solution |
 |---|---|
 | **No devices appear** | Check the network cable and IP addresses. Check the `--scan` range in `hmi.cfg`. Devices that do not identify themselves (energy meters, unknown devices) must be listed with `--plc`. With the simulator, make sure it is running and that its devices are plugged in. |
-| **"Devices not shown" warning** | More than 8 devices were found. The extra ones are not on this HMI and STOP ALL does not reach them; their addresses are in Alarms → History. Narrow the `--scan` range, list the important devices with `--plc`, or use a second HMI. |
+| **"Devices not shown" warning** | More than 8 devices were found. The extra ones are not on this HMI and EMERGENCY does not reach them; their addresses are in Alarms → History. Narrow the `--scan` range, list the important devices with `--plc`, or use a second HMI. |
 | **A device shows Offline** | The device does not answer: check power, cable, IP address and port. The HMI reconnects by itself. |
 | **Cannot sign in with 1111** | The panel is commissioned (a site PIN exists), or the HMI was started without test mode. Use the site PIN, or see section 18 to return a bench PC to test mode. |
 | **"PIN entry locked for 30 s"** | Three wrong PINs. Wait 30 seconds. |

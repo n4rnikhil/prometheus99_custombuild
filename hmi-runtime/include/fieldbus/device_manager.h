@@ -75,6 +75,14 @@ uint8_t hmi_devmgr_unattached(uint32_t now_ms);
 
 uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms, uint8_t *not_stopped);
 
+/* While the EMERGENCY is active (call every fieldbus iteration): stop every online device that has
+ * not been stopped yet - one that was offline and came back, or one that was attached since.
+ * Each device's outcome is in hmi_device_info_t.stop_result. Returns the devices
+ * stopped by this call. */
+uint8_t hmi_devmgr_stop_pending(hmi_alarm_supervisor_t *alarms, uint32_t now_ms);
+/* EMERGENCY reset: forget the stop outcomes (the machines stay stopped; nothing is restarted). */
+void hmi_devmgr_stop_clear(void);
+
 /* Copy the state of all slots (EMPTY ones included) for publishing. */
 void hmi_devmgr_publish(hmi_device_info_t out[HMI_MAX_DEVICES], uint32_t now_ms);
 

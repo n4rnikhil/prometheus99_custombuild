@@ -13,7 +13,7 @@ static const hmi_role_t s_required_role[HMI_CMD_COUNT] = {
     [HMI_CMD_NAVIGATE]       = ROLE_VIEWER,
     [HMI_CMD_THEME]          = ROLE_VIEWER,
     [HMI_CMD_ROLE_SELECT]    = ROLE_VIEWER,
-    [HMI_CMD_ESTOP]          = ROLE_VIEWER,      /* STOP ALL: never gated */
+    [HMI_CMD_ESTOP]          = ROLE_VIEWER,      /* EMERGENCY (stop all): never gated, anyone may press it */
     [HMI_CMD_ACK_ALARMS]     = ROLE_OPERATOR,
     [HMI_CMD_SILENCE_HORN]   = ROLE_OPERATOR,
     [HMI_CMD_PUMP_TOGGLE]    = ROLE_OPERATOR,
@@ -25,13 +25,14 @@ static const hmi_role_t s_required_role[HMI_CMD_COUNT] = {
     [HMI_CMD_SETPOINT]       = ROLE_OPERATOR,
     [HMI_CMD_TUNE]           = ROLE_MAINTENANCE,
     [HMI_CMD_RAW_WRITE]      = ROLE_ENGINEER,
+    [HMI_CMD_EMERGENCY_RESET] = ROLE_MAINTENANCE,
 };
 
 static const char * const s_cmd_names[HMI_CMD_COUNT] = {
     [HMI_CMD_NAVIGATE]       = "Navigate",
     [HMI_CMD_THEME]          = "Theme",
     [HMI_CMD_ROLE_SELECT]    = "Role select",
-    [HMI_CMD_ESTOP]          = "Stop all",
+    [HMI_CMD_ESTOP]          = "Emergency (stop all)",
     [HMI_CMD_ACK_ALARMS]     = "Acknowledge",
     [HMI_CMD_SILENCE_HORN]   = "Silence horn",
     [HMI_CMD_PUMP_TOGGLE]    = "Pump start/stop",
@@ -43,6 +44,7 @@ static const char * const s_cmd_names[HMI_CMD_COUNT] = {
     [HMI_CMD_SETPOINT]       = "Change setpoint",
     [HMI_CMD_TUNE]           = "Change tuning",
     [HMI_CMD_RAW_WRITE]      = "Write register",
+    [HMI_CMD_EMERGENCY_RESET] = "Emergency reset",
 };
 
 void hmi_security_init(hmi_security_ctx_t *sec)

@@ -37,7 +37,18 @@ typedef struct {
     uint32_t requests, responses, timeouts, exceptions, protocol_errors;
     uint32_t connects, writes_ok, writes_failed;
     uint32_t rtt_us, max_rtt_us;
+    uint8_t  stop_result;       /* hmi_stop_result_t: what the last EMERGENCY / STOP ALL did to this device */
 } hmi_device_info_t;
+
+/* Outcome of the software stop for one device (shown on the EMERGENCY screen) */
+typedef enum {
+    HMI_STOP_NONE = 0,          /* no stop requested since the last reset */
+    HMI_STOP_SENT,              /* stop written to the device */
+    HMI_STOP_NOTHING,           /* nothing to stop: a meter or another passive device */
+    HMI_STOP_OFFLINE,           /* NOT stopped: the device is not answering */
+    HMI_STOP_FAILED,            /* NOT stopped: the stop could not be queued, or only partly */
+    HMI_STOP_NO_CONTROL         /* NOT stopped: the module has no stop control */
+} hmi_stop_result_t;
 
 /* A device found by discovery, handed to the device manager */
 typedef struct {

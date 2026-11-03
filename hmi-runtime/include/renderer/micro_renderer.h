@@ -91,6 +91,10 @@ typedef struct {
     const char *cf_detail;
     const char *cf_ok;             /* confirm button label */
     bool        cf_danger;         /* red confirm button */
+    /* EMERGENCY: the red screen replaces every other screen while it is active */
+    bool     emergency;
+    uint32_t emergency_at_ms;      /* when it was pressed (uptime ms; shown as wall-clock time) */
+    uint8_t  emergency_unreached;  /* machines seen on the network that are not on this HMI: not stopped */
 } hmi_view_t;
 
 /* --- Lifecycle --- */

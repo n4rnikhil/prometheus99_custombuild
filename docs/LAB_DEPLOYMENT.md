@@ -87,8 +87,8 @@ been checked against its device.
 2. Keep `hmi.key` and `security.vault` on the panel PC only, readable by the HMI account.
 3. Put the PCs, panels, PLCs and drives on their own control network. Modbus TCP has no
    authentication: anyone on that network can write to the PLCs directly, with or without this HMI.
-4. Check that each machine's hardwired emergency stop works on its own. STOP ALL on the HMI is a
-   software stop request, not an emergency stop.
+4. Check that each machine's hardwired emergency stop works on its own. The HMI's EMERGENCY button
+   is a software stop request, not a certified emergency stop.
 5. In each PLC program the HMI controls, add the heartbeat rungs (see the runtime README, "HMI
    heartbeat"): 5 s without a changing heartbeat sets the program's stop latch.
 6. Wire an alarm buzzer or stack light: `--horn-gpio gpiochip0:<line>` on a Pi, `BOARD_PIN_HORN` on

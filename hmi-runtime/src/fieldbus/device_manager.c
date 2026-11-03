@@ -833,58 +833,64 @@ static bool can_start(const hmi_device_profile_t *p)
     return false;
 }
 
+/* The software stop of one attached device. Records and returns the outcome (hmi_stop_result_t). */
+static uint8_t stop_one(slot_t *s, hmi_alarm_supervisor_t *al, uint32_t now_ms)
+{
+    const hmi_device_profile_t *p = s->info.profile;
+    if (!can_start(p)) {                                                       /* a meter, a passive device */
+        if (p->n_actions)
+            LOG(al, now_ms, ALARM_SEV_INFO, "%s: nothing to stop (no start control)", s->info.label);
+        return s->info.stop_result = HMI_STOP_NOTHING;
+    }
+    if (s->info.state != HMI_DEV_ONLINE) {
+        LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: OFFLINE, not stopped - stop it at the machine", s->info.label);
+        return s->info.stop_result = HMI_STOP_OFFLINE;
+    }
+    /* A stop overrides everything queued before it: never let a queued start run after it */
+    if (s->wq_count)
+        LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %u queued command(s) cancelled by STOP ALL", s->info.label,
+            (unsigned)s->wq_count);
+    s->wq_count = 0;
+    /* ... but a reset pulse that has started must be completed: its release (0) goes first, or the
+     * reset / trip-reset input of the PLC would be left on */
+    if (s->pulse_pending) {
+        s->pulse_pending = false;
+        queue_write(s, s->pulse_coil, s->pulse_addr, s->pulse_value);
+    }
+
+    bool sent = false, failed = false;
+    if (p->estop_coil != 0xFFFFu) {
+        if (queue_write(s, true, p->estop_coil, 1)) sent = true; else failed = true;
+    } else {
+        for (uint8_t k = 0; k < p->n_actions; k++) {
+            const hmi_device_action_t *a = &p->actions[k];
+            bool ok;
+            if (a->kind == HMI_ACT_COIL_OFF)                          ok = queue_write(s, true, a->address, 0);
+            else if (a->kind == HMI_ACT_REG_OFF)                      ok = queue_seq(s, a->address, a->seq, a->seq_len);
+            else if (a->kind == HMI_ACT_SET_ENUM && a->stop_all)   ok = queue_write(s, false, a->address, 0);
+            else continue;
+            if (ok) sent = true; else failed = true;
+        }
+    }
+    if (sent && !failed) {
+        LOG(al, now_ms, ALARM_SEV_ESTOP, "%s: stop sent", s->info.label);
+        return s->info.stop_result = HMI_STOP_SENT;
+    }
+    LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: %s - stop it at the machine", s->info.label,
+        sent ? "stop only partly sent" : failed ? "stop write FAILED" : "no stop control");
+    return s->info.stop_result = (sent || failed) ? HMI_STOP_FAILED : HMI_STOP_NO_CONTROL;
+}
+
 uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms, uint8_t *not_stopped)
 {
     (void)tags;
     uint8_t stopped = 0, missed = 0;
     for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
         slot_t *s = &s_slots[i];
-        const hmi_device_profile_t *p = s->info.profile;
-        if (s->info.state == HMI_DEV_EMPTY || !p) continue;
-        if (!can_start(p)) {                                                   /* a meter, a passive device */
-            if (p->n_actions)
-                LOG(al, now_ms, ALARM_SEV_INFO, "%s: nothing to stop (no start control)", s->info.label);
-            continue;
-        }
-        if (s->info.state != HMI_DEV_ONLINE) {
-            LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: OFFLINE, not stopped - stop it at the machine", s->info.label);
-            missed++;
-            continue;
-        }
-        /* A stop overrides everything queued before it: never let a queued start run after it */
-        if (s->wq_count)
-            LOG(al, now_ms, ALARM_SEV_WARNING, "%s: %u queued command(s) cancelled by STOP ALL", s->info.label,
-                (unsigned)s->wq_count);
-        s->wq_count = 0;
-        /* ... but a reset pulse that has started must be completed: its release (0) goes first, or the
-         * reset / trip-reset input of the PLC would be left on */
-        if (s->pulse_pending) {
-            s->pulse_pending = false;
-            queue_write(s, s->pulse_coil, s->pulse_addr, s->pulse_value);
-        }
-
-        bool sent = false, failed = false;
-        if (p->estop_coil != 0xFFFFu) {
-            if (queue_write(s, true, p->estop_coil, 1)) sent = true; else failed = true;
-        } else {
-            for (uint8_t k = 0; k < p->n_actions; k++) {
-                const hmi_device_action_t *a = &p->actions[k];
-                bool ok;
-                if (a->kind == HMI_ACT_COIL_OFF)                          ok = queue_write(s, true, a->address, 0);
-                else if (a->kind == HMI_ACT_REG_OFF)                      ok = queue_seq(s, a->address, a->seq, a->seq_len);
-                else if (a->kind == HMI_ACT_SET_ENUM && a->stop_all)   ok = queue_write(s, false, a->address, 0);
-                else continue;
-                if (ok) sent = true; else failed = true;
-            }
-        }
-        if (sent && !failed) {
-            LOG(al, now_ms, ALARM_SEV_ESTOP, "%s: STOP ALL sent", s->info.label);
-            stopped++;
-        } else {
-            LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: %s - stop it at the machine", s->info.label,
-                sent ? "stop only partly sent" : failed ? "stop write FAILED" : "no stop control");
-            missed++;
-        }
+        if (s->info.state == HMI_DEV_EMPTY || !s->info.profile) continue;
+        uint8_t r = stop_one(s, al, now_ms);
+        if (r == HMI_STOP_SENT) stopped++;
+        else if (r != HMI_STOP_NOTHING) missed++;
     }
     /* Machines on the network this HMI could not take on: STOP ALL does not reach them */
     for (int i = 0; i < OVERFLOW_MAX; i++) {
@@ -895,6 +901,24 @@ uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, u
     }
     if (not_stopped) *not_stopped = missed;
     return stopped;
+}
+
+uint8_t hmi_devmgr_stop_pending(hmi_alarm_supervisor_t *al, uint32_t now_ms)
+{
+    uint8_t sent = 0;
+    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
+        slot_t *s = &s_slots[i];
+        if (s->info.state != HMI_DEV_ONLINE || !s->info.profile) continue;
+        uint8_t r = s->info.stop_result;
+        if (r != HMI_STOP_NONE && r != HMI_STOP_OFFLINE) continue;   /* a failed stop is reported, not retried in a loop */
+        if (stop_one(s, al, now_ms) == HMI_STOP_SENT) sent++;
+    }
+    return sent;
+}
+
+void hmi_devmgr_stop_clear(void)
+{
+    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) s_slots[i].info.stop_result = HMI_STOP_NONE;
 }
 
 uint8_t hmi_devmgr_estop(bool trip, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms)

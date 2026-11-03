@@ -68,15 +68,15 @@ must never wonder how to stop the machine or what a colour means (ISA-101, ISA-1
 | Rule | How it shows |
 |---|---|
 | Colour has one meaning each | Green = normal / running / online (default "status" scheme, the convention of machine indicator lights, IEC 60073); `--color-scheme high-performance` makes those grey for sites that follow ISA-101 strictly. Amber and red are only for warnings, alarms and stop. Controls are neutral; the one primary action is a light button, not a coloured one |
-| Red means stop | STOP ALL and device Stop buttons are the only red controls. Resetting a latch is never red |
+| Red means stop | EMERGENCY and device Stop buttons are the only red controls. Resetting a latch is never red |
 | Priority is never colour alone | Critical and stop: red diamond. Warning: amber triangle. Info: blue circle. Always with the word |
-| STOP ALL is always there | Same place on every screen, 40 px high, never covered by a dialog, keyboard key `E` |
+| EMERGENCY is always there | Same place on every screen, 40 px high, never covered by a dialog, keyboard key `E`; when pressed the whole panel turns red |
 | Every alarm is reachable | The Alarms screen lists all active alarms by priority, then unacknowledged, then newest, four per page on a 7" panel with Previous / Next; History is a separate view |
 | Acknowledge what you read | Each unacknowledged alarm has its own Ack button; Acknowledge all is for a known flood |
 | Instructions are never cut | The banner gives the top alarm and both steps of its guidance on their own lines; a test fails the build if any device's guidance does not fit a 7" panel |
 | Real time | Alarm and event times are local wall-clock time, as in the shift log |
 | Big targets | Header controls 40 px, alarm Ack buttons 38 px, faceplate buttons up to 48 px |
-| No unreadable screens | Below 640x400 the panel shows only the alarm state and STOP ALL, and says which size it needs |
+| No unreadable screens | Below 640x400 the panel shows only the alarm state and EMERGENCY, and says which size it needs |
 | Say why | Blocked controls name the interlock (*Blocked: Stop latch*); stale data and offline devices say so; an empty screen explains itself |
 
 ## HMI heartbeat (PLC side)
@@ -128,14 +128,18 @@ Every control works the same way, following the faceplate convention of ISA-101 
    writes and stop-latch resets ask "Are you sure?" first.
 6. **Record.** Every command goes into the signed audit log with the role, what and the value.
 
-**STOP ALL** (header, also key `E`) sends a stop request to every device and is never refused,
+**EMERGENCY** (header, also key `E`) sends a stop request to every device and is never refused,
 whatever the role. Commands still waiting to be sent are cancelled first (a start queued a moment
 earlier is never sent after the stop), a pulse in progress is released, then each device gets its
 stop latch, every Stop / Off control, and the mode selectors that stop it (`HMI_A_MODE_STOPS` in a
-module) go to 0. Devices that are offline, or that have no way to be stopped, are named in the log
-and on screen. It is a software stop, not the machine's emergency stop: that must stay a
-hardwired device (ISO 13850, IEC 60204-1). **Reset stop** on the Alarms screen needs the Operator
-role, an acknowledged stop alarm and a confirmation, and does not restart anything.
+module) go to 0. The whole panel then turns red and lists every device with its outcome (stop
+sent, nothing to stop, NOT STOPPED: offline / no stop control / not on this HMI). It stays latched:
+no other control works, every device that comes back online or is found meanwhile is stopped too,
+and the HMI heartbeat is withheld. **Reset EMERGENCY** needs the Maintenance role and a
+confirmation; it only leaves the red screen and sends nothing to the machines. It is a software
+stop, not the machine's emergency stop: that must stay a hardwired device (ISO 13850,
+IEC 60204-1). **Reset stop** on the Alarms screen needs the Operator role, an acknowledged stop
+alarm and a confirmation, and does not restart anything.
 
 Roles: Viewer (watch only), Operator, Maintenance, Engineer. The factory PINs (`1111`, `2222`,
 `3333`) are refused at sign-in until each role has a site PIN set with `--set-pin` (IEC 62443-4-2
@@ -164,9 +168,9 @@ the time of writing):
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_core` | 11,513 | tags, alarms (incl. per-alarm acknowledge and summary order), guidance fits a 7" banner, header / alarm-screen geometry and touch-target sizes, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
-| `test_integration` | 558 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery, HMI heartbeat loss stopping the tank, STOP ALL on every machine type (also offline and mid-pulse) |
-| `test_core` with the MCU profile | 8,999 | the same checks with the small-device limits |
+| `test_core` | 11,794 | tags, alarms (incl. per-alarm acknowledge and summary order), guidance fits a 7" banner, header / alarm-screen geometry and touch-target sizes, RBAC and the commissioning gate, HMAC-SHA256 (RFC 4231) and HKDF (RFC 5869) vectors, key separation, signed vault, device key, Modbus codec, layouts and alarm-row geometry, renderer bounds, audit log forgery / truncation / wrong-key detection and flush policy, UTC formatting, HAL |
+| `test_integration` | 570 | the runtime driving the simulator's device models: module and device agreement, every control, Altivar run / reverse / fault / reset, meter float decoding, link loss and recovery, HMI heartbeat loss stopping the tank, EMERGENCY on every machine type (also offline and mid-pulse), a machine that comes back online during an EMERGENCY stopped too |
+| `test_core` with the MCU profile | 9,280 | the same checks with the small-device limits |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery (real sockets on Linux and Windows) |
 
 The Raspberry Pi targets (`make CC=aarch64-linux-gnu-gcc`, `make CC=arm-linux-gnueabihf-gcc`, see
@@ -184,7 +188,7 @@ on `src/` and `include/`.
 | Target | Status |
 |---|---|
 | Windows 10/11, Harmony P6 (Windows 10 IoT) | earlier builds run on Windows; the current code is built with MinGW and its tests pass under Wine, but it has not been run on Windows itself since the security changes (in particular the `--set-pin` console prompt). Not yet run on a P6 |
-| Linux PC (x86-64) | built, all tests; runs as a desktop window (tested on a virtual X display: STOP ALL clicked and confirmed at the simulator), install / uninstall script tested |
+| Linux PC (x86-64) | built, all tests; runs as a desktop window (tested on a virtual X display: the stop button clicked and confirmed at the simulator), install / uninstall script tested |
 | Raspberry Pi 2/3/4/5 (32- and 64-bit, framebuffer, evdev) | cross-built; all tests pass under qemu; not run on a real Pi screen |
 | ESP32-S3 (ESP-IDF 5.3) | port written; not compiled |
 | Harmony ST6 panel | not applicable: Schneider's runtime runs there |

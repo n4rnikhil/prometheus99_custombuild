@@ -366,6 +366,13 @@ static void text_center(hmi_renderer_t *r, const hmi_font_t *f, hmi_rect_t b, co
     hmi_draw_text(r, f, b.x + (b.w - hmi_text_width(f, s)) / 2, b.y + (b.h - f->line_h) / 2, s, c);
 }
 
+/* The EMERGENCY button label, with some air on narrow (compact-header) buttons */
+static void emergency_label(hmi_renderer_t *r, hmi_rect_t b, uint8_t c)
+{
+    const hmi_font_t *f = hmi_text_width(&hmi_font_title, "EMERGENCY") + 16 <= b.w ? &hmi_font_title : &hmi_font_body_b;
+    text_center(r, f, b, "EMERGENCY", c);
+}
+
 /* Draw at most max_w pixels of text; long strings end in "..." */
 static void text_fit(hmi_renderer_t *r, const hmi_font_t *f, int x, int y, int max_w, const char *s, uint8_t c)
 {
@@ -1281,11 +1288,12 @@ static void render_header(hmi_renderer_t *r, const hmi_view_t *v)
     if (role < 0 || role > 3) role = 0;
     chip(r, hmi_layout_role_pill(sw, sh), role ? C_TEXT : C_DIM, roles[role], C_TEXT);
 
-    /* STOP ALL: a software stop request to every device. Deliberately not labelled E-STOP and
-     * not red-on-yellow: those belong to the hardwired emergency stop (ISO 13850, IEC 60204-1). */
+    /* EMERGENCY: anyone may press it; it sends a software stop to every device and locks the HMI
+     * on the red EMERGENCY screen. Deliberately not labelled E-STOP and not red-on-yellow: those
+     * belong to the hardwired emergency stop at each machine (ISO 13850, IEC 60204-1). */
     hmi_rect_t e = hmi_layout_estop_button(sw, sh);
     hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, 10, C_RED);
-    text_center(r, &hmi_font_title, e, "STOP ALL", C_WHITE);
+    emergency_label(r, e, C_WHITE);
 }
 
 static void render_banner(hmi_renderer_t *r, const hmi_view_t *v)
@@ -1706,7 +1714,7 @@ static void render_settings(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
         }
         y += 4;
         static const struct { hmi_command_t c; const char *n; } perms[] = {
-            { HMI_CMD_ESTOP, "Stop all (software)" }, { HMI_CMD_ACK_ALARMS, "Acknowledge alarms" },
+            { HMI_CMD_ESTOP, "EMERGENCY (stop all)" }, { HMI_CMD_EMERGENCY_RESET, "Reset EMERGENCY" }, { HMI_CMD_ACK_ALARMS, "Acknowledge alarms" },
             { HMI_CMD_PUMP_TOGGLE, "Operate pump / valve" }, { HMI_CMD_WATCHDOG_RESET, "Reset watchdog" },
             { HMI_CMD_INJECT_FAULT, "Fault injection" },
         };
@@ -1957,7 +1965,9 @@ static void render_confirm(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
     int sw = r->screen_w, sh = r->screen_h;
     text_fit(r, &hmi_font_title, m.x + 20, m.y + 20, m.w - 40, v->cf_title ? v->cf_title : "Confirm", C_TEXT);
     if (v->cf_detail) text_fit(r, &hmi_font_body, m.x + 20, m.y + 58, m.w - 40, v->cf_detail, C_MUTED);
-    text_fit(r, &hmi_font_caption, m.x + 20, m.y + 86, m.w - 40, "The command is sent to the PLC immediately and logged.", C_DIM);
+    text_fit(r, &hmi_font_caption, m.x + 20, m.y + 86, m.w - 40,
+             v->emergency ? "Nothing is sent to the machines. The reset is logged."
+                          : "The command is sent to the PLC immediately and logged.", C_DIM);
     button(r, hmi_layout_confirm_button(sw, sh, false), "Cancel", BTN_PLAIN);
     button(r, hmi_layout_confirm_button(sw, sh, true), v->cf_ok ? v->cf_ok : "Confirm", v->cf_danger ? BTN_FILLED_RED : BTN_PRIMARY);
 }
@@ -2038,14 +2048,14 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
 /* ========================================================================= */
 
 /* Below the supported display size the full layout cannot be drawn without overlap, and an
- * unreadable HMI is worse than a plain one: show what this panel is, the alarm state and STOP ALL. */
+ * unreadable HMI is worse than a plain one: show what this panel is, the alarm state and EMERGENCY. */
 static void render_too_small(hmi_renderer_t *r, const hmi_view_t *v)
 {
     int sw = r->screen_w, sh = r->screen_h;
     hmi_draw_rect(r, 0, 0, sw, sh, C_BG);
     hmi_rect_t e = hmi_layout_estop_button(sw, sh);
     hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, 10, C_RED);
-    text_center(r, &hmi_font_title, e, "STOP ALL", C_WHITE);
+    emergency_label(r, e, C_WHITE);
     text_fit(r, &hmi_font_title, 12, 14, e.x - 24, "Prometheus HMI", C_TEXT);
     int y = HMI_LAYOUT_HEADER_H + 8;
     char t[96];
@@ -2063,6 +2073,109 @@ static void render_too_small(hmi_renderer_t *r, const hmi_view_t *v)
     text_fit(r, &hmi_font_body, 12, y + 22, sw - 24, "Operate the plant from a supported panel.", C_MUTED);
 }
 
+/* The EMERGENCY screen: the whole display red, what happened, and machine by machine whether the
+ * software stop reached it. Shown at every display size, over every other screen. */
+static const char *stop_text(uint8_t res, bool *missed)
+{
+    *missed = false;
+    switch (res) {
+        case HMI_STOP_SENT:       return "Stop sent";
+        case HMI_STOP_NOTHING:    return "Nothing to stop";
+        case HMI_STOP_OFFLINE:    *missed = true; return "NOT STOPPED - offline: stop it at the machine";
+        case HMI_STOP_FAILED:     *missed = true; return "NOT STOPPED - stop failed: stop it at the machine";
+        case HMI_STOP_NO_CONTROL: *missed = true; return "NOT STOPPED - no stop control: stop it at the machine";
+        default:                  return "Stopping...";
+    }
+}
+
+static void emergency_row(hmi_renderer_t *r, hmi_rect_t row, const char *name, const char *status, bool missed)
+{
+    if (!band_hits(r, row.y, row.h)) return;
+    if (missed) hmi_draw_round_rect(r, row.x, row.y, row.w, row.h, 8, C_BG);   /* NOT stopped: stands out */
+    uint8_t tc = missed ? C_TEXT : C_WHITE;
+    int ty = row.y + (row.h - hmi_font_body_b.line_h) / 2;
+    int name_w = row.w * 2 / 5;
+    text_fit(r, &hmi_font_body_b, row.x + 10, ty, name_w - 16, name, tc);
+    text_fit(r, &hmi_font_body_b, row.x + name_w, ty, row.w - name_w - 10, status, tc);
+}
+
+static void render_emergency(hmi_renderer_t *r, const hmi_view_t *v)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    hmi_draw_rect(r, 0, 0, sw, sh, C_RED);
+
+    /* header: symbol, title, the EMERGENCY button in its usual place (pressing it again re-sends) */
+    if (band_hits(r, 0, HMI_LAYOUT_HEADER_H)) {
+        int cy = HMI_LAYOUT_HEADER_H / 2;
+        hmi_draw_circle(r, HMI_LAYOUT_MARGIN + 14, cy, 14, C_WHITE);
+        hmi_rect_t mark = { HMI_LAYOUT_MARGIN, cy - 14, 28, 28 };
+        text_center(r, &hmi_font_headline, mark, "!", C_RED);
+        hmi_rect_t e = hmi_layout_estop_button(sw, sh);
+        text_fit(r, &hmi_font_headline, HMI_LAYOUT_MARGIN + 38, cy - hmi_font_headline.line_h / 2,
+                 e.x - HMI_LAYOUT_MARGIN - 50, "EMERGENCY", C_WHITE);
+        hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, 10, C_WHITE);
+        emergency_label(r, e, C_RED);
+        hmi_draw_rect(r, 0, HMI_LAYOUT_HEADER_H - 2, sw, 2, C_WHITE);
+    }
+
+    /* what happened */
+    int missed = v->emergency_unreached, pending = 0;
+    for (uint8_t i = 0; v->devices && i < v->ndev; i++) {
+        bool m;
+        stop_text(v->devices[i].stop_result, &m);
+        if (m) missed++;
+        if (v->devices[i].stop_result == HMI_STOP_NONE) pending++;
+    }
+    hmi_rect_t t = hmi_layout_emergency_title(sw, sh);
+    if (band_hits(r, t.y, t.h)) {
+        const char *head = missed ? "NOT EVERY MACHINE COULD BE STOPPED"
+                         : pending ? "STOPPING ALL MACHINES..." : "ALL MACHINES STOPPED BY SOFTWARE";
+        text_fit(r, &hmi_font_headline, t.x, t.y, t.w, head, C_WHITE);
+        char when[24], line[112];
+        fmt_clock(when, sizeof(when), v, v->emergency_at_ms);
+        snprintf(line, sizeof(line), "Pressed at %s. This is a software stop over the network.", when);
+        text_fit(r, &hmi_font_body_b, t.x, t.y + 40, t.w, line, C_WHITE);
+        text_fit(r, &hmi_font_body_b, t.x, t.y + 64, t.w,
+                 "Also press the hardwired E-stop at each machine. Machines stay stopped after Reset.", C_WHITE);
+    }
+
+    /* machine by machine */
+    int cap = hmi_layout_emergency_rows(sw, sh) * hmi_layout_emergency_cols(sw, sh);
+    int items = v->ndev + (v->emergency_unreached ? 1 : 0);
+    int shown = items <= cap ? items : cap - 1;           /* the last place says how many more */
+    for (int k = 0; k < shown && k < items; k++) {
+        hmi_rect_t row = hmi_layout_emergency_row(sw, sh, k);
+        if (row.w == 0) break;
+        if (k < v->ndev) {
+            bool m;
+            const char *st = stop_text(v->devices[k].stop_result, &m);
+            emergency_row(r, row, v->devices[k].label, st, m);
+        } else {
+            char name[48];
+            snprintf(name, sizeof(name), "%u machine(s) not on this HMI", (unsigned)v->emergency_unreached);
+            emergency_row(r, row, name, "NOT STOPPED - stop them at the machine", true);
+        }
+    }
+    if (shown >= 0 && shown < items) {
+        hmi_rect_t row = hmi_layout_emergency_row(sw, sh, shown < 0 ? 0 : shown);
+        int more_missed = 0;
+        for (int k = shown; k < v->ndev; k++) { bool m; stop_text(v->devices[k].stop_result, &m); if (m) more_missed++; }
+        if (v->emergency_unreached && shown <= v->ndev) more_missed++;
+        char name[48], st[48];
+        snprintf(name, sizeof(name), "+ %d more", items - shown);
+        if (more_missed) snprintf(st, sizeof(st), "%d of them NOT STOPPED", more_missed);
+        else snprintf(st, sizeof(st), "all stopped");
+        if (row.w) emergency_row(r, row, name, st, more_missed != 0);
+    }
+
+    /* Reset: Maintenance, after a confirmation. It only leaves this screen. */
+    hmi_rect_t b = hmi_layout_emergency_reset(sw, sh);
+    if (b.w > 0 && band_hits(r, b.y, b.h)) {
+        hmi_draw_round_frame(r, b.x, b.y, b.w, b.h, 12, C_BG, C_WHITE);
+        text_center(r, &hmi_font_title, b, "Reset EMERGENCY (Maintenance)", C_TEXT);
+    }
+}
+
 void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t *v)
 {
     if (!r || !v || band_idx < 0 || band_idx >= r->band_count) return;
@@ -2072,6 +2185,16 @@ void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t 
     /* Clear band (rows beyond screen_h in the last band are harmless) */
     memset(r->buffer, (C_BG << 4) | C_BG, (size_t)r->band_h * (size_t)(r->screen_w / 2));
 
+    if (v->emergency) {
+        render_emergency(r, v);
+        if (v->modal != HMI_MODAL_NONE && !HMI_LAYOUT_TOO_SMALL(r->screen_w, r->screen_h)) {
+            scrim_band(r);
+            render_modal(r, v);                          /* sign-in / confirm for the Reset */
+        } else {
+            render_toast(r, v);
+        }
+        return;
+    }
     if (HMI_LAYOUT_TOO_SMALL(r->screen_w, r->screen_h)) { render_too_small(r, v); return; }
     bool banner = v->alarms && hmi_layout_banner_shown(v->active_screen, v->alarms->current_action.active);
     hmi_rect_t content = hmi_layout_content(r->screen_w, r->screen_h, banner);
@@ -2097,11 +2220,11 @@ void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t 
     render_dock(r, v);
     if (v->modal != HMI_MODAL_NONE) {
         scrim_band(r);
-        /* keep STOP ALL at full strength: it stays operable over dialogs */
+        /* keep EMERGENCY at full strength: it stays operable over dialogs */
         hmi_rect_t e = hmi_layout_estop_button(r->screen_w, r->screen_h);
         if (band_hits(r, e.y, e.h)) {
             hmi_draw_round_rect(r, e.x, e.y, e.w, e.h, 10, C_RED);
-            text_center(r, &hmi_font_title, e, "STOP ALL", C_WHITE);
+            emergency_label(r, e, C_WHITE);
         }
         render_modal(r, v);
     } else {

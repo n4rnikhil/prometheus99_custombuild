@@ -54,7 +54,7 @@ the HMI's integration test only, to check that each driver matches the device it
 - Communication loss is detected per device, raised as an alarm, and recovered without operator
   action.
 - Up to 8 devices per HMI, paged on small screens. Devices listed with `--plc` get a place first;
-  any further device is named, raised as a warning, and reported by STOP ALL as not stopped.
+  any further device is named, raised as a warning, and reported by EMERGENCY as not stopped.
 
 **Operator interface (ISA-101)**
 - Process overview, per-device faceplates, diagnostics, telemetry, alarms and settings screens.
@@ -73,11 +73,16 @@ the HMI's integration test only, to check that each driver matches the device it
 - Alarm sound: the panel's own two-tone signal on the PC's speakers, plus an optional wired horn
   or stack-light output (Linux GPIO, fail-safe option).
 
-**STOP ALL**
-- Always visible, never blocked by a dialog or by sign-in, keyboard key `E`.
+**EMERGENCY**
+- One red button, always visible, never blocked by a dialog or by sign-in: anyone can press it
+  (keyboard key `E`).
 - Cancels queued commands, then sends every device its stop latch, its stop controls and its
-  stopping mode; devices that are offline or cannot be stopped are named on screen.
-- An HMI heartbeat lets the PLC program stop the machine itself if the HMI or its cable is lost.
+  stopping mode. The whole panel turns red and lists, machine by machine, what was stopped and
+  what was **not** (offline, no stop control, not on this HMI).
+- The panel stays locked on the red screen; a machine that comes back online meanwhile is stopped
+  too. Only Maintenance can reset it, after a confirmation, and the reset restarts nothing.
+- An HMI heartbeat lets the PLC program stop the machine itself if the HMI or its cable is lost;
+  it is withheld during an EMERGENCY so those PLCs also go to their safe state.
 
 **Security (IEC 62443-4-2)**
 - Roles (Viewer, Operator, Maintenance, Engineer) with least privilege, auto-logout and PIN lockout.
@@ -95,7 +100,8 @@ the HMI's integration test only, to check that each driver matches the device it
 | | |
 |:---:|:---:|
 | <img src="docs/img/process.png" width="400"><br>**Process overview** | <img src="docs/img/faceplate.png" width="400"><br>**Device faceplate** |
-| <img src="docs/img/stop_all.png" width="400"><br>**After STOP ALL: alarm banner with guidance** | <img src="docs/img/alarms.png" width="400"><br>**Alarm summary** |
+| <img src="docs/img/emergency.png" width="400"><br>**EMERGENCY: every machine and whether it stopped** | <img src="docs/img/stop_all.png" width="400"><br>**After the reset: stop alarm with guidance** |
+| <img src="docs/img/alarms.png" width="400"><br>**Alarm summary** | |
 | <img src="docs/img/diagnostics.png" width="400"><br>**Diagnostics: fieldbus loop and register map** | <img src="docs/img/settings.png" width="400"><br>**Access control and system status** |
 
 <p align="center">
@@ -145,9 +151,9 @@ choose a role and enter its PIN:
 
 | Role | PIN | Can |
 |---|---|---|
-| Viewer | none | watch only; STOP ALL is always allowed |
+| Viewer | none | watch only; EMERGENCY is always allowed |
 | Operator | `1111` | start / stop, setpoints, acknowledge alarms, reset a stop |
-| Maintenance | `2222` | everything above, plus tuning parameters and watchdog reset |
+| Maintenance | `2222` | everything above, plus tuning parameters, watchdog reset and EMERGENCY reset |
 | Engineer | `3333` | everything above, plus raw register writes and fault injection |
 
 Test mode is for the bench only. See [Commissioning a real plant](#commissioning-a-real-plant).
@@ -160,15 +166,15 @@ Test mode is for the bench only. See [Commissioning a real plant](#commissioning
 | Operate a device | tap the control on its faceplate; the panel asks for the PIN of the role it needs |
 | See more devices | up to 8 devices per HMI; on a small screen use **Next >** at the bottom of the Process screen |
 | Change a setpoint | tap **Set ...**, type the value in the keypad (the allowed range is shown) |
-| Stop everything | press **STOP ALL** (top right) or the `E` key |
+| Stop everything | press **EMERGENCY** (top right) or the `E` key: the panel turns red until Maintenance resets it |
 | Handle an alarm | read the banner guidance, then **Ack** the alarm on the Alarms screen |
 | Silence the horn | **Silence horn** on the Alarms screen |
-| Restart after STOP ALL | release any hardwired E-stop, acknowledge the alarm, then **Reset stop** on the Alarms screen. Nothing restarts by itself |
+| Restart after an EMERGENCY | Maintenance presses **Reset EMERGENCY** and confirms; then release any hardwired E-stop, acknowledge the stop alarm and press **Reset stop** on the Alarms screen. Nothing restarts by itself |
 
-> **STOP ALL is not an emergency stop.** It sends stop requests over Modbus and depends on this
-> software, the network and each PLC program. It never replaces the hardwired emergency stop that
-> ISO 13850 and IEC 60204-1 require on the machine, which is why it is labelled STOP ALL, not
-> E-STOP.
+> **The EMERGENCY button is a software stop, not a certified emergency stop.** It sends stop
+> requests over Modbus and depends on this software, the network and each PLC program. It never
+> replaces the hardwired emergency stop that ISO 13850 and IEC 60204-1 require on every machine:
+> in an emergency, press the hardwired E-stop as well. The red screen says so.
 
 ## Supported devices
 
@@ -291,9 +297,9 @@ Both write SHA-256 checksums to `dist/SHA256SUMS.txt`.
 
 | Suite | Checks | Covers |
 |---|---:|---|
-| `test_core` | 11,513 | tags, alarms and summary order, layouts and touch-target sizes, access control and commissioning, HMAC-SHA256 / HKDF test vectors, signed vault and audit log (forgery, truncation, wrong key), Modbus codec, renderer bounds, alarm tone |
-| `test_core` (MCU profile) | 8,999 | the same checks with the small-device limits |
-| `test_integration` | 558 | the runtime driving the simulator's device models: every control, STOP ALL on every machine type and on 8 devices at once, devices beyond the limit, reset pulses, drive faults and resets, link loss and recovery, heartbeat loss |
+| `test_core` | 11,794 | tags, alarms and summary order, layouts and touch-target sizes, access control and commissioning, HMAC-SHA256 / HKDF test vectors, signed vault and audit log (forgery, truncation, wrong key), Modbus codec, renderer bounds, alarm tone |
+| `test_core` (MCU profile) | 9,280 | the same checks with the small-device limits |
+| `test_integration` | 570 | the runtime driving the simulator's device models: every control, EMERGENCY on every machine type and on 8 devices at once, devices beyond the limit, reset pulses, drive faults and resets, link loss and recovery, heartbeat loss |
 | `test_modbus_faults` | 74 | malformed frames, timeouts, exceptions, stale transaction ids, recovery over real sockets |
 | `test_plc_models` | 1,243 | the simulator's device models |
 
@@ -345,14 +351,14 @@ no IEC 61508, IEC 62061 or ISO 13849 claim is made.
 |---|---|---|
 | **ISA-101** (HMI design) | colour discipline, priority by shape + colour + word, neutral controls with red reserved for stop, large touch targets, untruncated guidance, small-screen fallback, outdoor theme | review with operators on a real panel; a site style guide |
 | **ISA-18.2 / IEC 62682** (alarm management) | per-alarm state machine, priorities, sorted and paged summary, history, per-alarm acknowledge, horn with silence and wired output, operator guidance, communication-loss alarms | shelving, out-of-service, master alarm database |
-| **ISO 13850 / IEC 60204-1** (stop functions) | STOP ALL never gated or covered; stop-latch reset needs a role, an acknowledged alarm and a confirmation, and never restarts anything; HMI heartbeat to the PLC | STOP ALL is a software stop, not an emergency stop |
+| **ISO 13850 / IEC 60204-1** (stop functions) | EMERGENCY never gated or covered, latched until a confirmed Maintenance reset that restarts nothing; stop-latch reset needs a role, an acknowledged alarm and a confirmation; HMI heartbeat to the PLC, withheld during an EMERGENCY | the EMERGENCY button is a software stop, not a certified emergency stop |
 | **IEC 62443-4-2** (component security) | roles with least privilege, auto-logout, PIN lockout, keyed PIN hashes, mandatory site PINs, signed audit log, per-purpose keys (HKDF), secret files restricted to the HMI account | Modbus TCP security (segment the network); per-person accounts; remote log forwarding |
 | **Modbus** Application Protocol v1.1b3, TCP/IP v1.0b | FC 01, 03, 05, 06, 43/14 with strict frame checks; fault-injection tested | FC 02, 04, 15, 16 (no current module needs them) |
 
 ## Status and limitations
 
 - **Tested:** all suites above; the Windows build and installer (run under Wine); the Linux desktop
-  window, STOP ALL and the alarm tone end to end against the simulator; discovery over real sockets.
+  window, EMERGENCY and the alarm tone end to end against the simulator; discovery over real sockets.
 - **Not yet run on target hardware:** a physical Windows panel PC, a Raspberry Pi with a touch
   screen, and the ESP32 port (not compiled).
 - **Not verified against real devices:** register maps other than the Altivar status and command
@@ -365,7 +371,7 @@ no IEC 61508, IEC 62061 or ISO 13849 claim is made.
 
 | Document | Contents |
 |---|---|
-| **[User Manual](docs/USER_MANUAL.md)** | installation, operation, alarms, STOP ALL, simulator, configuration, commissioning, troubleshooting |
+| **[User Manual](docs/USER_MANUAL.md)** | installation, operation, alarms, EMERGENCY, simulator, configuration, commissioning, troubleshooting |
 | [hmi-runtime/README.md](hmi-runtime/README.md) | all options, operator guide, interface design rules, driver modules, heartbeat, tests |
 | [plc-simulator/README.md](plc-simulator/README.md) | simulator apps, options, devices, network mode |
 | [docs/LAB_DEPLOYMENT.md](docs/LAB_DEPLOYMENT.md) | running the HMI on lab panels: what works and what does not |

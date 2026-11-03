@@ -107,9 +107,15 @@ static hal_atomic_t g_running = 1;
 #define CMD_BIT_SILENCE      (1 << 1)
 #define CMD_BIT_ESTOP        (1 << 2)
 #define CMD_BIT_ESTOP_RESET  (1 << 3)
+#define CMD_BIT_EMERG_RESET  (1 << 4)
 #define CMD_BIT_INJECT_FAULT (1 << 6)
 #define CMD_BIT_WD_RESET     (1 << 7)
 static hal_atomic_t g_cmd_bits;
+/* EMERGENCY: set by the UI the moment the button is pressed, cleared by a confirmed Maintenance
+ * reset. While it is set the fieldbus thread refuses every operator command, stops every machine
+ * that appears or comes back online, and stops the HMI heartbeat so PLCs that watch it go safe. */
+static hal_atomic_t g_emergency_on;
+static hal_atomic_t g_emerg_unreached;   /* fieldbus -> UI: machines on the network not on this HMI */
 /* Per-alarm acknowledge requests, one bit per tag (UI sets, fieldbus drains): lock-free and no
  * request is lost however fast the operator taps. */
 #define ACK_WORDS ((HMI_MAX_TAGS + 31) / 32)
@@ -294,20 +300,25 @@ static void fb_handle_commands(int32_t bits, hmi_tag_table_t *tags, hmi_alarm_su
 {
     if (bits & CMD_BIT_ESTOP) {
         hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_ESTOP, ALARM_PT_NORMAL,
-                             "STOP ALL commanded by operator (software stop)");
+                             "EMERGENCY pressed: software stop to every machine");
         uint8_t missed = 0;
         uint8_t stopped = hmi_devmgr_stop_all(tags, alarms, now_ms, &missed);
         char msg[57];
         if (missed) {
-            snprintf(msg, sizeof(msg), "STOP ALL: %u NOT stopped - use the hardwired E-stop", (unsigned)missed);
+            snprintf(msg, sizeof(msg), "EMERGENCY: %u NOT stopped - use the hardwired E-stop", (unsigned)missed);
             hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_CRITICAL, ALARM_PT_NORMAL, msg);
         } else if (stopped == 0) {
             hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_WARNING, ALARM_PT_NORMAL,
-                                 "STOP ALL: no device to stop");
+                                 "EMERGENCY: no device to stop");
         } else {
-            snprintf(msg, sizeof(msg), "STOP ALL: stop sent to %u device(s)", (unsigned)stopped);
+            snprintf(msg, sizeof(msg), "EMERGENCY: stop sent to %u device(s)", (unsigned)stopped);
             hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_ESTOP, ALARM_PT_NORMAL, msg);
         }
+    }
+    if (bits & CMD_BIT_EMERG_RESET) {
+        hmi_devmgr_stop_clear();
+        hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, ALARM_PT_NORMAL,
+                             "EMERGENCY reset: machines stay stopped");
     }
     if (bits & CMD_BIT_ACK) {
         uint16_t n = hmi_alarms_acknowledge_all(alarms, now_ms);
@@ -355,7 +366,7 @@ static void fb_discard_device_commands(hmi_alarm_supervisor_t *alarms, uint32_t 
     int32_t head = hal_atomic_load(&g_dev_cmd_head);
     if (tail == head) return;
     char msg[57];
-    snprintf(msg, sizeof(msg), "STOP ALL: %u operator command(s) cancelled", (unsigned)(uint32_t)(head - tail));
+    snprintf(msg, sizeof(msg), "EMERGENCY: %u operator command(s) cancelled", (unsigned)(uint32_t)(head - tail));
     hmi_alarms_log_event(alarms, now_ms, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_WARNING, ALARM_PT_NORMAL, msg);
     hal_atomic_store(&g_dev_cmd_tail, head);
 }
@@ -474,13 +485,18 @@ static void fieldbus_thread(void *param)
         /* 2. Operator commands (already authorised by the UI thread) */
         bool stall = false;
         int32_t bits = hal_atomic_exchange(&g_cmd_bits, 0);
-        /* The HMI heartbeat to the PLCs only while the UI thread is alive: a frozen screen must let
-         * the machines go to their safe state, not look like a healthy operator station. */
-        hmi_devmgr_heartbeat_enable((uint32_t)(now_ms - (uint32_t)hal_atomic_load(&g_hb_ui_ms)) < HMI_WATCHDOG_MAX_AGE_MS);
-        /* STOP ALL overrides every operator command still waiting in the UI -> fieldbus ring: a Start
+        bool emergency = hal_atomic_load(&g_emergency_on) != 0;
+        /* The HMI heartbeat to the PLCs only while the UI thread is alive and there is no EMERGENCY:
+         * a frozen screen or an EMERGENCY must let the machines go to their safe state. */
+        hmi_devmgr_heartbeat_enable(!emergency &&
+                                    (uint32_t)(now_ms - (uint32_t)hal_atomic_load(&g_hb_ui_ms)) < HMI_WATCHDOG_MAX_AGE_MS);
+        /* EMERGENCY overrides every operator command still waiting in the UI -> fieldbus ring: a Start
          * tapped a moment earlier must never reach a machine after the stop. */
-        if (bits & CMD_BIT_ESTOP) fb_discard_device_commands(&alarms, now_ms);
+        if ((bits & CMD_BIT_ESTOP) || emergency) fb_discard_device_commands(&alarms, now_ms);
         if (bits) fb_handle_commands(bits, &tags, &alarms, &wd, now_ms, &stall);
+        /* While it lasts, every machine that appears or comes back online is stopped as well */
+        if (emergency) hmi_devmgr_stop_pending(&alarms, now_ms);
+        hal_atomic_store(&g_emerg_unreached, (int32_t)hmi_devmgr_unattached(now_ms));
         for (int w = 0; w < ACK_WORDS; w++) {
             uint32_t m = (uint32_t)hal_atomic_exchange(&g_ack_mask[w], 0);
             for (int b = 0; m && b < 32; b++) {
@@ -651,6 +667,7 @@ static void ui_choose_role(uint8_t role, uint32_t now_ms)
 }
 
 static void ui_start_action(uint8_t slot, uint8_t action, uint8_t option, uint32_t now_ms);
+static void ui_emergency_reset(uint32_t now_ms);
 
 static void ui_pin_submit(uint32_t now_ms)
 {
@@ -667,7 +684,9 @@ static void ui_pin_submit(uint32_t now_ms)
             ui_toast(msg, now_ms);
             ui_cmd_t pend = g_pending_login;
             modal_close();
-            if (pend.active)        /* carry on with the control that asked for the sign-in */
+            if (pend.active && pend.system && pend.sys_cmd == HMI_CMD_EMERGENCY_RESET)
+                ui_emergency_reset(now_ms);   /* carry on with the Reset that asked for the sign-in */
+            else if (pend.active)   /* carry on with the control that asked for the sign-in */
                 ui_start_action(pend.slot, pend.action, pend.has_value ? (uint8_t)pend.value : HMI_FP_NO_OPTION, now_ms);
             break;
         }
@@ -820,8 +839,68 @@ static void ui_ask_confirm_system(hmi_command_t cmd, int32_t bit, const char *ti
     g_modal = HMI_MODAL_CONFIRM;
 }
 
+/* --- EMERGENCY ---------------------------------------------------------------
+ * Anyone may press it, in every state, dialog or not: software stop to every machine, then the
+ * whole HMI turns red and stays locked until Maintenance resets it after a confirmation. The reset
+ * only leaves the red screen: nothing restarts. The hardwired E-stops stay the safety function. */
+static bool     g_emergency;
+static uint32_t g_emergency_at_ms;
+
+static void ui_emergency_press(uint32_t now_ms)
+{
+    hal_atomic_store(&g_emergency_on, 1);                 /* first: no command may slip through */
+    ui_request(HMI_CMD_ESTOP, CMD_BIT_ESTOP, now_ms);     /* never refused */
+    if (!g_emergency) {
+        g_emergency = true;
+        g_emergency_at_ms = now_ms;
+        char ev[41];
+        snprintf(ev, sizeof(ev), "EMERGENCY pressed (role: %s)", hmi_security_role_name(g_security.current_role));
+        ui_post_event(ALARM_SEV_ESTOP, ev);
+    }
+    g_fp_slot = NO_SLOT;                                  /* close every dialog: nothing else may run */
+    modal_close();
+}
+
+static void ui_emergency_reset(uint32_t now_ms)
+{
+    if (!g_emergency) return;
+    hmi_role_t need = hmi_security_required_role(HMI_CMD_EMERGENCY_RESET);
+    if (g_security.current_role < need) {                 /* ask for the PIN, then come back here */
+        pin_clear();
+        g_modal_role = (uint8_t)need;
+        g_modal = HMI_MODAL_PIN;
+        snprintf(g_modal_msg_buf, sizeof(g_modal_msg_buf), "%s sign-in needed: Reset EMERGENCY",
+                 hmi_security_role_name(need));
+        g_modal_msg = g_modal_msg_buf;
+        g_modal_msg_error = false;
+        memset(&g_pending_login, 0, sizeof(g_pending_login));
+        g_pending_login.active = true;
+        g_pending_login.system = true;
+        g_pending_login.slot = NO_SLOT;
+        g_pending_login.sys_cmd = (uint8_t)HMI_CMD_EMERGENCY_RESET;
+        g_pending_login.sys_bit = CMD_BIT_EMERG_RESET;
+        return;
+    }
+    ui_ask_confirm_system(HMI_CMD_EMERGENCY_RESET, CMD_BIT_EMERG_RESET, "Reset the EMERGENCY?",
+                          "Only when the area is safe. Machines stay stopped.",
+                          "Reset EMERGENCY", now_ms);
+}
+
 static void ui_confirmed(const ui_cmd_t *c, uint32_t now_ms)
 {
+    if (c->system && c->sys_cmd == HMI_CMD_EMERGENCY_RESET) {
+        if (!g_emergency) return;
+        ui_request(HMI_CMD_EMERGENCY_RESET, 0, now_ms);   /* role check (and denial report) */
+        if (g_security.current_role < hmi_security_required_role(HMI_CMD_EMERGENCY_RESET)) return;
+        g_emergency = false;
+        hal_atomic_store(&g_emergency_on, 0);
+        hal_atomic_or(&g_cmd_bits, CMD_BIT_EMERG_RESET);
+        char ev[41];
+        snprintf(ev, sizeof(ev), "EMERGENCY reset by %s", hmi_security_role_name(g_security.current_role));
+        ui_post_event(ALARM_SEV_INFO, ev);
+        ui_toast("EMERGENCY reset - machines stay stopped", now_ms);
+        return;
+    }
     if (c->system) ui_request((hmi_command_t)c->sys_cmd, c->sys_bit, now_ms);
     else ui_send(c, now_ms);
 }
@@ -1024,11 +1103,15 @@ static uint8_t g_alarm_order_n;
 
 static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
 {
+    /* EMERGENCY screen: only EMERGENCY, Reset and the dialogs Reset opens accept input */
+    if (g_emergency && g_modal == HMI_MODAL_NONE && hit->kind != HMI_HIT_ESTOP && hit->kind != HMI_HIT_EMERGENCY_RESET)
+        return;
     switch (hit->kind) {
         case HMI_HIT_NAV_TAB:
             if (hit->param < SCREEN_COUNT) g_active_screen = hit->param;
             break;
-        case HMI_HIT_ESTOP:         ui_request(HMI_CMD_ESTOP, CMD_BIT_ESTOP, now_ms); break;
+        case HMI_HIT_ESTOP:         ui_emergency_press(now_ms); break;
+        case HMI_HIT_EMERGENCY_RESET: ui_emergency_reset(now_ms); break;
         case HMI_HIT_THEME:
         case HMI_HIT_SET_THEME:     ui_toggle_theme(); break;
         case HMI_HIT_ROLE:
@@ -1145,10 +1228,11 @@ static bool ui_alarm_row_tap(int x, int y, uint32_t now_ms)
 
 static void ui_handle_key(uint16_t key, bool shift, uint32_t now_ms)
 {
-    if (key == 'E') {                     /* STOP ALL works in every state, dialog or not */
-        ui_request(HMI_CMD_ESTOP, CMD_BIT_ESTOP, now_ms);
+    if (key == 'E') {                     /* EMERGENCY works in every state, dialog or not */
+        ui_emergency_press(now_ms);
         return;
     }
+    if (g_emergency && g_modal == HMI_MODAL_NONE) return;   /* the red screen takes no other keys */
     if (g_modal != HMI_MODAL_NONE) {      /* a dialog owns the keyboard */
         if (key == HMI_K_ESC) {
             if (g_modal == HMI_MODAL_FACEPLATE) g_fp_slot = NO_SLOT;
@@ -1284,6 +1368,9 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
     v->cf_detail = g_cf_detail;
     v->cf_ok     = g_cf_ok;
     v->cf_danger = g_cf_danger;
+    v->emergency = g_emergency;
+    v->emergency_at_ms = g_emergency_at_ms;
+    v->emergency_unreached = (uint8_t)hal_atomic_load(&g_emerg_unreached);
 }
 
 void app_render(app_present_fn present, void *ctx)
@@ -1399,7 +1486,12 @@ void app_pointer_up(int x, int y)
     int32_t tx = 0, ty = 0;
     hmi_gesture_t g = hmi_gesture_end(&g_gesture, x, y, now_ms, g_renderer.screen_w, &tx, &ty);
     hmi_security_register_activity(&g_security, now_ms);
-    if (g == GESTURE_SWIPE_LEFT && g_modal == HMI_MODAL_NONE) {
+    if (g == GESTURE_TAP && g_emergency && g_modal == HMI_MODAL_NONE) {
+        hmi_hit_t hit = hmi_layout_emergency_hit_test(g_renderer.screen_w, g_renderer.screen_h, tx, ty);
+        ui_dispatch_hit(&hit, now_ms);
+    } else if (g_emergency && g_modal == HMI_MODAL_NONE) {
+        /* no swipes or other gestures on the red screen */
+    } else if (g == GESTURE_SWIPE_LEFT && g_modal == HMI_MODAL_NONE) {
         ui_navigate(1);
     } else if (g == GESTURE_SWIPE_RIGHT && g_modal == HMI_MODAL_NONE) {
         ui_navigate(-1);

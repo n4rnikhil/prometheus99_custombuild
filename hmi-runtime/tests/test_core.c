@@ -872,6 +872,78 @@ static void test_renderer(void)
     CHECK(frames == 13 * 2 * ((HMI_MAX_DEVICES + 1) + (SCREEN_COUNT - 1) * 2));   /* process: 0..4 devices; others: 0 and 4 */
 }
 
+/* EMERGENCY: role rules, red-screen geometry and hit test, rendering at every size (guard bytes) */
+static void test_emergency(void)
+{
+    hmi_security_ctx_t sec;
+    hmi_security_init(&sec);                                         /* Viewer */
+    CHECK(hmi_security_authorize(&sec, HMI_CMD_ESTOP, 0));            /* anyone may press it */
+    CHECK(hmi_security_required_role(HMI_CMD_EMERGENCY_RESET) == ROLE_MAINTENANCE);
+    CHECK(!hmi_security_authorize(&sec, HMI_CMD_EMERGENCY_RESET, 0));
+    CHECK(strcmp(hmi_security_command_name(HMI_CMD_EMERGENCY_RESET), "Emergency reset") == 0);
+
+    static const int ok_sizes[][2] = { {640, 400}, {800, 480}, {1024, 600}, {1280, 720}, {1920, 1080}, {3840, 2160} };
+    for (unsigned k = 0; k < sizeof(ok_sizes) / sizeof(ok_sizes[0]); k++) {
+        int w = ok_sizes[k][0], h = ok_sizes[k][1];
+        hmi_rect_t e = hmi_layout_estop_button(w, h), rs = hmi_layout_emergency_reset(w, h);
+        hmi_rect_t t = hmi_layout_emergency_title(w, h), l = hmi_layout_emergency_list(w, h);
+        /* the Reset button is on screen, big enough for a glove, and below the list */
+        CHECK(rs.w >= 200 && rs.h >= 44 && rs.x >= 0 && rs.x + rs.w <= w && rs.y + rs.h <= h);
+        CHECK(t.y >= HMI_LAYOUT_HEADER_H && l.y >= t.y + t.h && l.y + l.h <= rs.y);
+        CHECK(hmi_layout_emergency_rows(w, h) >= 4);                 /* room for at least 4 machines */
+        int cap = hmi_layout_emergency_rows(w, h) * hmi_layout_emergency_cols(w, h);
+        for (int i = 0; i < cap; i++) {
+            hmi_rect_t r = hmi_layout_emergency_row(w, h, i);
+            CHECK(r.w > 0 && r.x >= l.x && r.x + r.w <= l.x + l.w && r.y >= l.y && r.y + r.h <= l.y + l.h);
+        }
+        CHECK(hmi_layout_emergency_row(w, h, cap).w == 0 && hmi_layout_emergency_row(w, h, -1).w == 0);
+        /* only EMERGENCY and Reset answer on the red screen */
+        CHECK(hmi_layout_emergency_hit_test(w, h, e.x + e.w / 2, e.y + e.h / 2).kind == HMI_HIT_ESTOP);
+        CHECK(hmi_layout_emergency_hit_test(w, h, rs.x + rs.w / 2, rs.y + rs.h / 2).kind == HMI_HIT_EMERGENCY_RESET);
+        CHECK(hmi_layout_emergency_hit_test(w, h, l.x + 5, l.y + 5).kind == HMI_HIT_NONE);
+        CHECK(hmi_layout_emergency_hit_test(w, h, 5, h - 5).kind == HMI_HIT_NONE);   /* where the dock was */
+        CHECK(hmi_layout_emergency_hit_test(w, h, w / 2, t.y + 5).kind == HMI_HIT_NONE);
+        /* while a dialog is open over it, EMERGENCY still answers in the normal hit test */
+        CHECK(hmi_layout_hit_test(w, h, 0, false, HMI_MODAL_PIN, NULL, 0, NULL, 0, 0, 0xFF,
+                                  e.x + e.w / 2, e.y + e.h / 2).kind == HMI_HIT_ESTOP);
+    }
+
+    /* the red screen renders at every size, with every stop outcome, a dialog or not */
+    hmi_tag_registry_reset();
+    static hmi_tag_table_t t; hmi_tags_init(&t);
+    static hmi_alarm_supervisor_t al; hmi_alarms_init(&al);
+    hmi_device_info_t devs[HMI_MAX_DEVICES];
+    make_devices(devs, HMI_MAX_DEVICES);
+    for (int d = 0; d < HMI_MAX_DEVICES; d++) devs[d].stop_result = (uint8_t)(d % (HMI_STOP_NO_CONTROL + 1));
+    static const int sizes[][2] = { {1, 1}, {7, 3}, {33, 17}, {320, 240}, {640, 400}, {800, 480}, {1366, 768},
+                                    {1920, 1080}, {9601, 30}, {20000, 50}, {100, 5000} };
+    for (unsigned k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+        memset(g_box.pre, 0xA5, sizeof(g_box.pre));
+        memset(g_box.post, 0x5A, sizeof(g_box.post));
+        hmi_renderer_init(&g_box.r, sizes[k][0], sizes[k][1]);
+        for (int theme = 0; theme < 2; theme++) {
+            hmi_renderer_set_theme(&g_box.r, theme != 0);
+            for (int variant = 0; variant < 6; variant++) {
+                hmi_view_t v;
+                memset(&v, 0, sizeof(v));
+                v.tags = &t; v.alarms = &al; v.sec = &sec;
+                v.devices = devs; v.ndev = (uint8_t)(variant * 2 > HMI_MAX_DEVICES ? HMI_MAX_DEVICES : variant * 2);
+                v.emergency = true; v.emergency_at_ms = 1000; v.now_ms = 5000;
+                v.utc_ms = variant & 1 ? 1793000000000ull : 0;
+                v.emergency_unreached = (uint8_t)(variant >= 3 ? variant : 0);
+                v.modal = variant == 4 ? HMI_MODAL_PIN : variant == 5 ? HMI_MODAL_CONFIRM : HMI_MODAL_NONE;
+                v.cf_title = "Reset the EMERGENCY?"; v.cf_detail = "Only when the area is safe."; v.cf_ok = "Reset EMERGENCY";
+                v.toast = "EMERGENCY reset - machines stay stopped";
+                for (int b = 0; b < g_box.r.band_count; b++) hmi_renderer_render_band(&g_box.r, b, &v);
+            }
+        }
+        bool guards = true;
+        for (unsigned i = 0; i < sizeof(g_box.pre); i++) if (g_box.pre[i] != 0xA5 || g_box.post[i] != 0x5A) guards = false;
+        CHECK(guards);
+        if (!guards) printf("  EMERGENCY screen overflow at %dx%d\n", sizes[k][0], sizes[k][1]);
+    }
+}
+
 static void test_alarm_log(void)
 {
     char path[HMI_PATH_MAX] = "hmi_test_alarms.log";      /* in the working directory: portable */
@@ -1314,6 +1386,7 @@ test_hal();
     test_profiles();
     test_discovery_targets();
     test_renderer();
+    test_emergency();
     test_alarm_log();
     test_device_key();
     test_utc_format();

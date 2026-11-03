@@ -37,10 +37,6 @@ __pycache__/
 *$py.class
 .pytest_cache/
 
-# Local tooling & AI analysis caches
-graphify-out/
-.agents/
-.gemini/
 
 # IDE & OS metadata
 .vscode/
@@ -66,3 +62,4 @@ plc-simulator/plc_simulator_cli
 
 # Release output (hmi-runtime/installer/build_*_release.sh)
 dist/
+

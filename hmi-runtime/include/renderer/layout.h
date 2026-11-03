@@ -36,7 +36,7 @@ typedef struct { int x, y, w, h; } hmi_rect_t;
 typedef enum {
     HMI_HIT_NONE = 0,
     HMI_HIT_NAV_TAB,          /* param = screen index 0..SCREEN_COUNT-1 */
-    HMI_HIT_ESTOP,            /* header STOP ALL button (always visible) */
+    HMI_HIT_ESTOP,            /* header EMERGENCY button (always visible, anyone may press it) */
     HMI_HIT_THEME,            /* header theme button */
     HMI_HIT_ROLE,             /* header role chip (demo role selector) */
     HMI_HIT_BANNER_ACK,       /* "Acknowledge" button inside the alarm banner */
@@ -58,11 +58,12 @@ typedef enum {
     HMI_HIT_CONFIRM_OK,       /* confirmation dialog: confirm */
     HMI_HIT_ALARM_TAB,        /* alarm screen: param 0 = Active, 1 = History */
     HMI_HIT_ALARM_PAGE,       /* alarm screen: param 0 = previous page, 1 = next page */
-    HMI_HIT_DEVICE_PAGE       /* process screen: param 0 = previous page, 1 = next page */
+    HMI_HIT_DEVICE_PAGE,      /* process screen: param 0 = previous page, 1 = next page */
+    HMI_HIT_EMERGENCY_RESET   /* EMERGENCY screen: "Reset EMERGENCY" (Maintenance) */
 } hmi_hit_kind_t;
 
 /* Dialogs drawn over the screen. While one is open only the dialog and the
- * header STOP ALL accept input. */
+ * header EMERGENCY button accept input. */
 typedef enum {
     HMI_MODAL_NONE = 0,
     HMI_MODAL_ROLE,           /* choose a role */
@@ -193,5 +194,20 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
                               const uint32_t *tokens, uint8_t ntok,
                               const hmi_device_info_t *devs, uint8_t ndev, uint8_t dev_page, uint8_t fp_slot,
                               int x, int y);
+
+/* --- EMERGENCY screen ---
+ * While the EMERGENCY is active it replaces every other screen (any display size): red, the
+ * EMERGENCY button in its usual header place, two message lines, one row per device saying
+ * whether it was stopped, and the Reset button. Dialogs (sign-in, confirm) open over it. */
+#define HMI_LAYOUT_EMERG_ROW_H 34
+hmi_rect_t hmi_layout_emergency_title(int sw, int sh);    /* headline + two message lines */
+hmi_rect_t hmi_layout_emergency_list(int sw, int sh);     /* device rows */
+int        hmi_layout_emergency_cols(int sw, int sh);     /* 1, or 2 on wide screens */
+int        hmi_layout_emergency_rows(int sw, int sh);     /* rows per column that fit (>= 0) */
+hmi_rect_t hmi_layout_emergency_row(int sw, int sh, int idx);   /* row idx (column-major), w = 0 if it does not fit */
+hmi_rect_t hmi_layout_emergency_reset(int sw, int sh);    /* "Reset EMERGENCY" */
+/* Only EMERGENCY (HMI_HIT_ESTOP) and Reset (HMI_HIT_EMERGENCY_RESET) answer; anything else is
+ * HMI_HIT_NONE. Use the normal hit test while a dialog is open over the EMERGENCY screen. */
+hmi_hit_t  hmi_layout_emergency_hit_test(int sw, int sh, int x, int y);
 
 #endif /* INDUSTRIAL_HMI_LAYOUT_H */
