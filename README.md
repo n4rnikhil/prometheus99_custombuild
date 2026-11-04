@@ -385,4 +385,4 @@ The software is provided "as is", without warranty of any kind. It is not a safe
 
 ---
 
-<sub>Prometheus HMI · Nikhil Nuguri</sub>
+<sub>Prometheus HMI · Nikhil Nuguri · MIT License</sub>
