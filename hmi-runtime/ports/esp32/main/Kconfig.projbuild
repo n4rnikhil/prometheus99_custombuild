@@ -18,6 +18,14 @@ menu "Prometheus HMI"
             "--plc 192.168.1.10 --scan 192.168.1.0/24 --log /data/alarms.log --vault /data/security.vault".
             Files live on the "storage" LittleFS partition mounted at /data.
 
+    config HMI_QEMU_ETH
+        bool "Emulator network (QEMU) instead of Wi-Fi"
+        default n
+        select ETH_USE_OPENETH
+        help
+            For Espressif's QEMU only: use its emulated Ethernet instead of the Wi-Fi radio.
+            Never set it for a real board. See sdkconfig.qemu.
+
     config HMI_NTP_SERVER
         string "Time server for alarm time stamps"
         default "pool.ntp.org"

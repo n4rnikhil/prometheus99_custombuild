@@ -40,4 +40,18 @@
 #define BOARD_TOUCH_SCL        9
 #define BOARD_TOUCH_I2C_PORT   0
 
+/* Backlight and resets. Waveshare's 4.3"/5"/7" S3 boards switch the backlight, the panel reset
+ * and the touch reset through a CH422G I/O expander on the touch I2C bus, with the GT911 INT line
+ * on GPIO 4 (as in Waveshare's board examples). Boards that drive the backlight from a GPIO
+ * (Sunton, Elecrow, ...): set BOARD_IO_EXPANDER_CH422G to 0 and BOARD_PIN_BACKLIGHT to that pin. */
+#ifndef BOARD_IO_EXPANDER_CH422G
+#define BOARD_IO_EXPANDER_CH422G 1
+#endif
+#ifndef BOARD_TOUCH_INT
+#define BOARD_TOUCH_INT        4
+#endif
+#ifndef BOARD_PIN_BACKLIGHT
+#define BOARD_PIN_BACKLIGHT    (-1)
+#endif
+
 #endif /* HMI_BOARD_H */

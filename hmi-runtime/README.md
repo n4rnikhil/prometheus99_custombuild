@@ -15,9 +15,9 @@ for operation and the [Architecture](../docs/architecture/ARCHITECTURE.md) for h
 | Windows (MinGW-w64 gcc) | `build.bat` | `industrial_hmi.exe` |
 | Windows tests | `build.bat test` | runs every test suite listed below |
 | Windows snapshot tool | `build.bat snapshot` | BMP image of each screen |
-| Linux / Raspberry Pi | `make` (cross: `make CC=aarch64-linux-gnu-gcc` or `CC=arm-linux-gnueabihf-gcc`) | `industrial_hmi` |
+| Linux / Raspberry Pi | `make` (cross: `make CC=aarch64-linux-gnu-gcc` or `CC=arm-linux-gnueabihf-gcc`). Needs the X11 headers for the desktop window: `sudo apt install libx11-dev` (`make NO_X11=1`: framebuffer only) | `industrial_hmi` |
 | Linux tests | `make test` | every suite below, under AddressSanitizer + UBSan (`make test-fast`: unit tests only) |
-| ESP32 | ESP-IDF project in `ports/esp32/` | not yet compiled |
+| ESP32-S3 | `idf.py build` in `ports/esp32/` (ESP-IDF 5.3) | firmware; see [ports/esp32/README.md](ports/esp32/README.md) |
 | Render benchmark | see [docs/benchmarks](../docs/benchmarks/README.md) | `tools/render_bench.c` |
 
 The integration test drives the device models in `tests/fixtures/` (test code only).

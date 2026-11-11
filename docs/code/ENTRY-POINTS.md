@@ -12,7 +12,7 @@ function to open first and says in plain words what happens there. Paths are rel
 |---|---|---|
 | Windows | `src/platform/win32/main_win32.c` | `WinMain` |
 | Linux, Raspberry Pi | `src/platform/linux/main_linux.c` | `main` |
-| ESP32 (never compiled) | `ports/esp32/` | `app_main` |
+| ESP32-S3 | `ports/esp32/main/main_esp32.c` | `app_main` |
 
 The platform file is a thin shell. It does only what the operating system must do:
 

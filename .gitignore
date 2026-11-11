@@ -60,3 +60,11 @@ hmi-runtime/industrial_hmi
 # Release output (hmi-runtime/installer/build_*_release.sh)
 dist/
 
+
+# Linux build: borrowed X11 headers; ESP-IDF build outputs
+.x11-headers/
+hmi-runtime/ports/esp32/build/
+hmi-runtime/ports/esp32/build_qemu/
+hmi-runtime/ports/esp32/managed_components/
+hmi-runtime/ports/esp32/sdkconfig
+hmi-runtime/ports/esp32/sdkconfig.old

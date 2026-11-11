@@ -232,9 +232,9 @@ bool hal_secure_dir(char *out, size_t cap, bool create)
     out[k - 1] = '\\';
     return true;
 #elif defined(ESP_PLATFORM)
-    (void)cap;
+    /* the LittleFS "storage" partition, mounted at /data by the ESP32 shell: one firmware, one owner */
     (void)create;
-    return false;
+    return snprintf(out, cap, "/data/") == 6;
 #else
     int k;
     const char *home = NULL;

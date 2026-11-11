@@ -55,6 +55,6 @@ records did not name the role (F2, low).
 
 ## Not run
 
-- Linux, Raspberry Pi and ESP32 builds and tests (see [platforms.md](platforms.md)).
+- On Raspberry Pi or ESP32 hardware (emulator runs only; see [platforms.md](platforms.md)).
 - `tests/test_modbus_live.c` with `tests/modbus_test_device.py`, and `tests/ui_modal_stall_test.py`.
 - The Windows installer build (NSIS is not installed here).

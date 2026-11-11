@@ -1,7 +1,8 @@
 # ===========================================================================
 #  Prometheus HMI Runtime - Linux / Raspberry Pi build (GNU make, any C99 compiler)
 #
-#    make                      industrial_hmi (desktop window via libX11 at run time, or framebuffer + evdev)
+#    make                      industrial_hmi (desktop window via libX11 at run time, or framebuffer + evdev);
+#                              needs the X11 headers: sudo apt install libx11-dev (NO_X11=1: framebuffer only)
 #    make test                 every suite: unit, MCU profile, integration, Modbus faults,
 #                              all under AddressSanitizer + UBSan
 #    make test-fast            unit tests only, no sanitizers
@@ -38,6 +39,23 @@ HAL_SRC  := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c src/hal/s
             src/hal/fs_stdio.c src/hal/thread_posix.c src/hal/gesture.c src/hal/utc_format.c src/hal/alarm_tone.c
 APP_SRC  := src/app/app.c src/platform/linux/main_linux.c src/platform/linux/x11_window.c src/platform/linux/alsa_sound.c
 
+# Desktop window: the X11 headers are needed at build time (libX11 itself is loaded at run time).
+# They are the same on every architecture, so a cross compiler borrows this machine's copy.
+# Without any copy the program could only use the framebuffer: the build stops and says how to
+# fix it, unless NO_X11=1 asks for a framebuffer-only program on purpose.
+X11_INC :=
+X11_MISSING :=
+ifneq ($(NO_X11),1)
+  ifneq ($(shell printf '\043include <X11/Xlib.h>\n' | $(CC) -E -x c - >/dev/null 2>&1 && echo y),y)
+    ifneq ($(wildcard /usr/include/X11/Xlib.h),)
+      X11_INC := -idirafter .x11-headers
+      $(shell mkdir -p .x11-headers && ln -sfn /usr/include/X11 .x11-headers/X11)
+    else
+      X11_MISSING := 1
+    endif
+  endif
+endif
+
 SAN     := -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 NET_TEST_SRC := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c \
             src/fieldbus/device_manager.c src/fieldbus/discovery.c src/fieldbus/modbus_proto.c \
@@ -48,7 +66,10 @@ NET_TEST_SRC := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c \
 all: industrial_hmi
 
 industrial_hmi: $(APP_SRC) $(CORE_SRC) $(HAL_SRC)
-	$(CC) $(WARN) $(OPT) $(DEFS) -DHMI_BUILD_ID=\"$(BUILD_ID)-linux\" -Iinclude $^ -o $@ $(LDFLAGS) $(LIBS)
+	@if [ "$(X11_MISSING)" = 1 ]; then \
+	  echo "[ERROR] The desktop window needs the X11 headers: sudo apt install libx11-dev"; \
+	  echo "        (or make NO_X11=1 for a program that only uses the framebuffer)"; exit 1; fi
+	$(CC) $(WARN) $(OPT) $(DEFS) $(X11_INC) -DHMI_BUILD_ID=\"$(BUILD_ID)-linux\" -Iinclude $^ -o $@ $(LDFLAGS) $(LIBS)
 	@ls -l $@ | awk '{print "[OK] " $$NF "  " $$5 " bytes"}'
 
 tests/test_core: tests/test_core.c $(CORE_SRC) $(HAL_SRC)
@@ -78,3 +99,4 @@ test: industrial_hmi tests/test_core_san tests/test_core_mcu tests/test_integrat
 clean:
 	rm -f industrial_hmi tests/test_core tests/test_core_san tests/test_core_mcu \
 	      tests/test_integration tests/test_modbus_faults hmi_test_*.log* hmi_test_fs_*.bin
+	rm -rf .x11-headers

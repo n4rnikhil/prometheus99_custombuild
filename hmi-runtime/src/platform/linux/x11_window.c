@@ -269,7 +269,7 @@ void x11_close(void)
 const char *x11_failure(void) { return s_why; }
 
 #else  /* no X11 headers at build time: desktop window not available in this build */
-const char *x11_failure(void) { return "this build has no desktop window support"; }
+const char *x11_failure(void) { return "this program was built without the X11 headers (rebuild it with libx11-dev installed)"; }
 
 bool x11_available(void) { return false; }
 bool x11_open(int w, int h, const char *title) { (void)w; (void)h; (void)title; return false; }

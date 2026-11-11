@@ -1,0 +1,8 @@
+# Espressif QEMU only (never for a real board):
+#   idf.py -B build_qemu -D SDKCONFIG=build_qemu/sdkconfig -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.qemu" qemu
+# The emulator has no PSRAM, display or Wi-Fi: the HMI runs without its display and reaches the
+# host through QEMU's user network (the host is 10.0.2.2).
+CONFIG_HMI_QEMU_ETH=y
+CONFIG_ETH_USE_OPENETH=y
+CONFIG_HMI_NTP_SERVER=""
+CONFIG_HMI_ARGS="--scan 10.0.2.2:1502-1503 --allow-factory-pins --report /dev/console --exit-after-ms 60000"

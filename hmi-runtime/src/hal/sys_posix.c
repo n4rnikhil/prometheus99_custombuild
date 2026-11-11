@@ -85,6 +85,8 @@ void hal_exe_dir(char *out, size_t cap)
     if (!slash) return;
     slash[1] = '\0';
     snprintf(out, cap, "%.250s", path);
+#elif defined(ESP_PLATFORM)
+    snprintf(out, cap, "/data/");          /* files "next to the program" live on the storage partition */
 #endif
 }
 

@@ -10,8 +10,8 @@ Each item says what would close it.
 | Item | To close it |
 |---|---|
 | A Windows panel PC, including Schneider Harmony P6 (Windows 10 IoT) | Run the release build on the panel; repeat the benchmarks there |
-| A Raspberry Pi with a touch screen | Run the Linux arm64/armhf build on a Pi with its display |
-| The ESP32 port (`ports/esp32/`) | It has never been compiled: install ESP-IDF and build it |
+| A Raspberry Pi with a touch screen (the arm64/armhf builds pass every test in an ARM emulator and the arm64 program ran there as a window) | Run the build on a Pi with its display |
+| The ESP32-S3 port: compiled (ESP-IDF 5.3.2) and run only in Espressif's emulator. Display, touch, backlight power-up, Wi-Fi and PSRAM never ran | Flash it to the board after checking `ports/esp32/main/board.h` against its schematic |
 | Schneider Harmony ST6 panels | They run Schneider's own runtime and cannot run this program at all (see [LAB_DEPLOYMENT.md](LAB_DEPLOYMENT.md)) |
 
 All performance figures come from one Windows PC ([benchmarks](benchmarks/README.md)).
@@ -65,7 +65,7 @@ All performance figures come from one Windows PC ([benchmarks](benchmarks/README
 | At 120 devices the fieldbus loop ran 899 times a second instead of 1,000, with one stall of about 100 ms | Profile the loop with many devices attached |
 | Sound files (MP3/WAV) play on Windows only; Linux plays the built-in tones and the ESP32 only drives a horn output | An embedded PCM clip for Linux / ESP32 |
 | While an MP3 plays, Windows' media decoders are loaded: Task Manager memory rose to 1.27 MB for a few seconds, then 856 KB after the memory trim (3 devices) | A built-in sound instead of the MP3 |
-| The tile charts and the EMERGENCY siren were built and tested on Windows only; the Linux / Raspberry Pi builds and the Windows installer were not rebuilt | Run `make test` on Linux and the release scripts |
+| The Windows installer was not rebuilt (NSIS is not installed here) | Run `installer/build_windows_release.sh` |
 
 ## Not supported
 

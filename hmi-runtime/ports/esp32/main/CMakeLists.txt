@@ -18,7 +18,7 @@ idf_component_register(
         "${R}/src/hal/net_ip.c" "${R}/src/hal/net_posix.c" "${R}/src/hal/timer_posix.c" "${R}/src/hal/sys_posix.c"
         "${R}/src/hal/fs_stdio.c" "${R}/src/hal/thread_posix.c" "${R}/src/hal/gesture.c" "${R}/src/hal/utc_format.c"
     INCLUDE_DIRS "${R}/include" "."
-    REQUIRES esp_lcd esp_wifi esp_netif esp_event nvs_flash driver lwip pthread esp_hw_support heap
+    REQUIRES esp_lcd esp_wifi esp_eth esp_netif esp_event nvs_flash driver lwip pthread esp_hw_support esp_psram heap
 )
 
 # Small-target profile (include/profile_mcu.h). To drop a driver module, remove its source above

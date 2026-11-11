@@ -261,7 +261,7 @@ Both write SHA-256 checksums.
 | | |
 |---|---|
 | **Verified** | Test suites, live runs and measurements on Windows, listed in [docs/evidence/](docs/evidence/) and [benchmarks](docs/benchmarks/README.md) |
-| **Not run on target hardware** | a Windows panel PC or Harmony P6, a Raspberry Pi touch panel, the ESP32 port (never compiled) |
+| **Not run on target hardware** | a Windows panel PC or Harmony P6, a Raspberry Pi touch panel, the ESP32-S3 port (it compiles and runs in Espressif's emulator; never run on a board) |
 | **Not verified against real devices** | register maps other than the Altivar status and command words |
 | **Not certified** | ISA-101, ISA-18.2, IEC 62443 and ISO 13850 are followed, not certified. This is not a safety system |
 
