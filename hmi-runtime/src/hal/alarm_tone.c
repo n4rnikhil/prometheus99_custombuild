@@ -52,7 +52,7 @@ size_t hal_emergency_tone_pcm(int16_t *out, size_t max_samples, uint32_t rate)
         for (size_t i = 0; i < per && n < max_samples; i++, n++) {
             uint64_t f = 650u + (uint64_t)850u * i / per;
             phase += (uint32_t)((f << 22) / rate);
-            out[n] = s_sine[(phase >> 16) & 63u];
+            out[n] = (int16_t)((int32_t)s_sine[(phase >> 16) & 63u] * 9 / 5);   /* about 77 % of full scale: never quieter than an alarm */
         }
     }
     size_t ramp = rate / 250u;                                     /* 4 ms in and out: no click when it loops */

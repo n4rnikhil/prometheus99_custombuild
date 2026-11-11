@@ -7,7 +7,7 @@ How the Prometheus HMI screens are laid out, and why. Every rule here is impleme
 > **Verified so far:** the screens below compile and were seen working on Windows against
 > simulated devices, up to 96 devices and 1,074 readings, at 800 x 480 and at a larger window size.
 > **Not verified yet:** automated layout tests for the new screens, a real 7" touch panel,
-> and use with gloves. See [`docs/TEST-DEBT.md`](../TEST-DEBT.md).
+> and use with gloves. See [Known limitations](../KNOWN-LIMITATIONS.md).
 
 ---
 

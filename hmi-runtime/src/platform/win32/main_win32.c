@@ -223,7 +223,9 @@ void hal_sound_file(int kind, const char *path)
 
 void hal_horn(bool on)
 {
-    if (s_emer_state == 1) on = false;           /* the EMERGENCY sound has taken over */
+    /* The EMERGENCY sound has taken over: leave it alone. PlaySound(NULL) would stop every sound of
+     * this process, the EMERGENCY siren included. The alarm sound resumes after the reset. */
+    if (s_emer_state == 1) return;
     if (!s_sound_on || s_sound_state == (int)on) return;
     s_sound_state = on;
     if (!on) { file_loop(HAL_SOUND_ALARM, false); tone_loop(HAL_SOUND_ALARM, false); return; }

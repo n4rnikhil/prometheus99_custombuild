@@ -64,7 +64,7 @@ All performance figures come from one Windows PC ([benchmarks](benchmarks/README
 | Memory in Task Manager is under 1 MB only up to about 48 devices (1.25 MB at 96, 1.22 to 1.35 MB at 120) | Fewer copies of the device data (one snapshot copy, no per-slot metadata copies) |
 | At 120 devices the fieldbus loop ran 899 times a second instead of 1,000, with one stall of about 100 ms | Profile the loop with many devices attached |
 | Sound files (MP3/WAV) play on Windows only; Linux plays the built-in tones and the ESP32 only drives a horn output | An embedded PCM clip for Linux / ESP32 |
-| While an MP3 plays, Windows' media decoders are loaded: Task Manager memory rose to 1.27 MB for a few seconds, then 856 KB after the memory trim (3 devices) | A built-in sound instead of the MP3 |
+| While a sound plays, Windows' audio engine is loaded: Task Manager memory rose to 1.27 MB (`alarm.mp3`) or 1.8 MB (EMERGENCY siren) for a few seconds, then under 1 MB after the memory trim (3 devices) | Accept, or play sounds from a separate small process |
 | The Windows installer was not rebuilt (NSIS is not installed here) | Run `installer/build_windows_release.sh` |
 
 ## Not supported

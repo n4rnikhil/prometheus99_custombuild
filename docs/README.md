@@ -29,7 +29,6 @@ Start with the document written for you.
 | [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | what is not done, not verified or not supported |
 | [LAB_DEPLOYMENT.md](LAB_DEPLOYMENT.md) | which lab panels can run the HMI |
 | [evidence/](evidence/) | measurements and test results for this build |
-| [STATUS.md](STATUS.md) · [TEST-DEBT.md](TEST-DEBT.md) | build progress and the tests owed |
 
 **Every document says what is verified and what is not.** A claim without a measurement or a
 test says so.

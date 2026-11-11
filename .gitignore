@@ -68,3 +68,7 @@ hmi-runtime/ports/esp32/build_qemu/
 hmi-runtime/ports/esp32/managed_components/
 hmi-runtime/ports/esp32/sdkconfig
 hmi-runtime/ports/esp32/sdkconfig.old
+
+# Internal working notes (kept locally, not published)
+docs/STATUS.md
+docs/TEST-DEBT.md

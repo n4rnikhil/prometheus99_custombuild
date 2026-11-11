@@ -6,7 +6,7 @@ ISA-18.2 (IEC 62682). The HMI follows the standard's ideas. It is not certified 
 > **Verified so far:** the engine compiles. It was run against simulated devices on Windows,
 > where a burst of 36 stop alarms started an alarm flood and the alarm dialog opened from the list.
 > **Not verified yet:** automated tests for shelving, out of service, flood hysteresis, chatter and
-> the journal at 512 records (see [`docs/TEST-DEBT.md`](../TEST-DEBT.md)).
+> the journal at 512 records (see [Known limitations](../KNOWN-LIMITATIONS.md)).
 
 Code: `hmi-runtime/src/core/alarms.c` (engine, fieldbus thread), `src/app/app.c` (operator
 actions), `src/renderer/micro_renderer.c` (Alarms screen, banner, alarm dialog).

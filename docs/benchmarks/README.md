@@ -104,12 +104,14 @@ Memory while the EMERGENCY sound plays (3 devices, Task Manager memory, EMERGENC
 
 | Sound | Before | 4 s after | 10 s after |
 |---|---|---|---|
-| Built-in EMERGENCY siren | 588 KB | 624 KB | 604 KB |
+| Built-in EMERGENCY siren | 500 KB | 1,804 KB | 744 KB |
 | `alarm.mp3` (MP3 through Windows' decoders) | 584 KB | 1,272 KB | 856 KB |
 
-The MP3 loads Windows' media decoders; the HMI's memory trim (every 10 s) brings the figure back
-under 1 MB while it plays. `alarm.mp3` for alarms uses the same path. Memory after the sound stops
-was not measured.
+Playing a sound loads Windows' audio engine (and, for the MP3, its media decoders). The HMI's memory
+trim (every 10 s) brings the figure back under 1 MB while the sound plays. `alarm.mp3` for alarms
+uses the same path as the MP3 row. Memory after the sound stops was not measured. Both sounds were
+confirmed audible by reading the process's output level from the Windows audio mixer (siren peak
+0.79, `alarm.mp3` peak 0.81 of full scale).
 
 ## 2. The renderer alone
 
