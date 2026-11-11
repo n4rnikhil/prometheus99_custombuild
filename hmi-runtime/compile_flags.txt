@@ -1,5 +1,5 @@
 -std=c99
 -Iinclude
--I../plc-simulator/include
+-Itests
 -Wall
 -Wextra

@@ -6,7 +6,9 @@
  * simply runs at normal priority). HAL_PRIO_LOW lowers the nice value of the calling thread on Linux.
  */
 
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE                              /* ESP-IDF already defines it */
+#endif
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
@@ -36,6 +38,7 @@ static void *trampoline(void *p)
     return NULL;
 }
 
+#if !defined(ESP_PLATFORM)
 static void *trampoline_low(void *p)
 {
 #if defined(__linux__) && defined(SYS_gettid)
@@ -43,6 +46,7 @@ static void *trampoline_low(void *p)
 #endif
     return trampoline(p);
 }
+#endif
 
 bool hal_thread_start(hal_thread_t *t, void (*fn)(void *), void *arg, hal_prio_t prio, uint32_t stack_bytes)
 {
@@ -65,9 +69,10 @@ bool hal_thread_start(hal_thread_t *t, void (*fn)(void *), void *arg, hal_prio_t
     if (pthread_create(&th, NULL, trampoline, t) != 0) return false;
     memcpy(&t->handle, &th, sizeof(th) < sizeof(t->handle) ? sizeof(th) : sizeof(t->handle));
     t->started = true;
+    (void)attr;
     return true;
-#endif
-
+#else
+    /* Linux / Raspberry Pi: real-time priority when allowed (not available on ESP-IDF) */
     if (pthread_attr_init(&attr) != 0) return false;
     if (stack_bytes) {
         /* PTHREAD_STACK_MIN is a long on 32-bit glibc: compare as size_t on every target */
@@ -98,6 +103,7 @@ bool hal_thread_start(hal_thread_t *t, void (*fn)(void *), void *arg, hal_prio_t
     memcpy(&t->handle, &th, sizeof(th) < sizeof(t->handle) ? sizeof(th) : sizeof(t->handle));
     t->started = true;
     return true;
+#endif
 }
 
 void hal_thread_join(hal_thread_t *t, uint32_t timeout_ms)

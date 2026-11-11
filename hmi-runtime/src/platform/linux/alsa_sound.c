@@ -41,9 +41,11 @@ static void quiet_alsa(const char *file, int line, const char *func, int err, co
 
 static void          *s_lib;
 static pthread_t      s_thread;
-static volatile int   s_want = 0, s_run = 0, s_enabled = 1;
+static volatile int   s_want = 0, s_run = 0, s_enabled = 1, s_emergency = 0;
 static int16_t        s_tone[TONE_RATE];          /* 0.6 s pattern fits in 1 s */
 static unsigned long  s_tone_len;
+static int16_t        s_siren[TONE_RATE];         /* EMERGENCY: 0.6 s sweep */
+static unsigned long  s_siren_len;
 
 static void sleep_ms(long ms)
 {
@@ -82,7 +84,8 @@ static void *sound_thread(void *arg)
             }
             reported = false;
         }
-        long w = p_writei(pcm, s_tone, s_tone_len);   /* blocks for one 0.6 s pattern */
+        long w = s_emergency ? p_writei(pcm, s_siren, s_siren_len)   /* blocks for one 0.6 s pattern */
+                             : p_writei(pcm, s_tone, s_tone_len);
         if (w < 0 && p_recover(pcm, (int)w, 1) < 0) { p_close(pcm); pcm = NULL; }
     }
     if (pcm) { p_drop(pcm); p_close(pcm); }
@@ -104,12 +107,14 @@ bool alsa_sound_start(void)
         dlclose(s_lib); s_lib = NULL; return false;
     }
     s_tone_len = hal_alarm_tone_pcm(s_tone, sizeof(s_tone) / sizeof(s_tone[0]), TONE_RATE);
+    s_siren_len = hal_emergency_tone_pcm(s_siren, sizeof(s_siren) / sizeof(s_siren[0]), TONE_RATE);
     s_run = 1;
     if (pthread_create(&s_thread, NULL, sound_thread, NULL) != 0) { s_run = 0; dlclose(s_lib); s_lib = NULL; return false; }
     return true;
 }
 
 void alsa_sound_set(bool on)    { s_want = on; }
+void alsa_sound_emergency(bool on) { s_emergency = on; }
 void alsa_sound_enable(bool on) { s_enabled = on; }
 
 void alsa_sound_stop(void)

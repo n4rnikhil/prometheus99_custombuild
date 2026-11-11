@@ -22,6 +22,10 @@
 
 /* remove_after_ms: 0 = never remove offline devices */
 void hmi_devmgr_init(uint32_t remove_after_ms);
+/* Attach at most n devices (1..HMI_MAX_DEVICES; out of range = HMI_MAX_DEVICES). Call before
+ * hmi_devmgr_init's caller starts attaching; devices beyond it are reported as not shown. */
+void hmi_devmgr_set_limit(int n);
+int  hmi_devmgr_limit(void);
 
 /* In-process Modbus server: answers one request ADU, returns the reply length (0 = no reply). */
 typedef size_t (*hmi_loopback_fn)(void *ctx, const uint8_t *req, size_t len, uint8_t *rsp, size_t cap);
@@ -85,8 +89,10 @@ void hmi_devmgr_stop_clear(void);
 
 /* Copy the state of all slots (EMPTY ones included) for publishing. */
 void hmi_devmgr_publish(hmi_device_info_t out[HMI_MAX_DEVICES], uint32_t now_ms);
+/* The same for the places used so far only: writes out[0 .. n-1] and returns n. Entries at n and
+ * beyond are untouched (callers keep them zero = EMPTY). Keeps unused places out of memory. */
+int  hmi_devmgr_publish_used(hmi_device_info_t *out, uint32_t now_ms);
 
-uint8_t hmi_devmgr_count(uint8_t state_mask);   /* bit (1 << state) set = count that state */
 
 void hmi_devmgr_shutdown(void);
 

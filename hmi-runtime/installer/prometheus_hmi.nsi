@@ -1,16 +1,16 @@
 ; Prometheus HMI - Windows installer (NSIS 3, https://nsis.sourceforge.io)
-;   makensis /DSTAGE=<folder with the built files> /DVERSION=6.1 hmi-runtime\installer\prometheus_hmi.nsi
-; Per-user install: no administrator rights, and the runtime can write its log, key and vault
-; next to the executable.
+;   makensis /DSTAGE=<folder with the built files> /DVERSION=19.0 hmi-runtime\installer\prometheus_hmi.nsi
+; Per-user install: no administrator rights. The runtime writes its audit log next to the
+; executable, and its device key and PIN vault in %ProgramData%\Prometheus HMI (protected folder).
 
-Target amd64-unicode          ; the programs are 64-bit: so is the installer
+Target amd64-unicode          ; the program is 64-bit: so is the installer
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "6.1"
+  !define VERSION "19.0"
 !endif
 !ifndef STAGE
-  !error "pass /DSTAGE=<folder with industrial_hmi.exe, plc_simulator.exe, ...>"
+  !error "pass /DSTAGE=<folder with industrial_hmi.exe, industrial_hmi.ico, hmi.cfg, README.txt, examples\>"
 !endif
 
 Name "Prometheus HMI"
@@ -22,12 +22,10 @@ SetCompressor /SOLID lzma
 !define MUI_ICON   "${STAGE}\industrial_hmi.ico"
 !define MUI_UNICON "${STAGE}\industrial_hmi.ico"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrometheusHMI"
-!define BENCH_ARGS "--add atv340 --add tank --add meter --open-hmi"
 
-!define MUI_FINISHPAGE_RUN "$INSTDIR\plc_simulator.exe"
-!define MUI_FINISHPAGE_RUN_PARAMETERS "${BENCH_ARGS}"
-!define MUI_FINISHPAGE_RUN_TEXT "Start Prometheus HMI with the simulated plant now"
-!define MUI_WELCOMEPAGE_TEXT "This installs the Prometheus HMI operator panel and the PLC simulator for bench testing.$\r$\n$\r$\nBench use only: the included hmi.cfg allows the factory PINs (Operator 1111). On a real plant set site PINs with industrial_hmi --set-pin and remove --allow-factory-pins.$\r$\n$\r$\nSTOP ALL is a software stop, not an emergency stop."
+!define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\README.txt"
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "Show the first steps (set the PINs)"
+!define MUI_WELCOMEPAGE_TEXT "This installs the Prometheus HMI operator panel.$\r$\n$\r$\nBefore first use on a plant, set the role PINs with industrial_hmi --set-pin <role> and list your devices in hmi.cfg (see README.txt).$\r$\n$\r$\nThe EMERGENCY button is a software stop over the network, not a certified emergency stop: every machine still needs its hardwired E-stop."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -46,9 +44,8 @@ Section "Prometheus HMI" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "${STAGE}\industrial_hmi.exe"
-  File "${STAGE}\plc_simulator.exe"
-  File "${STAGE}\plc_simulator_cli.exe"
   File "${STAGE}\industrial_hmi.ico"
+  File "${STAGE}\alarm.mp3"
   File "${STAGE}\README.txt"
   ; keep a site's own configuration on upgrade
   IfFileExists "$INSTDIR\hmi.cfg" +2 0
@@ -58,11 +55,9 @@ Section "Prometheus HMI" SecMain
   SetOutPath "$INSTDIR"
 
   CreateDirectory "$SMPROGRAMS\Prometheus HMI"
-  CreateShortcut "$SMPROGRAMS\Prometheus HMI\Prometheus HMI (bench with simulator).lnk" "$INSTDIR\plc_simulator.exe" "${BENCH_ARGS}" "$INSTDIR\industrial_hmi.exe" 0
   CreateShortcut "$SMPROGRAMS\Prometheus HMI\Prometheus HMI.lnk" "$INSTDIR\industrial_hmi.exe" "" "$INSTDIR\industrial_hmi.exe" 0
-  CreateShortcut "$SMPROGRAMS\Prometheus HMI\PLC Simulator.lnk" "$INSTDIR\plc_simulator.exe" "" "$INSTDIR\plc_simulator.exe" 0
   CreateShortcut "$SMPROGRAMS\Prometheus HMI\Uninstall Prometheus HMI.lnk" "$INSTDIR\Uninstall.exe"
-  CreateShortcut "$DESKTOP\Prometheus HMI.lnk" "$INSTDIR\plc_simulator.exe" "${BENCH_ARGS}" "$INSTDIR\industrial_hmi.exe" 0
+  CreateShortcut "$DESKTOP\Prometheus HMI.lnk" "$INSTDIR\industrial_hmi.exe" "" "$INSTDIR\industrial_hmi.exe" 0
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\Prometheus HMI" "InstallDir" "$INSTDIR"
@@ -79,9 +74,8 @@ SectionEnd
 Section "Uninstall"
   ; The audit log, device key and PIN vault are records and secrets of this site: they stay.
   Delete "$INSTDIR\industrial_hmi.exe"
-  Delete "$INSTDIR\plc_simulator.exe"
-  Delete "$INSTDIR\plc_simulator_cli.exe"
   Delete "$INSTDIR\industrial_hmi.ico"
+  Delete "$INSTDIR\alarm.mp3"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\examples\*.cfg"
   RMDir  "$INSTDIR\examples"

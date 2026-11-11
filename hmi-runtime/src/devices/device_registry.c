@@ -8,7 +8,7 @@
  *   - APPLICATION modules (tank skid, conveyor, boiler, ...): a PLC program on a given controller.
  *     Holding register n is %MWn and coil n is %Mn on a Modicon, but the program decides what lives
  *     there, so these also need the program's name (FC43 UserApplicationName) or an explicit
- *     --plc <ip>@<key>. The PLC Simulator runs exactly these programs.
+ *     --plc <ip>@<key>.
  */
 
 #include "devices/device_profile.h"

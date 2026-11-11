@@ -15,7 +15,7 @@
  *     and after remove_after_ms the device leaves the dashboard
  *
  * The loopback transport runs the same state machine against an in-process Modbus server
- * function instead of a socket (used by the tests to drive the PLC Simulator's models).
+ * function instead of a socket (used by the tests to drive the device models of tests/fixtures).
  */
 
 #include <stdio.h>
@@ -28,7 +28,7 @@
 #include "hal/timer.h"
 #include "hal/net.h"
 
-typedef enum { STEP_NONE, STEP_READ, STEP_WRITE } tcp_step_t;
+typedef enum { STEP_NONE, STEP_READ, STEP_WRITE, STEP_IDENT } tcp_step_t;
 typedef struct { bool coil; uint16_t addr; int16_t value; } pending_write_t;
 
 typedef struct {
@@ -49,6 +49,9 @@ typedef struct {
     uint32_t           next_try_ms, backoff_ms, connect_start_ms, last_cycle_ms;
     bool               connecting;
     bool               cycle_due_now;
+    bool               ident_known;   /* identified when attached: its vendor / product are checked */
+    bool               ident_ok;      /* this connection passed the identity check */
+    bool               ident_basic;   /* refused the regular category: ask for the basic one */
 
     /* request in flight */
     tcp_step_t         step;
@@ -78,6 +81,10 @@ static slot_t        s_slots[HMI_MAX_DEVICES];
 static volatile bool s_heartbeat_ok = true;   /* false while the UI is stalled: a frozen screen must not look alive */
 static mb_response_t s_rsp;            /* ~520 bytes, kept off the stack */
 static uint32_t      s_remove_after_ms;
+static int           s_limit = HMI_MAX_DEVICES;   /* places in use at most (--max-devices) */
+/* One past the highest place ever used since init. Every loop and copy stops here, so the memory of
+ * places never used is never touched (it stays out of the working set). Never shrinks before init. */
+static int           s_hwm;
 static bool          s_net_ok;
 
 static bool queue_write(slot_t *s, bool coil, uint16_t addr, int16_t value);
@@ -177,7 +184,7 @@ static void apply_bits(slot_t *s, hmi_tag_table_t *tags)
     const hmi_device_profile_t *p = s->info.profile;
     for (uint8_t i = 0; i < p->n_bits; i++) {
         const hmi_bit_map_t *m = &p->bits[i];
-        uint8_t src = HMI_DEV_TAG(s->info.slot, m->src_rel), dst = HMI_DEV_TAG(s->info.slot, m->dst_rel);
+        hmi_tag_id_t src = HMI_DEV_TAG(s->info.slot, m->src_rel), dst = HMI_DEV_TAG(s->info.slot, m->dst_rel);
         if (hmi_tag_read_quality(tags, src) != QUALITY_GOOD) { hmi_tag_set_quality(tags, dst, QUALITY_COMM_FAULT); continue; }
         uint16_t w = (uint16_t)hmi_tag_read_value(tags, src);
         hmi_tag_write_digital(tags, dst, (w & m->mask) == m->match, QUALITY_GOOD);
@@ -192,7 +199,7 @@ static void mark_down(slot_t *s, hmi_tag_table_t *tags)
     const hmi_device_profile_t *p = s->info.profile;
     uint8_t slot = s->info.slot;
     for (uint8_t i = 0; i < p->meta_count; i++) {
-        uint8_t rel = p->meta[i].tag_id;
+        uint8_t rel = (uint8_t)p->meta[i].tag_id;            /* module meta ids are relative (< 24) */
         if (rel != p->comm_tag) hmi_tag_set_quality(tags, HMI_DEV_TAG(slot, rel), QUALITY_COMM_FAULT);
     }
 }
@@ -255,6 +262,50 @@ static bool send_request(slot_t *s, tcp_step_t step, uint8_t fc, uint16_t addr, 
     return true;
 }
 
+/* Ask the device who it is (FC43 / MEI 0x0E) */
+static bool send_ident(slot_t *s, uint32_t now_ms)
+{
+    uint8_t adu[16];
+    s->tid++;
+    size_t n = mb_encode_devid_request(s->tid, s->info.unit_id, s->ident_basic ? MB_DEVID_BASIC : MB_DEVID_REGULAR,
+                                       adu, sizeof(adu));
+    if (n == 0) return false;
+    s->info.requests++;
+    s->info.ident = HMI_IDENT_CHECKING;
+    s->step = STEP_IDENT;
+    s->sent_ms = now_ms;
+    s->sent_us = hmi_timer_get_us();
+    if (!link_send(s, adu, n)) { s->step = STEP_NONE; return false; }
+    return true;
+}
+
+/* The identity answer. A device that identified itself when it was attached must give the same
+ * vendor and product on every new connection: otherwise a different (or rogue) device answers at
+ * that address, and it gets no reads and no commands. false = drop the link (retried later). */
+static bool on_ident(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al,
+                     const uint8_t *adu, size_t len, uint32_t now_ms)
+{
+    static mb_device_id_t id;
+    mb_status_t st = mb_decode_devid(adu, len, s->tid, s->info.unit_id, &id);
+    if (st == MB_ERR_TID) { s->info.protocol_errors++; return true; }      /* stale frame */
+    s->step = STEP_NONE;
+    if (st == MB_RESP_EXCEPTION && !s->ident_basic) { s->ident_basic = true; return true; }   /* ask again */
+    if (st == MB_RESP_OK && strcmp(id.vendor, s->info.vendor) == 0 && strcmp(id.product, s->info.product) == 0) {
+        s->info.responses++;
+        s->ident_ok = true;
+        if (s->info.ident != HMI_IDENT_OK && s->info.connects > 1)
+            LOG(al, now_ms, ALARM_SEV_INFO, "%s identity checked", s->info.label);
+        s->info.ident = HMI_IDENT_OK;
+        return true;
+    }
+    if (st != MB_RESP_OK && st != MB_RESP_EXCEPTION) s->info.protocol_errors++;
+    if (s->info.ident != HMI_IDENT_MISMATCH)
+        LOG(al, now_ms, ALARM_SEV_CRITICAL, "%s: other device answers, blocked", s->info.label);
+    s->info.ident = HMI_IDENT_MISMATCH;
+    (void)tags;
+    return false;
+}
+
 static bool send_read(slot_t *s, uint8_t k, uint32_t now_ms)
 {
     bool coil;
@@ -268,6 +319,7 @@ static void cycle_done(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t 
     apply_bits(s, tags);
     hmi_tag_write_digital(tags, HMI_DEV_TAG(s->info.slot, s->info.profile->comm_tag), false, QUALITY_GOOD);
     s->exc_streak = 0;
+    s->info.data_us = hmi_timer_get_us();
     if (s->info.state == HMI_DEV_OFFLINE) LOG(al, now_ms, ALARM_SEV_INFO, "%s back online", s->info.label);
     else if (s->info.state == HMI_DEV_CONNECTING) LOG(al, now_ms, ALARM_SEV_INFO, "%s online", s->info.label);
     set_state(s, HMI_DEV_ONLINE, now_ms);
@@ -286,6 +338,7 @@ static bool continue_cycle(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_superviso
 static bool on_frame(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al,
                      const uint8_t *adu, size_t len, uint32_t now_ms)
 {
+    if (s->step == STEP_IDENT) return on_ident(s, tags, al, adu, len, now_ms);
     mb_status_t st = mb_decode_response(&s->req, adu, len, &s_rsp);
     if (st == MB_ERR_TID) { s->info.protocol_errors++; return true; }      /* stale frame */
     uint32_t rtt = (uint32_t)(hmi_timer_get_us() - s->sent_us);
@@ -362,6 +415,9 @@ static void link_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *
         s->connecting = false;
         s->info.connects++;
         s->cycle_due_now = true;
+        s->ident_ok = !s->ident_known;                 /* every new connection is checked again */
+        s->ident_basic = false;
+        if (!s->ident_known) s->info.ident = HMI_IDENT_NONE;
     }
 
     if (s->step != STEP_NONE) {
@@ -392,6 +448,10 @@ static void link_poll(slot_t *s, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *
         if (s->step != STEP_NONE || !linked(s)) return;
     }
 
+    if (!lb && !s->ident_ok) {                         /* nothing is read or written before the check */
+        if (!send_ident(s, now_ms)) link_close(s, tags, al, now_ms);
+        return;
+    }
     if (s->wq_count) {
         pending_write_t *w = &s->wq[s->wq_head];
         s->wq_head = (uint8_t)((s->wq_head + 1u) % HMI_MODBUS_WRITE_QUEUE);
@@ -472,7 +532,7 @@ uint8_t hmi_devmgr_unattached(uint32_t now_ms)
 
 static int free_slot(uint32_t now_ms)
 {
-    for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (int i = 0; i < s_limit; i++) {
         slot_t *s = &s_slots[i];
         if (s->info.state != HMI_DEV_EMPTY) continue;
         if (s->ever_freed && (uint32_t)(now_ms - s->freed_ms) < HMI_DEVICE_SLOT_COOLDOWN_MS) continue;
@@ -488,7 +548,7 @@ static unsigned next_instance(const hmi_device_profile_t *p)
     for (unsigned n = 1; n < 100; n++) {
         bool used = false;
         snprintf(want, sizeof(want), "%s %u", p->name, n);
-        for (int i = 0; i < HMI_MAX_DEVICES && !used; i++) {
+        for (int i = 0; i < s_hwm && !used; i++) {
             const slot_t *o = &s_slots[i];
             if (o->info.state != HMI_DEV_EMPTY && strcmp(o->info.label, want) == 0) used = true;
         }
@@ -510,11 +570,12 @@ static void bind_slot(slot_t *s, uint8_t slot, const hmi_device_profile_t *p, hm
     s->backoff_ms = HMI_MODBUS_BACKOFF_MIN_MS;
     s->info.slot = slot;
     s->info.profile = p;
+    if ((int)slot + 1 > s_hwm) s_hwm = (int)slot + 1;
     int k = next_block(p, 0);
     s->first_k = (uint8_t)(k < 0 ? 0 : k);
     snprintf(s->info.label, sizeof(s->info.label), "%.18s %u", p->name, inst);
     for (uint8_t i = 0; i < p->meta_count && i < HMI_DEVICE_TAG_SPAN; i++) {
-        uint8_t rel = p->meta[i].tag_id;
+        uint8_t rel = (uint8_t)p->meta[i].tag_id;            /* relative id inside the module */
         if (rel >= HMI_DEVICE_TAG_SPAN) continue;
         s->meta[rel] = p->meta[i];
         s->meta[rel].tag_id = HMI_DEV_TAG(slot, rel);
@@ -562,8 +623,16 @@ void hmi_devmgr_init(uint32_t remove_after_ms)
     memset(s_over, 0, sizeof(s_over));
     for (int i = 0; i < HMI_MAX_DEVICES; i++) { s_slots[i].sock = HAL_SOCK_INVALID; s_slots[i].info.slot = (uint8_t)i; }
     s_remove_after_ms = remove_after_ms;
+    s_hwm = 0;
     if (!s_net_ok) s_net_ok = hal_net_init();
 }
+
+void hmi_devmgr_set_limit(int n)
+{
+    s_limit = (n >= 1 && n <= HMI_MAX_DEVICES) ? n : HMI_MAX_DEVICES;
+}
+
+int hmi_devmgr_limit(void) { return s_limit; }
 
 bool hmi_devmgr_attach_loopback(const char *vendor, const char *product, const char *app,
                                 const char *driver_key, hmi_loopback_fn fn, void *ctx,
@@ -590,7 +659,7 @@ bool hmi_devmgr_attach_loopback(const char *vendor, const char *product, const c
 
 bool hmi_devmgr_is_attached(const char *host, uint16_t port, uint8_t unit)
 {
-    for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (int i = 0; i < s_hwm; i++) {
         const slot_t *s = &s_slots[i];
         if (s->info.state != HMI_DEV_EMPTY && s->info.transport == HMI_TRANSPORT_TCP &&
             s->port == port && s->info.unit_id == unit && strcmp(s->host, host) == 0) return true;
@@ -624,8 +693,8 @@ static int reserved_slots(const hmi_device_candidate_t *c)
 
 static int free_slot_count(uint32_t now_ms)
 {
-    int n = 0;
-    for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+    int n = s_limit > s_hwm ? s_limit - s_hwm : 0;            /* never used: free */
+    for (int i = 0; i < s_hwm && i < s_limit; i++) {
         const slot_t *s = &s_slots[i];
         if (s->info.state == HMI_DEV_EMPTY &&
             !(s->ever_freed && (uint32_t)(now_ms - s->freed_ms) < HMI_DEVICE_SLOT_COOLDOWN_MS)) n++;
@@ -642,7 +711,7 @@ bool hmi_devmgr_attach(const hmi_device_candidate_t *c, hmi_tag_table_t *tags,
     int i = free_slot(now_ms);
     if (i < 0) {
         char why[40];
-        snprintf(why, sizeof(why), "all %d places in use", HMI_MAX_DEVICES);
+        snprintf(why, sizeof(why), "all %d places in use", s_limit);
         overflow_note(c, alarms, now_ms, why);
         return false;
     }
@@ -662,6 +731,9 @@ bool hmi_devmgr_attach(const hmi_device_candidate_t *c, hmi_tag_table_t *tags,
     s->port = c->port;
     snprintf(s->info.endpoint, sizeof(s->info.endpoint), "%s:%u", c->host, (unsigned)c->port);
     if (c->identified) copy_identity(s, c->id.vendor, c->id.product);
+    s->ident_known = c->identified && (c->id.vendor[0] || c->id.product[0]);
+    s->ident_ok = !s->ident_known;
+    s->info.ident = HMI_IDENT_NONE;
     s->next_try_ms = now_ms;
     set_state(s, HMI_DEV_CONNECTING, now_ms);
     LOG(alarms, now_ms, ALARM_SEV_INFO, "%s found at %s", s->info.label, s->info.endpoint);
@@ -670,7 +742,7 @@ bool hmi_devmgr_attach(const hmi_device_candidate_t *c, hmi_tag_table_t *tags,
 
 void hmi_devmgr_poll(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
 {
-    for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (int i = 0; i < s_hwm; i++) {
         slot_t *s = &s_slots[i];
         if (s->info.state == HMI_DEV_EMPTY) continue;
         /* Release a reset button. Kept pending while the queue is full or the link is down, and sent
@@ -712,7 +784,7 @@ static bool queue_seq(slot_t *s, uint16_t addr, const int16_t *seq, uint8_t n)
     return true;
 }
 
-static bool tag_ok(const hmi_tag_table_t *tags, uint8_t id)
+static bool tag_ok(const hmi_tag_table_t *tags, hmi_tag_id_t id)
 {
     uint8_t q = hmi_tag_read_quality(tags, id);
     return q == QUALITY_GOOD || q == QUALITY_SIMULATED;
@@ -726,7 +798,7 @@ void hmi_devmgr_action(uint8_t slot, uint8_t action_idx, int16_t value, hmi_tag_
     const hmi_device_profile_t *p = s->info.profile;
     if (s->info.state == HMI_DEV_EMPTY || !p || action_idx >= p->n_actions) return;
     const hmi_device_action_t *a = &p->actions[action_idx];
-    uint8_t id = HMI_DEV_TAG(slot, a->rel_tag);
+    hmi_tag_id_t id = HMI_DEV_TAG(slot, a->rel_tag);
     const char *who = s->info.label;
     const hmi_tag_meta_t *m = &s->meta[a->rel_tag];
     char v[24];
@@ -885,7 +957,7 @@ uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, u
 {
     (void)tags;
     uint8_t stopped = 0, missed = 0;
-    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (uint8_t i = 0; i < s_hwm; i++) {
         slot_t *s = &s_slots[i];
         if (s->info.state == HMI_DEV_EMPTY || !s->info.profile) continue;
         uint8_t r = stop_one(s, al, now_ms);
@@ -906,7 +978,7 @@ uint8_t hmi_devmgr_stop_all(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, u
 uint8_t hmi_devmgr_stop_pending(hmi_alarm_supervisor_t *al, uint32_t now_ms)
 {
     uint8_t sent = 0;
-    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (uint8_t i = 0; i < s_hwm; i++) {
         slot_t *s = &s_slots[i];
         if (s->info.state != HMI_DEV_ONLINE || !s->info.profile) continue;
         uint8_t r = s->info.stop_result;
@@ -918,18 +990,18 @@ uint8_t hmi_devmgr_stop_pending(hmi_alarm_supervisor_t *al, uint32_t now_ms)
 
 void hmi_devmgr_stop_clear(void)
 {
-    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) s_slots[i].info.stop_result = HMI_STOP_NONE;
+    for (uint8_t i = 0; i < s_hwm; i++) s_slots[i].info.stop_result = HMI_STOP_NONE;
 }
 
 uint8_t hmi_devmgr_estop(bool trip, hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t now_ms)
 {
     if (trip) return hmi_devmgr_stop_all(tags, al, now_ms, NULL);
     uint8_t sent = 0;
-    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (uint8_t i = 0; i < s_hwm; i++) {
         slot_t *s = &s_slots[i];
         const hmi_device_profile_t *p = s->info.profile;
         if (s->info.state == HMI_DEV_EMPTY || !p || p->estop_coil == 0xFFFFu) continue;
-        uint8_t et = HMI_DEV_TAG(i, p->estop_tag);
+        hmi_tag_id_t et = HMI_DEV_TAG(i, p->estop_tag);
         uint8_t st = al->points[et].state;
         if (hmi_tag_read_value(tags, et) == 0) continue;                       /* not tripped */
         if (st == ALARM_PT_UNACK || st == ALARM_PT_RTN_UNACK) {
@@ -956,11 +1028,17 @@ void hmi_devmgr_publish(hmi_device_info_t out[HMI_MAX_DEVICES], uint32_t now_ms)
     }
 }
 
-uint8_t hmi_devmgr_count(uint8_t state_mask)
+int hmi_devmgr_publish_used(hmi_device_info_t *out, uint32_t now_ms)
 {
-    uint8_t n = 0;
-    for (int i = 0; i < HMI_MAX_DEVICES; i++) if (state_mask & (1u << s_slots[i].info.state)) n++;
-    return n;
+    for (int i = 0; i < s_hwm; i++) {
+        out[i] = s_slots[i].info;
+        out[i].remove_in_ms = 0;
+        if (out[i].state == HMI_DEV_OFFLINE && s_remove_after_ms) {
+            uint32_t el = now_ms - out[i].since_ms;
+            out[i].remove_in_ms = el >= s_remove_after_ms ? 0 : s_remove_after_ms - el;
+        }
+    }
+    return s_hwm;
 }
 
 void hmi_devmgr_shutdown(void)

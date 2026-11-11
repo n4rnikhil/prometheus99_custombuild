@@ -24,4 +24,4 @@ idf_component_register(
 # Small-target profile (include/profile_mcu.h). To drop a driver module, remove its source above
 # and add e.g. HMI_DRIVER_ALTIVAR=0 or HMI_DRIVER_TANK_SKID=0 here.
 target_compile_definitions(${COMPONENT_LIB} PRIVATE HMI_PROFILE_MCU HMI_BUILD_ID="esp32s3")
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Wshadow)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Wshadow -Werror)

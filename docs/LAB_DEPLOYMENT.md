@@ -68,7 +68,7 @@ screens, that needs EcoStruxure Operator Terminal Expert on the panel, not this 
 ## Bench plan (what to check before the panel visit)
 
 1. Put the PC (or the P6 / Pi) on the panels' switch with a static address.
-2. Run `plc_simulator` with the same device types as the panel, to rehearse the screens.
+2. Rehearse the screens against test devices of the same types as the panel (`examples/bench.cfg`).
 3. Against the real ATV340, read ETA, RFR and LFR with the runtime's `--plc <ip>/u1@altivar`
    and compare them with the drive's display. Then send a Stop and a 5 Hz setpoint on a drive
    that is safe to move.

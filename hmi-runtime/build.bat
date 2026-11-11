@@ -7,7 +7,6 @@ REM    build.bat test       release build + unit tests + MCU-profile tests + Mod
 REM    build.bat debug      unoptimised build with symbols
 REM    build.bat snapshot   portable C99 tool that renders every screen to BMP files
 REM    build.bat clean      remove build outputs
-REM  The PLC Simulator is a separate app: ..\plc-simulator\build.bat
 REM ==========================================================================
 cd /d "%~dp0"
 
@@ -49,7 +48,8 @@ if not errorlevel 1 (
 if /i "%~1"=="debug" (
     gcc %GCC_WARN% -O0 -g -DHMI_BUILD_ID=\"!BUILD_ID!-debug\" -I include %SRC% %RES% %GCC_LIBS% -mwindows -o industrial_hmi.exe
 ) else (
-    gcc %GCC_WARN% -Os -s -ffunction-sections -fdata-sections -Wl,--gc-sections %GCC_HARDEN% -DHMI_BUILD_ID=\"!BUILD_ID!\" -I include %SRC% %RES% %GCC_LIBS% -mwindows -o industrial_hmi.exe
+    REM no -fdata-sections: on Windows it moves the zero-filled tables (about 1 MB) into the file
+    gcc %GCC_WARN% -Os -s -ffunction-sections -Wl,--gc-sections %GCC_HARDEN% -DHMI_BUILD_ID=\"!BUILD_ID!\" -I include %SRC% %RES% %GCC_LIBS% -mwindows -o industrial_hmi.exe
 )
 if errorlevel 1 (
     echo [FAILED] compile error
@@ -77,8 +77,8 @@ if errorlevel 1 (
     echo [FAILED] fault-injection test build
     exit /b 1
 )
-REM Integration: the runtime against the PLC Simulator's device models (test-only link to ..\plc-simulator)
-gcc %GCC_WARN% -O1 -g -fsanitize=undefined -fsanitize-trap=all -I include -I ..\plc-simulator\include tests\test_integration.c ..\plc-simulator\src\plc_models.c %NET_TEST_SRC% -lws2_32 -lwinmm -o tests\test_integration.exe
+REM Integration: the runtime against the device models in tests\fixtures (test code only)
+gcc %GCC_WARN% -O1 -g -fsanitize=undefined -fsanitize-trap=all -I include -I tests tests\test_integration.c tests\fixtures\device_models.c %NET_TEST_SRC% -lws2_32 -lwinmm -o tests\test_integration.exe
 if errorlevel 1 (
     echo [FAILED] integration test build
     exit /b 1
@@ -92,7 +92,7 @@ if errorlevel 1 (
 echo [PASSED] unit tests
 .\tests\test_integration.exe
 if errorlevel 1 (
-    echo [FAILED] integration tests - the runtime against the simulator models
+    echo [FAILED] integration tests - the runtime against the device models
     exit /b 1
 )
 echo [PASSED] integration tests

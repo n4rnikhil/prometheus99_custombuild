@@ -80,7 +80,6 @@ mb_status_t mb_decode_response(const mb_request_t *req, const uint8_t *adu, size
 /* Bit idx of an FC01 response (false if idx >= count). */
 bool mb_coil_get(const mb_response_t *rsp, uint16_t idx);
 
-const char* mb_status_name(mb_status_t st);
 
 /* --- FC43 / MEI 0x0E: Read Device Identification --- */
 #define MB_FC_ENCAPSULATED       0x2B

@@ -2,13 +2,13 @@
  * @file main_win32.c
  * @brief PLC Simulator for Windows: a bench of simulated PLCs, drives and meters on the network
  *
- * Every device on the bench is a real Modbus TCP server on its own port (1502..1509 by default,
+ * Every device on the bench is a real Modbus TCP server on its own port (1502..1629 by default,
  * the ports the HMI runtime looks at), so any Modbus TCP client - the Prometheus HMI runtime, a
  * Harmony panel, a SCADA - discovers, polls and controls it exactly like hardware. From here you
  * add and remove devices, plug and unplug them, switch PLCs between RUN and STOP, change process
  * values, force inputs, and inject faults (frozen link, error replies).
  *
- * Command line:  plc_simulator.exe [--network] [--port <first port>] [--add <type>]...
+ * Command line:  plc_simulator.exe [--network [--confirm-network]] [--port <first port>] [--add <type>]...
  *   types: tank atv340 atv630 conveyor boiler pumps compressor ahu abb meter unknown
  *
  * One thread: the bench (modbus_server.c) is polled from a 10 ms timer and the window is
@@ -43,6 +43,10 @@ static int       g_log_count;
 static HWND      g_hwnd;
 static int       g_scroll;
 static int       g_content_h;
+static int       g_view_h;                 /* height of the scrolling card area */
+static RECT      g_track;                  /* scroll bar track (empty when everything fits) */
+static int       g_drag_dy = -1;           /* dragging the scroll bar: grab offset in the thumb */
+static bool      g_many;                   /* more than 8 devices: cards start compact */
 static float     g_scale = 1.0f;
 static uint32_t  g_last_paint_ms;
 
@@ -69,22 +73,24 @@ static void lab_log(const char *fmt, ...)
 
 static void on_bench_log(const char *text) { lab_log("%s", text); }
 
-/* Start the HMI runtime: next to this exe, or in the sibling hmi-runtime folder of the repository */
+/* Start the HMI runtime: next to this exe, in ..\hmi-runtime (simulator inside the HMI's folder),
+ * or in ..\industrial_hmi\hmi-runtime (simulator next to the HMI's folder) */
 static void open_hmi(void)
 {
-    char exe[MAX_PATH], dir[MAX_PATH + 32], path[MAX_PATH + 64];
+    static const char * const where[3] = { "", "\\..\\hmi-runtime", "\\..\\industrial_hmi\\hmi-runtime" };
+    char exe[MAX_PATH], dir[MAX_PATH + 40], path[MAX_PATH + 72];
     DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof(exe));
     char *slash = (n > 0 && n < sizeof(exe)) ? strrchr(exe, '\\') : NULL;
     if (!slash) return;
     *slash = '\0';
-    snprintf(dir, sizeof(dir), "%.259s", exe);                          /* next to this app ... */
-    snprintf(path, sizeof(path), "%.291s\\industrial_hmi.exe", dir);
-    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {          /* ... or in the repository's hmi-runtime */
-        snprintf(dir, sizeof(dir), "%.259s\\..\\hmi-runtime", exe);
-        snprintf(path, sizeof(path), "%.291s\\industrial_hmi.exe", dir);
+    bool found = false;
+    for (int i = 0; i < 3 && !found; i++) {
+        snprintf(dir, sizeof(dir), "%.259s%s", exe, where[i]);
+        snprintf(path, sizeof(path), "%.299s\\industrial_hmi.exe", dir);
+        found = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
     }
-    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
-        lab_log("industrial_hmi.exe not found next to this app or in ..\\hmi-runtime: build the HMI runtime first");
+    if (!found) {
+        lab_log("industrial_hmi.exe not found next to this app, in ..\\hmi-runtime or ..\\industrial_hmi\\hmi-runtime");
         return;
     }
     STARTUPINFOA si;
@@ -101,6 +107,13 @@ static void open_hmi(void)
     } else {
         lab_log("Could not start industrial_hmi.exe (error %lu)", (unsigned long)GetLastError());
     }
+}
+
+/* Network mode: anyone on the network could write to the devices. Ask before switching it on. */
+static bool confirm_network(void)
+{
+    return MessageBoxA(g_hwnd, "Network mode lets every computer on this network read and WRITE every simulated register, with no password (Modbus TCP has no security).\n\nUse it only on an isolated test network. Switch to network mode?",
+                       "PLC Simulator - network mode", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) == IDYES;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -122,11 +135,11 @@ static void open_hmi(void)
 
 typedef enum {
     ACT_NONE, ACT_OPEN_HMI, ACT_LOCAL, ACT_NETWORK, ACT_ADD, ACT_PLUG, ACT_FREEZE, ACT_ERRORS,
-    ACT_REMOVE, ACT_MINUS, ACT_PLUS, ACT_COIL, ACT_RUNSTOP
+    ACT_REMOVE, ACT_MINUS, ACT_PLUS, ACT_COIL, ACT_RUNSTOP, ACT_DETAILS, ACT_ADD_MIXED, ACT_REMOVE_ALL
 } action_t;
 
 typedef struct { RECT r; uint8_t act, plc, row; } hit_t;
-static hit_t g_hits[384];
+static hit_t g_hits[4096];
 static int   g_nhits;
 static int   g_hover = -1;
 
@@ -207,10 +220,14 @@ static int card_layout(HDC dc, int idx, RECT c, bool draw)
 {
     lab_plc_t *p = bench_station(idx);
     const sim_type_info_t *ti = sim_type_info(p->sim.type);
+    bool details = p->ui_details == 1 || (p->ui_details == 0 && !g_many);
     if (draw) fill_round(dc, c, S(18), C_CARD, C_BORDER);
 
-    /* header: status dot, name, identity, status */
+    /* header: status dot, name, identity, status, and the Details switch */
     int x = c.left + S(18), y = c.top + S(14);
+    int det_w = S(104);
+    if (draw) button(dc, c.right - S(18) - det_w, c.top + S(10), det_w, S(28), details ? "Hide details" : "Details",
+                     0, ACT_DETAILS, idx, 0);
     if (draw) {
         const char *status;
         COLORREF sc;
@@ -244,13 +261,14 @@ static int card_layout(HDC dc, int idx, RECT c, bool draw)
             snprintf(sub, sizeof(sub), "%s  -  port %u  -  not a PLC: the HMI should ignore it", ti->model, (unsigned)p->port);
         RECT subr = { x, y + S(24), c.right - S(18), y + S(42) };
         text_in(dc, g_f_small, C_MUTED, subr, sub, DT_LEFT);
-        RECT str = { c.right - S(240), y, c.right - S(18), y + S(22) };
+        int str_r = c.right - S(18) - det_w - S(10);
+        RECT str = { str_r - S(220), y, str_r, y + S(22) };
         text_in(dc, g_f_small, sc, str, status, DT_RIGHT);
     }
 
     /* registers: label, value, -/+ for what the lab may change */
     int ry = c.top + S(64);
-    for (uint8_t r = 0; r < ti->nrows; r++) {
+    for (uint8_t r = 0; r < ti->nrows && details; r++) {
         const sim_row_t *row = &ti->rows[r];
         if (row->flags & SIM_COIL) continue;
         if (draw) {
@@ -278,8 +296,8 @@ static int card_layout(HDC dc, int idx, RECT c, bool draw)
     /* coils: switches (lab inputs), buttons (pulse), status chips (read only) */
     int px = c.left + S(18);
     bool any_coil = false;
-    ry += S(6);
-    for (uint8_t r = 0; r < ti->nrows; r++) {
+    if (details) ry += S(6);
+    for (uint8_t r = 0; r < ti->nrows && details; r++) {
         const sim_row_t *row = &ti->rows[r];
         if (!(row->flags & SIM_COIL)) continue;
         any_coil = true;
@@ -309,16 +327,16 @@ static int card_layout(HDC dc, int idx, RECT c, bool draw)
     int fy = ry + S(8);
     if (draw) {
         int fx = c.left + S(18);
-        RECT b = button(dc, fx, fy, S(96), S(34), p->plugged ? "Unplug" : "Plug in", p->plugged ? 0 : 1, ACT_PLUG, idx, 0);
+        RECT b = button(dc, fx, fy, S(84), S(34), p->plugged ? "Unplug" : "Plug in", p->plugged ? 0 : 1, ACT_PLUG, idx, 0);
         fx = b.right + S(8);
         if (ti->app) {
-            b = button(dc, fx, fy, S(96), S(34), p->sim.stopped ? "RUN" : "STOP", p->sim.stopped ? 2 : 0, ACT_RUNSTOP, idx, 0);
+            b = button(dc, fx, fy, S(72), S(34), p->sim.stopped ? "RUN" : "STOP", p->sim.stopped ? 2 : 0, ACT_RUNSTOP, idx, 0);
             fx = b.right + S(8);
         }
-        b = button(dc, fx, fy, S(110), S(34), p->sim.freeze ? "Unfreeze" : "Freeze link", p->sim.freeze ? 2 : 0, ACT_FREEZE, idx, 0);
+        b = button(dc, fx, fy, S(100), S(34), p->sim.freeze ? "Unfreeze" : "Freeze link", p->sim.freeze ? 2 : 0, ACT_FREEZE, idx, 0);
         fx = b.right + S(8);
-        button(dc, fx, fy, S(118), S(34), p->sim.errors ? "Stop errors" : "Error replies", p->sim.errors ? 2 : 0, ACT_ERRORS, idx, 0);
-        button(dc, c.right - S(18) - S(84), fy, S(84), S(34), "Remove", 3, ACT_REMOVE, idx, 0);
+        button(dc, fx, fy, S(108), S(34), p->sim.errors ? "Stop errors" : "Error replies", p->sim.errors ? 2 : 0, ACT_ERRORS, idx, 0);
+        button(dc, c.right - S(18) - S(80), fy, S(80), S(34), "Remove", 3, ACT_REMOVE, idx, 0);
     }
     return fy + S(34) + S(16) - c.top;
 }
@@ -343,10 +361,12 @@ static void paint(HDC dc, int w, int h)
     int log_h = S(150), m = S(24);
 
     /* header layout first: the "Add" chips wrap, so the header height depends on the width */
-    RECT chips[SIM_TYPE_COUNT];
+    enum { NCHIPS = SIM_TYPE_COUNT + 2 };                   /* the types, "10 mixed", "Remove all" */
+    static const char * const extra[2] = { "+  10 mixed  (Shift: 10 of a type)", "Remove all" };
+    RECT chips[NCHIPS];
     int ax = m + S(40), ay = S(76);
-    for (int t = 0; t < SIM_TYPE_COUNT; t++) {
-        int bw = text_w(dc, g_f_body, s_add_labels[t]) + S(28);
+    for (int t = 0; t < NCHIPS; t++) {
+        int bw = text_w(dc, g_f_body, t < SIM_TYPE_COUNT ? s_add_labels[t] : extra[t - SIM_TYPE_COUNT]) + S(28);
         if (ax + bw > w - m && ax > m + S(40)) { ax = m + S(40); ay += S(42); }
         RECT r = { ax, ay, ax + bw, ay + S(34) };
         chips[t] = r;
@@ -355,7 +375,8 @@ static void paint(HDC dc, int w, int h)
     int top_h = ay + S(34) + S(14);
 
     /* cards (scrolling area): rows as tall as their tallest card */
-    int cols = w >= S(1060) ? 2 : 1;
+    g_many = bench_count() > 8;
+    int cols = w >= S(1700) ? 3 : w >= S(1100) ? 2 : 1;
     int gap = S(16);
     int cw = (w - 2 * m - gap * (cols - 1)) / cols;
     int order[LAB_MAX_PLC], hgt[LAB_MAX_PLC], n = 0;
@@ -375,6 +396,7 @@ static void paint(HDC dc, int w, int h)
         g_content_h += row_h[r] + gap;
     }
     int view_h = h - top_h - log_h;
+    g_view_h = view_h;
     int max_scroll = g_content_h > view_h ? g_content_h - view_h : 0;
     if (g_scroll > max_scroll) g_scroll = max_scroll;
     if (g_scroll < 0) g_scroll = 0;
@@ -385,7 +407,8 @@ static void paint(HDC dc, int w, int h)
     for (int r = 0; r < rows; r++) {
         for (int k = r * cols; k < n && k < (r + 1) * cols; k++) {
             int col = k % cols;
-            RECT c = { m + col * (cw + gap), yrow, m + col * (cw + gap) + cw, yrow + row_h[r] };
+            RECT c = { m + col * (cw + gap), yrow, m + col * (cw + gap) + cw, yrow + hgt[k] };
+            if (c.bottom <= top_h || c.top >= h - log_h) continue;        /* off screen: not drawn */
             int first_hit = g_nhits;
             card_layout(dc, order[k], c, true);
             for (int hh = first_hit; hh < g_nhits; hh++)          /* hidden parts of a scrolled card are not clickable */
@@ -399,6 +422,18 @@ static void paint(HDC dc, int w, int h)
         RECT er2 = { m, top_h + S(80), w - m, top_h + S(110) };
         text_in(dc, g_f_body, C_MUTED, er2, "Add a device above, then press Open HMI. Each device is a real Modbus TCP server.", DT_CENTER);
     }
+    /* scroll bar: drag it, or use the wheel, Page Up / Page Down, Home / End */
+    memset(&g_track, 0, sizeof(g_track));
+    if (max_scroll > 0) {
+        RECT tr = { w - S(14), top_h + S(4), w - S(4), h - log_h - S(4) };
+        g_track = tr;
+        int th = (int)((long)(tr.bottom - tr.top) * view_h / g_content_h);
+        if (th < S(40)) th = S(40);
+        int ty = tr.top + (int)((long)(tr.bottom - tr.top - th) * g_scroll / max_scroll);
+        RECT thumb = { tr.left, ty, tr.right, ty + th };
+        fill_round(dc, tr, S(10), C_CARD, C_CARD);
+        fill_round(dc, thumb, S(10), g_drag_dy >= 0 ? C_MUTED : C_BORDER, C_BORDER);
+    }
     SelectClipRgn(dc, NULL);
     DeleteObject(clip);
 
@@ -407,6 +442,9 @@ static void paint(HDC dc, int w, int h)
     RECT hr = { 0, 0, w, top_h };
     FillRect(dc, &hr, hb);
     text_at(dc, g_f_title, C_TEXT, m, S(14), "PLC Simulator");
+    char cnt[48];
+    snprintf(cnt, sizeof(cnt), "%d of %d devices", n, PLC_MAX_STATIONS);
+    text_at(dc, g_f_body, C_MUTED, m + text_w(dc, g_f_title, "PLC Simulator") + S(14), S(20), cnt);
     char sub[160];
     unsigned b0 = bench_base_port(), b1 = b0 + PLC_MAX_STATIONS - 1;
     if (bench_network()) snprintf(sub, sizeof(sub), "Network mode: other computers and HMI panels reach these devices at %s, ports %u-%u",
@@ -429,6 +467,11 @@ static void paint(HDC dc, int w, int h)
     text_at(dc, g_f_small, C_MUTED, m, S(84), "Add");
     for (int t = 0; t < SIM_TYPE_COUNT; t++)
         button(dc, chips[t].left, chips[t].top, chips[t].right - chips[t].left, S(34), s_add_labels[t], 0, ACT_ADD, t, 0);
+    button(dc, chips[SIM_TYPE_COUNT].left, chips[SIM_TYPE_COUNT].top, chips[SIM_TYPE_COUNT].right - chips[SIM_TYPE_COUNT].left,
+           S(34), extra[0], 1, ACT_ADD_MIXED, 0, 0);
+    if (n > 0)
+        button(dc, chips[NCHIPS - 1].left, chips[NCHIPS - 1].top, chips[NCHIPS - 1].right - chips[NCHIPS - 1].left,
+               S(34), extra[1], 3, ACT_REMOVE_ALL, 0, 0);
     HPEN lp = CreatePen(PS_SOLID, 1, C_BORDER);
     HGDIOBJ old = SelectObject(dc, lp);
     MoveToEx(dc, 0, top_h - 1, NULL); LineTo(dc, w, top_h - 1);
@@ -466,8 +509,25 @@ static void click(int hi)
     switch ((action_t)h.act) {
         case ACT_OPEN_HMI: open_hmi(); InvalidateRect(g_hwnd, NULL, FALSE); return;
         case ACT_LOCAL:    bench_set_network(false); InvalidateRect(g_hwnd, NULL, FALSE); return;
-        case ACT_NETWORK:  bench_set_network(true); InvalidateRect(g_hwnd, NULL, FALSE); return;
-        case ACT_ADD:      bench_add((sim_type_t)h.plc); InvalidateRect(g_hwnd, NULL, FALSE); return;   /* plc = device type */
+        case ACT_NETWORK:
+            if (!bench_network() && !confirm_network()) return;
+            bench_set_network(true); InvalidateRect(g_hwnd, NULL, FALSE); return;
+        case ACT_ADD: {                                                  /* plc = device type; Shift: 10 of them */
+            int k = (GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
+            for (int i = 0; i < k && bench_add((sim_type_t)h.plc) >= 0; i++) {}
+            InvalidateRect(g_hwnd, NULL, FALSE);
+            return;
+        }
+        case ACT_ADD_MIXED: bench_add_mixed(10); InvalidateRect(g_hwnd, NULL, FALSE); return;
+        case ACT_REMOVE_ALL: {
+            char q[96];
+            snprintf(q, sizeof(q), "Remove all %d devices from the bench?", bench_count());
+            if (MessageBoxA(g_hwnd, q, "PLC Simulator", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
+            for (int i = 0; i < LAB_MAX_PLC; i++) if (bench_station(i)) bench_remove(i);
+            g_scroll = 0;
+            InvalidateRect(g_hwnd, NULL, FALSE);
+            return;
+        }
         default: break;
     }
     lab_plc_t *p = bench_station(h.plc);
@@ -489,6 +549,11 @@ static void click(int hi)
             lab_log(p->sim.errors ? "%s: answering every request with exception 04" : "%s: answering normally", p->name);
             break;
         case ACT_REMOVE: bench_remove(h.plc); break;
+        case ACT_DETAILS: {
+            bool shown = p->ui_details == 1 || (p->ui_details == 0 && !g_many);
+            p->ui_details = shown ? 2 : 1;
+            break;
+        }
         case ACT_MINUS:  sim_nudge(&p->sim, h.row, -1); break;
         case ACT_PLUS:   sim_nudge(&p->sim, h.row, +1); break;
         case ACT_COIL: {
@@ -540,7 +605,32 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             mm->ptMinTrackSize.y = S(600);
             return 0;
         }
+        case WM_LBUTTONDOWN: {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            if (g_track.bottom > g_track.top && PtInRect(&g_track, pt)) {
+                int max_scroll = g_content_h - g_view_h, len = g_track.bottom - g_track.top;
+                int th = (int)((long)len * g_view_h / g_content_h);
+                if (th < S(40)) th = S(40);
+                int ty = g_track.top + (int)((long)(len - th) * g_scroll / (max_scroll > 0 ? max_scroll : 1));
+                if (pt.y < ty || pt.y >= ty + th) {                      /* click on the track: jump there */
+                    g_scroll = (int)((long)(pt.y - g_track.top - th / 2) * max_scroll / (len - th > 0 ? len - th : 1));
+                    ty = pt.y - th / 2;
+                }
+                g_drag_dy = pt.y - ty;
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        }
         case WM_MOUSEMOVE: {
+            if (g_drag_dy >= 0) {
+                int max_scroll = g_content_h - g_view_h, len = g_track.bottom - g_track.top;
+                int th = (int)((long)len * g_view_h / (g_content_h > 0 ? g_content_h : 1));
+                if (th < S(40)) th = S(40);
+                g_scroll = (int)((long)(GET_Y_LPARAM(lp) - g_drag_dy - g_track.top) * max_scroll / (len - th > 0 ? len - th : 1));
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
             int hi = hit_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             if (hi != g_hover) {
                 g_hover = hi;
@@ -555,7 +645,22 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_SETCURSOR:
             if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(NULL, g_hover >= 0 ? IDC_HAND : IDC_ARROW)); return TRUE; }
             break;
-        case WM_LBUTTONUP: click(hit_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))); return 0;
+        case WM_LBUTTONUP:
+            if (g_drag_dy >= 0) { g_drag_dy = -1; ReleaseCapture(); InvalidateRect(hwnd, NULL, FALSE); return 0; }
+            click(hit_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)));
+            return 0;
+        case WM_KEYDOWN: {
+            int page = g_view_h > S(80) ? g_view_h - S(40) : S(40);
+            if (wp == VK_NEXT) g_scroll += page;
+            else if (wp == VK_PRIOR) g_scroll -= page;
+            else if (wp == VK_DOWN) g_scroll += S(60);
+            else if (wp == VK_UP) g_scroll -= S(60);
+            else if (wp == VK_HOME) g_scroll = 0;
+            else if (wp == VK_END) g_scroll = g_content_h;
+            else break;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
         case WM_MOUSEWHEEL:
             g_scroll -= GET_WHEEL_DELTA_WPARAM(wp) * S(60) / WHEEL_DELTA;
             InvalidateRect(hwnd, NULL, FALSE);
@@ -586,19 +691,19 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     ReleaseDC(NULL, sdc);
     make_fonts();
 
-    /* command line: --network, --port <first port>, --add <type> (repeatable), --open-hmi */
+    /* command line: --network, --port <first port>, --add <type>[:n] (repeatable), --open-hmi */
     uint16_t base = PLC_DEFAULT_PORT;
-    bool network = false, open_hmi_now = false;
-    sim_type_t adds[PLC_MAX_STATIONS];
+    bool network = false, confirmed = false, open_hmi_now = false;
+    const char *adds[PLC_MAX_STATIONS];
     int nadds = 0;
     for (int i = 1; i < __argc; i++) {
         const char *a = __argv[i], *next = i + 1 < __argc ? __argv[i + 1] : NULL;
         if (strcmp(a, "--network") == 0) network = true;
+        else if (strcmp(a, "--confirm-network") == 0) confirmed = true;
         else if (strcmp(a, "--open-hmi") == 0) open_hmi_now = true;   /* one-click bench: start the HMI too */
         else if (strcmp(a, "--port") == 0 && next) { long v = strtol(next, NULL, 10); if (v > 0 && v < 65536 - PLC_MAX_STATIONS) base = (uint16_t)v; i++; }
         else if (strcmp(a, "--add") == 0 && next) {
-            sim_type_t t = bench_type_by_name(next);
-            if (t != SIM_TYPE_COUNT && nadds < PLC_MAX_STATIONS) adds[nadds++] = t;
+            if (nadds < PLC_MAX_STATIONS) adds[nadds++] = next;           /* "tank", "tank:20", "mixed:100" */
             i++;
         }
     }
@@ -620,7 +725,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                     "PLC Simulator", MB_ICONERROR | MB_OK);
         return 1;
     }
-    bench_set_network(network);
+    bench_set_network(network && (confirmed || confirm_network()));
     timeBeginPeriod(1);
 
     WNDCLASSEXA wc;
@@ -637,8 +742,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                              CW_USEDEFAULT, CW_USEDEFAULT, S(1180), S(860), NULL, NULL, inst, NULL);
     if (!g_hwnd) return 1;
 
-    if (nadds == 0) adds[nadds++] = SIM_TANK;                 /* start with one PLC on the bench */
-    for (int i = 0; i < nadds; i++) bench_add(adds[i]);
+    if (nadds == 0) adds[nadds++] = "tank";                   /* start with one PLC on the bench */
+    for (int i = 0; i < nadds; i++)
+        if (bench_add_spec(adds[i]) < 0) lab_log("Unknown device type on the command line: %.40s", adds[i]);
     lab_log("Press Open HMI (or start the HMI runtime anywhere on the network). Add, unplug or break devices here.");
     SetTimer(g_hwnd, TIMER_POLL, POLL_MS, NULL);
     ShowWindow(g_hwnd, show);

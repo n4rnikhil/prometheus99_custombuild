@@ -15,9 +15,7 @@
 #include "core/tags.h"
 
 typedef enum {
-    HMI_DRV_MODE_SIMULATOR  = 0,
-    HMI_DRV_MODE_MODBUS_TCP = 1,
-    HMI_DRV_MODE_HOST       = 2
+    HMI_DRV_MODE_HOST       = 2      /* the host computer's own telemetry (driver_host.c) */
 } hmi_driver_mode_t;
 
 typedef enum {
@@ -32,7 +30,7 @@ typedef struct {
     uint8_t  link_state;         /* hmi_link_state_t */
     uint8_t  unit_id;
     uint8_t  reserved;
-    char     endpoint[48];       /* "127.0.0.1:502" or "SIMULATOR" */
+    char     endpoint[48];       /* "127.0.0.1:502" or "Host" */
     uint32_t requests_sent;
     uint32_t responses_ok;
     uint32_t timeouts;

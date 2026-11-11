@@ -50,12 +50,9 @@ void app_pointer_down(int x, int y);
 void app_pointer_move(int x, int y);
 void app_pointer_up(int x, int y);
 void app_pointer_cancel(void);
-bool app_pointer_active(void);
 void app_key(uint16_t key, bool shift);
 
 void app_render(app_present_fn present, void *ctx);
-int  app_width(void);
-int  app_height(void);
 
 bool app_running(void);
 void app_stop(void);                 /* thread-safe */

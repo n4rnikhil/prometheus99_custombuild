@@ -28,19 +28,23 @@
  *   --no-discovery             only the --plc addresses, no scanning
  *   --config <path>            read options from this file instead of hmi.cfg;  --no-config: none
  *   --remove-after-ms <n>      offline devices leave the dashboard after n ms (0 = never)
+ *   --max-devices <n>          attach at most n devices (default and maximum: HMI_MAX_DEVICES)
  *   --log <path>               alarm log file (default alarms.log next to the executable)
  *   --no-log                   disable the persistent alarm log
  *   --exit-after-ms <n>        close automatically after n ms (tests / measure.bat)
  *   --report <path>            write measured runtime statistics on exit
  *   --verify-log <path>        verify an alarm log's signature chain, print result, exit (0 = ok)
- *   --key <path>               device key file (default hmi.key next to the executable)
- *   --vault <path>             credential vault (default security.vault next to the executable)
+ *   --key <path>               device key file (default hmi.key in the protected folder, hal_secure_dir)
+ *   --vault <path>             credential vault (default security.vault in the protected folder)
  *   --set-pin <role>           set a role's site PIN (asked for twice, never on the command line), exit
  *   --allow-factory-pins       BENCH ONLY: let roles sign in with the factory PINs (1111/2222/3333)
  *   --color-scheme <status|high-performance>   normal states green (default) or grey (ISA-101)
  *   --no-sound                 no alarm tone from this panel (a wired horn output still works)
+ *   --emergency-sound <file>   sound looped during an EMERGENCY (default emergency.mp3 next to the program, else a built-in siren)
+ *   --alarm-sound <file>       alarm sound instead of the two-tone (default alarm.mp3 next to the program)
  */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -91,11 +95,43 @@ typedef struct {
     hmi_watchdog_t         fb_watchdog;   /* fieldbus-side: supervises the UI heartbeat */
     hmi_fieldbus_stats_t   fb_stats;
     hmi_device_info_t      devices[HMI_MAX_DEVICES];
+    uint16_t               ntags;         /* tags and alarm points in use: only these are copied */
+    uint16_t               ndev;          /* device places in use: only these are copied */
 } hmi_shared_state_t;
 
 static hmi_shared_state_t g_shared;       /* written only by the fieldbus thread */
 static hmi_seqlock_t      g_seqlock;
 static hmi_shared_state_t g_snap;         /* UI thread's private copy */
+
+/* Copies of the shared state touch only the tags, alarm points and device places in use, so the
+ * memory reserved for the full capacity (HMI_MAX_DEVICES) stays out of the working set. */
+static void copy_tags(hmi_tag_table_t *d, const hmi_tag_table_t *s, uint16_t ntags, uint16_t ndev)
+{
+    memcpy(d->tags, s->tags, (size_t)ntags * sizeof(s->tags[0]));
+    memcpy(d->trend_samples, s->trend_samples, (size_t)ndev * sizeof(s->trend_samples[0]));
+    memcpy(d->trend_head, s->trend_head, ndev);
+    memcpy(d->trend_count, s->trend_count, ndev);
+    d->global_dirty_mask = s->global_dirty_mask;
+}
+
+static void copy_alarms(hmi_alarm_supervisor_t *d, const hmi_alarm_supervisor_t *s, uint16_t npoints)
+{
+    size_t a = offsetof(hmi_alarm_supervisor_t, latch_state), b = offsetof(hmi_alarm_supervisor_t, journal);
+    uint16_t jc = s->journal_count <= HMI_ALARM_JOURNAL_SIZE ? s->journal_count : HMI_ALARM_JOURNAL_SIZE;
+    memcpy(d->points, s->points, (size_t)npoints * sizeof(s->points[0]));
+    memcpy((char *)d + a, (const char *)s + a, b - a);                  /* the summary */
+    memcpy(d->journal, s->journal, (size_t)jc * sizeof(s->journal[0])); /* records written so far */
+    d->journal_head = s->journal_head;
+    d->journal_count = jc;
+    d->journal_total = s->journal_total;
+}
+
+static uint16_t tags_in_use(const hmi_alarm_supervisor_t *al)
+{
+    uint16_t n = hmi_tag_ids_in_use();
+    if (al->points_in_use > n) n = al->points_in_use;
+    return n > HMI_MAX_TAGS ? (uint16_t)HMI_MAX_TAGS : n;
+}
 
 /* Heartbeats (uptime ms), each written by one thread, read by the other */
 static hal_atomic_t g_hb_ui_ms;
@@ -126,6 +162,14 @@ typedef struct { uint8_t slot, action; int16_t value; } dev_cmd_t;
 static dev_cmd_t     g_dev_cmds[DEV_CMD_RING];
 static hal_atomic_t  g_dev_cmd_head;   /* written by UI */
 static hal_atomic_t  g_dev_cmd_tail;   /* written by fieldbus */
+
+/* UI -> fieldbus alarm handling: shelve, unshelve, out of service (SPSC ring, already authorised) */
+#define ALARM_OP_RING 16
+enum { ALARM_OP_SHELVE = 1, ALARM_OP_UNSHELVE, ALARM_OP_OOS };
+typedef struct { hmi_tag_id_t tag; uint8_t op; } alarm_op_t;
+static alarm_op_t    g_alarm_ops[ALARM_OP_RING];
+static hal_atomic_t  g_alarm_op_head;  /* written by UI */
+static hal_atomic_t  g_alarm_op_tail;  /* written by fieldbus */
 
 /* discovery -> fieldbus: found devices (SPSC ring) */
 #define CAND_RING 8
@@ -172,6 +216,18 @@ static hmi_watchdog_t        g_ui_wd;          /* UI-side: supervises the fieldb
 static hmi_gesture_tracker_t g_gesture;
 static uint8_t               g_active_screen = SCREEN_PROCESS_OVERVIEW;
 static uint32_t              g_seqlock_retries;
+/* Data-to-screen latency probe: from the moment a device's read cycle lands in the fieldbus tag
+ * table (hmi_device_info_t.data_us) to the end of the first frame drawn with that data. */
+typedef struct {
+    uint64_t seen_us[HMI_MAX_DEVICES];   /* data_us already counted, per slot */
+    uint64_t win_sum_us;                 /* current 1 s window */
+    uint32_t win_n, win_max_us;
+    uint32_t win_start_ms;
+    uint32_t avg_us, max_us;             /* last complete window (shown on Diagnostics) */
+    uint64_t total_sum_us;               /* whole run (written to --report) */
+    uint32_t total_n, total_max_us, over_target;
+} latency_probe_t;
+static latency_probe_t       g_latency;
 static uint32_t              g_crc_mismatches;
 static uint32_t              g_ui_frame_hz;
 static uint32_t              g_exe_size;
@@ -360,6 +416,20 @@ static void fb_handle_device_commands(hmi_tag_table_t *tags, hmi_alarm_superviso
     }
 }
 
+static void fb_handle_alarm_ops(hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
+{
+    int32_t tail = hal_atomic_load(&g_alarm_op_tail);
+    int32_t head = hal_atomic_load(&g_alarm_op_head);
+    while (tail != head) {
+        const alarm_op_t *o = &g_alarm_ops[(uint32_t)tail % ALARM_OP_RING];
+        if (o->op == ALARM_OP_SHELVE)        hmi_alarms_shelve(alarms, o->tag, HMI_ALARM_SHELVE_MS, now_ms);
+        else if (o->op == ALARM_OP_UNSHELVE) hmi_alarms_unshelve(alarms, o->tag, now_ms);
+        else if (o->op == ALARM_OP_OOS)      hmi_alarms_set_out_of_service(alarms, o->tag, true, now_ms);
+        tail++;
+        hal_atomic_store(&g_alarm_op_tail, tail);
+    }
+}
+
 static void fb_discard_device_commands(hmi_alarm_supervisor_t *alarms, uint32_t now_ms)
 {
     int32_t tail = hal_atomic_load(&g_dev_cmd_tail);
@@ -397,13 +467,15 @@ static bool discovery_attached(const char *host, uint16_t port, uint8_t unit)
 {
     static hmi_device_info_t devs[HMI_MAX_DEVICES];
     uint32_t seq;
+    uint16_t nd;
     do {
         seq = hmi_seqlock_read_begin(&g_seqlock);
-        memcpy(devs, g_shared.devices, sizeof(devs));
+        nd = g_shared.ndev <= HMI_MAX_DEVICES ? g_shared.ndev : (uint16_t)HMI_MAX_DEVICES;
+        memcpy(devs, g_shared.devices, (size_t)nd * sizeof(devs[0]));
     } while (hmi_seqlock_read_retry(&g_seqlock, seq));
     char ep[24];
     snprintf(ep, sizeof(ep), "%s:%u", host, (unsigned)port);
-    for (int i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (int i = 0; i < nd; i++) {
         if (devs[i].state != HMI_DEV_EMPTY && devs[i].transport == HMI_TRANSPORT_TCP &&
             devs[i].unit_id == unit && strcmp(devs[i].endpoint, ep) == 0) return true;
     }
@@ -420,13 +492,16 @@ static void fb_publish(const hmi_tag_table_t *tags, const hmi_alarm_supervisor_t
                        const hmi_watchdog_t *wd, const hmi_fieldbus_stats_t *st, uint32_t now_ms)
 {
     static hmi_device_info_t devs[HMI_MAX_DEVICES];
-    hmi_devmgr_publish(devs, now_ms);
+    uint16_t nd = (uint16_t)hmi_devmgr_publish_used(devs, now_ms);
+    uint16_t nt = tags_in_use(alarms);
     hmi_seqlock_write_begin(&g_seqlock);
-    g_shared.tags        = *tags;
-    g_shared.alarms      = *alarms;
+    copy_tags(&g_shared.tags, tags, nt, nd);
+    copy_alarms(&g_shared.alarms, alarms, nt);
     g_shared.fb_watchdog = *wd;
     g_shared.fb_stats    = *st;
-    memcpy(g_shared.devices, devs, sizeof(devs));
+    memcpy(g_shared.devices, devs, (size_t)nd * sizeof(devs[0]));
+    g_shared.ntags = nt;
+    g_shared.ndev  = nd;
     hmi_seqlock_write_end(&g_seqlock);
 }
 
@@ -459,6 +534,8 @@ static void fieldbus_thread(void *param)
 
     uint32_t last_trend_ms = now_ms - 1000u;
     uint32_t last_wd_ms = now_ms;
+    uint32_t last_publish_ms = now_ms - HMI_PUBLISH_PERIOD_MS;
+    uint32_t last_eval_ms = now_ms - HMI_ALARM_EVAL_MS;
 
     while (hal_atomic_load(&g_running)) {
         uint64_t now_us = hmi_timer_get_us();
@@ -502,7 +579,7 @@ static void fieldbus_thread(void *param)
             for (int b = 0; m && b < 32; b++) {
                 if (!(m & (1u << b))) continue;
                 m &= ~(1u << b);
-                uint8_t tag = (uint8_t)(w * 32 + b);
+                hmi_tag_id_t tag = (hmi_tag_id_t)(w * 32 + b);
                 if (!hmi_alarms_acknowledge_point(&alarms, tag, now_ms)) continue;
                 const hmi_tag_meta_t *meta = hmi_tag_get_meta(tag);
                 char msg[57];
@@ -512,6 +589,7 @@ static void fieldbus_thread(void *param)
             }
         }
         fb_handle_device_commands(&tags, &alarms, now_ms);
+        fb_handle_alarm_ops(&alarms, now_ms);
 
         /* 3. Cyclic I/O */
         fb_attach_found(&tags, &alarms, now_ms);
@@ -523,18 +601,21 @@ static void fieldbus_thread(void *param)
             last_trend_ms += 1000u;
             if ((uint32_t)(now_ms - last_trend_ms) >= 1000u) last_trend_ms = now_ms;   /* after a stall */
             static hmi_device_info_t devs[HMI_MAX_DEVICES];
-            hmi_devmgr_publish(devs, now_ms);
-            for (uint8_t d = 0; d < HMI_MAX_DEVICES; d++) {
+            int nd = hmi_devmgr_publish_used(devs, now_ms);
+            for (uint8_t d = 0; d < nd; d++) {
                 if (!hmi_device_present(&devs[d]) || devs[d].profile->trend_tag == HMI_REL_NONE) continue;
-                uint8_t id = HMI_DEV_TAG(d, devs[d].profile->trend_tag);
+                hmi_tag_id_t id = HMI_DEV_TAG(d, devs[d].profile->trend_tag);
                 uint8_t tq = hmi_tag_read_quality(&tags, id);
                 hmi_tags_push_trend(&tags, d, (tq == QUALITY_GOOD || tq == QUALITY_SIMULATED)
                                               ? hmi_tag_read_value(&tags, id) : HMI_TREND_GAP);
             }
         }
 
-        /* 5. Alarms */
-        hmi_alarms_evaluate(&alarms, &tags, now_ms);
+        /* 5. Alarms, every HMI_ALARM_EVAL_MS (devices answer every 100 ms), and at once after a command */
+        if (bits || (uint32_t)(now_ms - last_eval_ms) >= HMI_ALARM_EVAL_MS) {
+            last_eval_ms = now_ms;
+            hmi_alarms_evaluate(&alarms, &tags, now_ms);
+        }
 
         /* 6. Supervise the UI loop */
         if ((uint32_t)(now_ms - last_wd_ms) >= HMI_WATCHDOG_TICK_MS) {
@@ -549,11 +630,16 @@ static void fieldbus_thread(void *param)
         /* 7. Audit events from the UI thread */
         fb_drain_ui_events(&alarms, now_ms);
 
-        /* 8. Publish (CRC lets the UI verify the snapshot end to end) */
-        st.publish_ms = now_ms;
-        st.pacer_overruns = pacer.overruns;
-        st.snapshot_crc = hmi_crc32c((const uint8_t *)&tags, sizeof(tags));
-        fb_publish(&tags, &alarms, &wd, &st, now_ms);
+        /* 8. Publish every HMI_PUBLISH_PERIOD_MS, and at once after an operator command, so the
+         *    UI never copies a large snapshot more often than it can use it. The CRC lets the UI
+         *    verify the snapshot end to end. */
+        if (bits || (uint32_t)(now_ms - last_publish_ms) >= HMI_PUBLISH_PERIOD_MS) {
+            last_publish_ms = now_ms;
+            st.publish_ms = now_ms;
+            st.pacer_overruns = pacer.overruns;
+            st.snapshot_crc = hmi_crc32c((const uint8_t *)tags.tags, (size_t)tags_in_use(&alarms) * sizeof(tags.tags[0]));
+            fb_publish(&tags, &alarms, &wd, &st, now_ms);
+        }
 
         if (stall) {
             /* Deliberate fault: stop heartbeating so the UI-side watchdog must catch it. */
@@ -598,6 +684,7 @@ static char    g_modal_msg_buf[80];
 
 #define NO_SLOT 0xFFu
 static uint8_t g_fp_slot = NO_SLOT;        /* faceplate open for this device (also behind nested dialogs) */
+static uint8_t g_focus_slot = NO_SLOT;     /* Process screen: device view of this device (a tile was tapped) */
 
 typedef struct {
     bool    active;
@@ -668,6 +755,8 @@ static void ui_choose_role(uint8_t role, uint32_t now_ms)
 
 static void ui_start_action(uint8_t slot, uint8_t action, uint8_t option, uint32_t now_ms);
 static void ui_emergency_reset(uint32_t now_ms);
+static void ui_alarm_op(uint8_t op, hmi_tag_id_t tag, uint32_t now_ms);
+static void ui_open_faceplate(uint8_t slot);
 
 static void ui_pin_submit(uint32_t now_ms)
 {
@@ -686,6 +775,14 @@ static void ui_pin_submit(uint32_t now_ms)
             modal_close();
             if (pend.active && pend.system && pend.sys_cmd == HMI_CMD_EMERGENCY_RESET)
                 ui_emergency_reset(now_ms);   /* carry on with the Reset that asked for the sign-in */
+            else if (pend.active && pend.system &&
+                     (pend.sys_cmd == HMI_CMD_SHELVE_ALARM || pend.sys_cmd == HMI_CMD_ALARM_SERVICE))
+                ui_alarm_op(pend.action, (hmi_tag_id_t)pend.value, now_ms);   /* the shelve that asked */
+            else if (pend.active && pend.system && pend.sys_cmd == HMI_CMD_ACK_ALARMS &&
+                     (uint16_t)pend.value < HMI_MAX_TAGS) {                     /* the acknowledge that asked */
+                hmi_tag_id_t t = (hmi_tag_id_t)pend.value;
+                hal_atomic_or(&g_ack_mask[t / 32], (int32_t)(1u << (t % 32)));
+            }
             else if (pend.active)   /* carry on with the control that asked for the sign-in */
                 ui_start_action(pend.slot, pend.action, pend.has_value ? (uint8_t)pend.value : HMI_FP_NO_OPTION, now_ms);
             break;
@@ -886,6 +983,122 @@ static void ui_emergency_reset(uint32_t now_ms)
                           "Reset EMERGENCY", now_ms);
 }
 
+/* --- Alarm dialog: acknowledge, shelve, out of service, open the device --- */
+static hmi_tag_id_t g_almd_tag;
+
+static void ui_open_alarm(hmi_tag_id_t tag)
+{
+    if (tag >= HMI_MAX_TAGS || !hmi_tag_get_meta(tag)) return;
+    pin_clear();
+    g_almd_tag = tag;
+    g_modal = HMI_MODAL_ALARM;
+    g_modal_msg = NULL;
+}
+
+/* Shelve / unshelve (Operator) or out of service / return (Maintenance). Asks for the PIN of the
+ * role it needs and carries on after the sign-in. The fieldbus thread applies it and journals it. */
+static void ui_alarm_op(uint8_t op, hmi_tag_id_t tag, uint32_t now_ms)
+{
+    if (tag >= HMI_MAX_TAGS) return;
+    const hmi_alarm_point_t *pt = &g_snap.alarms.points[tag];
+    bool service = op == ALARM_OP_OOS || (op == ALARM_OP_UNSHELVE && (pt->flags & HMI_ALARM_F_OOS) &&
+                                          !(pt->flags & HMI_ALARM_F_SHELVED));
+    hmi_command_t cmd = service ? HMI_CMD_ALARM_SERVICE : HMI_CMD_SHELVE_ALARM;
+    hmi_role_t need = hmi_security_required_role(cmd);
+    if (g_security.current_role < need) {
+        pin_clear();
+        g_modal_role = (uint8_t)need;
+        g_modal = HMI_MODAL_PIN;
+        snprintf(g_modal_msg_buf, sizeof(g_modal_msg_buf), "%s sign-in needed: %s",
+                 hmi_security_role_name(need), hmi_security_command_name(cmd));
+        g_modal_msg = g_modal_msg_buf;
+        g_modal_msg_error = false;
+        memset(&g_pending_login, 0, sizeof(g_pending_login));
+        g_pending_login.active = true;
+        g_pending_login.system = true;
+        g_pending_login.slot = NO_SLOT;
+        g_pending_login.sys_cmd = (uint8_t)cmd;
+        g_pending_login.action = op;
+        g_pending_login.value = (int16_t)tag;
+        return;
+    }
+    if (!hmi_security_authorize(&g_security, cmd, now_ms)) return;
+    if (op != ALARM_OP_UNSHELVE && !hmi_alarms_can_hide(tag)) {
+        ui_toast("A stop alarm cannot be shelved or taken out of service", now_ms);
+        return;
+    }
+    int32_t head = hal_atomic_load(&g_alarm_op_head);
+    if ((uint32_t)(head - hal_atomic_load(&g_alarm_op_tail)) >= ALARM_OP_RING) {
+        ui_toast("Busy - try again", now_ms);
+        return;
+    }
+    g_alarm_ops[(uint32_t)head % ALARM_OP_RING] = (alarm_op_t){ tag, op };
+    hal_atomic_store(&g_alarm_op_head, head + 1);
+    {                                                     /* who did it, for the audit log */
+        char ev[41];
+        snprintf(ev, sizeof(ev), "%s by %s", op == ALARM_OP_SHELVE ? "Shelve" : op == ALARM_OP_OOS ? "Out of service"
+                 : "Unshelve", hmi_security_role_name(g_security.current_role));
+        ui_post_event(ALARM_SEV_INFO, ev);
+    }
+    char msg[64];
+    if (op == ALARM_OP_SHELVE)
+        snprintf(msg, sizeof(msg), "Alarm shelved for %lu min", (unsigned long)(HMI_ALARM_SHELVE_MS / 60000u));
+    else
+        snprintf(msg, sizeof(msg), op == ALARM_OP_OOS ? "Alarm taken out of service" : "Alarm shown again");
+    ui_toast(msg, now_ms);
+    if (g_modal == HMI_MODAL_ALARM) modal_close();
+}
+
+static void ui_alarm_button(uint8_t button, uint32_t now_ms)
+{
+    hmi_tag_id_t tag = g_almd_tag;
+    if (tag >= HMI_MAX_TAGS) return;
+    const hmi_alarm_point_t *pt = &g_snap.alarms.points[tag];
+    switch (button) {
+        case HMI_ALMD_ACK: {
+            if (pt->state != ALARM_PT_UNACK && pt->state != ALARM_PT_RTN_UNACK) return;
+            hmi_role_t need = hmi_security_required_role(HMI_CMD_ACK_ALARMS);
+            if (g_security.current_role < need) {                     /* ask for the PIN, then ack */
+                pin_clear();
+                g_modal_role = (uint8_t)need;
+                g_modal = HMI_MODAL_PIN;
+                snprintf(g_modal_msg_buf, sizeof(g_modal_msg_buf), "%s sign-in needed: Acknowledge",
+                         hmi_security_role_name(need));
+                g_modal_msg = g_modal_msg_buf;
+                g_modal_msg_error = false;
+                memset(&g_pending_login, 0, sizeof(g_pending_login));
+                g_pending_login.active = true;
+                g_pending_login.system = true;
+                g_pending_login.slot = NO_SLOT;
+                g_pending_login.sys_cmd = (uint8_t)HMI_CMD_ACK_ALARMS;
+                g_pending_login.value = (int16_t)tag;
+                return;
+            }
+            ui_request(HMI_CMD_ACK_ALARMS, 0, now_ms);                 /* audit of the authorisation */
+            hal_atomic_or(&g_ack_mask[tag / 32], (int32_t)(1u << (tag % 32)));
+            if (g_modal == HMI_MODAL_ALARM) modal_close();
+            break;
+        }
+        case HMI_ALMD_SHELVE:
+            if (pt->flags & HMI_ALARM_F_OOS) return;
+            ui_alarm_op((pt->flags & HMI_ALARM_F_SHELVED) ? ALARM_OP_UNSHELVE : ALARM_OP_SHELVE, tag, now_ms);
+            break;
+        case HMI_ALMD_SERVICE:
+            if (pt->flags & HMI_ALARM_F_OOS) {
+                if (pt->flags & HMI_ALARM_F_SHELVED) return;           /* unshelve first */
+                ui_alarm_op(ALARM_OP_UNSHELVE, tag, now_ms);
+            } else {
+                ui_alarm_op(ALARM_OP_OOS, tag, now_ms);
+            }
+            break;
+        case HMI_ALMD_DEVICE:
+            if (tag >= HMI_DEVICE_TAG_BASE)
+                ui_open_faceplate((uint8_t)((tag - HMI_DEVICE_TAG_BASE) / HMI_DEVICE_TAG_SPAN));
+            break;
+        default: break;
+    }
+}
+
 static void ui_confirmed(const ui_cmd_t *c, uint32_t now_ms)
 {
     if (c->system && c->sys_cmd == HMI_CMD_EMERGENCY_RESET) {
@@ -1063,7 +1276,7 @@ static const uint32_t* ui_active_tokens(uint8_t *count)
 }
 
 /* A button on a device panel: the control it stands for in the device's current state. */
-static void ui_device_action(uint8_t abs_tag, uint32_t now_ms)
+static void ui_device_action(hmi_tag_id_t abs_tag, uint32_t now_ms)
 {
     if (abs_tag < HMI_DEVICE_TAG_BASE) return;
     uint8_t slot = (uint8_t)((abs_tag - HMI_DEVICE_TAG_BASE) / HMI_DEVICE_TAG_SPAN);
@@ -1088,9 +1301,20 @@ static void ui_first_device_row(int row, uint32_t now_ms)
     ui_toast("No connected device has that control", now_ms);
 }
 
-static uint8_t g_alarm_view;               /* Alarms screen: Active summary or History */
-static uint8_t g_alarm_page;
-static uint8_t g_dev_page;                       /* process screen page (more devices than fit) */
+static uint8_t  g_alarm_view;              /* Alarms screen: Active summary or History */
+static uint16_t g_alarm_page;
+static uint16_t g_dev_page;                      /* process screen page (more devices than fit) */
+
+/* Readings screen: every reading of every device, built once per frame while the screen is shown.
+ * Row list = per device a heading and its readings that pass the filter and the search. When a
+ * page starts inside a device, the heading is repeated ("continued"); a heading never ends a page. */
+#define READ_ROWS_MAX (2 * (HMI_MAX_TAGS + HMI_MAX_DEVICES + 1))
+static uint8_t        g_read_filter;           /* HMI_READ_FILTER_* */
+static uint16_t       g_read_page, g_read_pages = 1;
+static char           g_read_query[24];        /* upper case */
+static hmi_read_row_t g_read_rows[READ_ROWS_MAX];
+static uint16_t       g_read_n, g_read_matches, g_read_total;
+static int            g_read_per = 1;          /* rows per page, from the layout */
 
 static bool ui_banner_active(void)
 {
@@ -1098,8 +1322,103 @@ static bool ui_banner_active(void)
 }
 
 static int ui_alarm_pages(void);
-static uint8_t g_alarm_order[HMI_MAX_TAGS];      /* active alarms in display order, this frame */
-static uint8_t g_alarm_order_n;
+static hmi_tag_id_t g_alarm_order[HMI_MAX_TAGS]; /* active alarms in display order, this frame */
+static uint16_t g_alarm_order_n;
+static hmi_tag_id_t g_hidden[HMI_MAX_TAGS];      /* shelved / out-of-service points, this frame */
+static uint16_t g_hidden_n;
+
+/* Case-insensitive "does text contain the (upper-case) query" */
+static bool read_contains(const char *text, const char *q)
+{
+    if (!q[0]) return true;
+    if (!text) return false;
+    for (const char *s = text; *s; s++) {
+        size_t i = 0;
+        while (q[i]) {
+            char c = s[i];
+            if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+            if (c != q[i]) break;
+            i++;
+        }
+        if (!q[i]) return true;
+    }
+    return false;
+}
+
+static bool read_passes(hmi_tag_id_t id, const hmi_tag_meta_t *m, const hmi_device_info_t *d, bool group_hit)
+{
+    if (g_read_filter == HMI_READ_FILTER_ALARM && g_snap.alarms.points[id].state == ALARM_PT_NORMAL) return false;
+    if (g_read_filter == HMI_READ_FILTER_BAD) {
+        uint8_t q = g_snap.tags.tags[id].quality;
+        bool good = (q == QUALITY_GOOD || q == QUALITY_SIMULATED) && (!d || d->state == HMI_DEV_ONLINE);
+        if (good) return false;
+    }
+    return group_hit || read_contains(m->name, g_read_query) || read_contains(m->unit, g_read_query);
+}
+
+/* Fewer rows than this per page: no headings; each row names its device instead */
+#define READ_FLAT_BELOW 6
+
+static void read_push(uint8_t kind, uint8_t slot, hmi_tag_id_t tag)
+{
+    if (g_read_n + 2u >= READ_ROWS_MAX) return;
+    if (g_read_per < READ_FLAT_BELOW && kind != HMI_READ_ROW_TAG) return;
+    if (g_read_per >= READ_FLAT_BELOW) {
+        int pos = g_read_n % g_read_per;
+        if (kind == HMI_READ_ROW_TAG && pos == 0 && g_read_n > 0)
+            g_read_rows[g_read_n++] = (hmi_read_row_t){ HMI_READ_ROW_CONTINUED, slot, 0 };
+        else if (kind == HMI_READ_ROW_DEVICE && pos == g_read_per - 1)
+            g_read_rows[g_read_n++] = (hmi_read_row_t){ HMI_READ_ROW_BLANK, slot, 0 };
+    }
+    g_read_rows[g_read_n++] = (hmi_read_row_t){ kind, slot, tag };
+}
+
+/* One group: a device (d != NULL) or this HMI's own readings (ids first..last). */
+static void read_group(const hmi_device_info_t *d, hmi_tag_id_t first, hmi_tag_id_t count)
+{
+    uint8_t slot = d ? d->slot : HMI_READ_SLOT_HMI;
+    bool group_hit = g_read_query[0] &&
+        (d ? (read_contains(d->label, g_read_query) || read_contains(d->product, g_read_query) ||
+              read_contains(d->endpoint, g_read_query))
+           : read_contains("THIS HMI", g_read_query));
+    bool heading = false;
+    for (hmi_tag_id_t id = first; id < first + count; id++) {
+        const hmi_tag_meta_t *m = hmi_tag_get_meta(id);
+        if (!m) continue;
+        g_read_total++;
+        if (!read_passes(id, m, d, group_hit)) continue;
+        g_read_matches++;
+        if (!heading) { read_push(HMI_READ_ROW_DEVICE, slot, 0); heading = true; }
+        read_push(HMI_READ_ROW_TAG, slot, id);
+    }
+}
+
+static void ui_build_readings(void)
+{
+    hmi_rect_t card = hmi_layout_read_card(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active());
+    g_read_per = hmi_layout_read_rows(card);
+    g_read_n = g_read_matches = g_read_total = 0;
+    if (g_have_snapshot) {
+        for (uint8_t i = 0; i < g_ndev; i++)
+            read_group(&g_dev_view[i], HMI_DEV_TAG(g_dev_view[i].slot, 0), HMI_DEVICE_TAG_SPAN);
+        read_group(NULL, 0, HMI_DEVICE_TAG_BASE);
+    }
+    g_read_pages = g_read_n ? (uint16_t)((g_read_n + g_read_per - 1) / g_read_per) : 1u;
+    if (g_read_page >= g_read_pages) g_read_page = (uint16_t)(g_read_pages - 1u);
+}
+
+static void ui_search_key(char c)
+{
+    size_t n = strlen(g_read_query);
+    if (c == HMI_KBD_DONE) { modal_close(); return; }
+    if (c == HMI_KBD_DEL) { if (n) g_read_query[n - 1] = '\0'; }
+    else if (c == HMI_KBD_CLEAR) g_read_query[0] = '\0';
+    else if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    if (c == ' ' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')) {
+        if (n + 1 < sizeof(g_read_query) && !(c == ' ' && n == 0)) { g_read_query[n] = c; g_read_query[n + 1] = '\0'; }
+    }
+    g_read_page = 0;
+}
 
 static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
 {
@@ -1108,22 +1427,25 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
         return;
     switch (hit->kind) {
         case HMI_HIT_NAV_TAB:
-            if (hit->param < SCREEN_COUNT) g_active_screen = hit->param;
+            if (hit->param == SCREEN_PROCESS_OVERVIEW) g_focus_slot = NO_SLOT;   /* Process again: all devices */
+            if (hit->param < SCREEN_COUNT) g_active_screen = (uint8_t)hit->param;
             break;
+        case HMI_HIT_DEVICE_FOCUS:  if (ui_dev((uint8_t)hit->param)) g_focus_slot = (uint8_t)hit->param; break;
+        case HMI_HIT_FOCUS_BACK:    g_focus_slot = NO_SLOT; break;
         case HMI_HIT_ESTOP:         ui_emergency_press(now_ms); break;
         case HMI_HIT_EMERGENCY_RESET: ui_emergency_reset(now_ms); break;
         case HMI_HIT_THEME:
         case HMI_HIT_SET_THEME:     ui_toggle_theme(); break;
         case HMI_HIT_ROLE:
         case HMI_HIT_SET_ROLE:      ui_open_role_dialog(now_ms); break;
-        case HMI_HIT_MODAL_ROLE:    ui_choose_role(hit->param, now_ms); break;
-        case HMI_HIT_MODAL_KEY:     ui_pin_key(hit->param, now_ms); break;
+        case HMI_HIT_MODAL_ROLE:    ui_choose_role((uint8_t)hit->param, now_ms); break;
+        case HMI_HIT_MODAL_KEY:     ui_pin_key((uint8_t)hit->param, now_ms); break;
         case HMI_HIT_MODAL_CANCEL:
             if (g_modal == HMI_MODAL_FACEPLATE) g_fp_slot = NO_SLOT;    /* Close: leave the faceplate */
             modal_close();
             break;
         case HMI_HIT_MODAL_BLOCK:   break;
-        case HMI_HIT_DEVICE_OPEN:   ui_open_faceplate(hit->param); break;
+        case HMI_HIT_DEVICE_OPEN:   ui_open_faceplate((uint8_t)hit->param); break;
         case HMI_HIT_FP_CTRL: {
             const hmi_device_info_t *d = ui_dev(g_fp_slot);
             if (!d) break;
@@ -1132,7 +1454,7 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
             if (hit->param < n) ui_start_action(g_fp_slot, cs[hit->param].action, cs[hit->param].option, now_ms);
             break;
         }
-        case HMI_HIT_NUMPAD_KEY:    ui_numpad_key(hit->param, now_ms); break;
+        case HMI_HIT_NUMPAD_KEY:    ui_numpad_key((uint8_t)hit->param, now_ms); break;
         case HMI_HIT_CONFIRM_OK:
             if (g_pending_confirm.active) {
                 ui_cmd_t c = g_pending_confirm;
@@ -1144,22 +1466,39 @@ static void ui_dispatch_hit(const hmi_hit_t *hit, uint32_t now_ms)
         case HMI_HIT_ALARM_ACK:     ui_request(HMI_CMD_ACK_ALARMS, CMD_BIT_ACK, now_ms); break;
         case HMI_HIT_ALARM_SILENCE: ui_request(HMI_CMD_SILENCE_HORN, CMD_BIT_SILENCE, now_ms); break;
         case HMI_HIT_ALARM_TAB:
-            if (hit->param != g_alarm_view) { g_alarm_view = hit->param; g_alarm_page = 0; }
+            if (hit->param < HMI_ALARM_VIEWS && hit->param != g_alarm_view) { g_alarm_view = (uint8_t)hit->param; g_alarm_page = 0; }
             break;
+        case HMI_HIT_ALMD_BTN:      ui_alarm_button((uint8_t)hit->param, now_ms); break;
         case HMI_HIT_DEVICE_PAGE:
         {
             hmi_rect_t c = hmi_layout_content(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active());
             int per = hmi_layout_devices_per_page(c, g_ndev);
             int pages = per > 0 ? (g_ndev + per - 1) / per : 1;
-            if (g_dev_page >= pages) g_dev_page = (uint8_t)(pages - 1);
+            if (g_dev_page >= pages) g_dev_page = (uint16_t)(pages - 1);
             if (hit->param == 0 && g_dev_page > 0) g_dev_page--;
             else if (hit->param == 1 && g_dev_page + 1 < pages) g_dev_page++;
+            break;
+        }
+        case HMI_HIT_READ_FILTER:
+            if (hit->param < HMI_READ_FILTERS) { g_read_filter = (uint8_t)hit->param; g_read_page = 0; }
+            break;
+        case HMI_HIT_READ_SEARCH:   g_modal = HMI_MODAL_SEARCH; break;
+        case HMI_HIT_KBD_KEY:       ui_search_key(hmi_layout_kbd_char(hit->param)); break;
+        case HMI_HIT_READ_PAGE:
+            if (hit->param == 0 && g_read_page > 0) g_read_page--;
+            else if (hit->param == 1 && g_read_page + 1u < g_read_pages) g_read_page++;
+            break;
+        case HMI_HIT_READ_ROW: {
+            uint32_t k = (uint32_t)g_read_page * (uint32_t)g_read_per + hit->param;
+            if (hit->param < g_read_per && k < g_read_n && g_read_rows[k].kind != HMI_READ_ROW_BLANK &&
+                g_read_rows[k].slot != HMI_READ_SLOT_HMI)
+                ui_open_faceplate(g_read_rows[k].slot);
             break;
         }
         case HMI_HIT_ALARM_PAGE:
         {
             int pages = ui_alarm_pages();
-            if (g_alarm_page >= pages) g_alarm_page = (uint8_t)(pages - 1);
+            if (g_alarm_page >= pages) g_alarm_page = (uint16_t)(pages - 1);
             if (hit->param == 0 && g_alarm_page > 0) g_alarm_page--;
             else if (hit->param == 1 && g_alarm_page + 1 < pages) g_alarm_page++;
             break;
@@ -1191,6 +1530,9 @@ static int ui_alarm_pages(void)
     if (g_alarm_view == HMI_ALARM_VIEW_ACTIVE) {
         n = g_alarm_order_n;                     /* sorted in ui_build_view, this frame */
         per = hmi_layout_alarm_rows(ca);
+    } else if (g_alarm_view == HMI_ALARM_VIEW_SHELVED) {
+        n = g_hidden_n;
+        per = hmi_layout_alarm_rows(ca);
     } else {
         n = hmi_alarms_journal_count(&g_snap.alarms);
         per = hmi_layout_history_rows(ca);
@@ -1198,37 +1540,46 @@ static int ui_alarm_pages(void)
     return n ? (n + per - 1) / per : 1;
 }
 
+/* Alarms screen rows: the row button (Ack, or Unshelve / Return on the Shelved view) acts on that
+ * alarm only; a tap anywhere else on the row opens the alarm dialog. The rows are the same
+ * points, in the same order and geometry, as the renderer draws them (sorted this frame). */
 static bool ui_alarm_row_tap(int x, int y, uint32_t now_ms)
 {
     if (g_modal != HMI_MODAL_NONE || g_active_screen != SCREEN_ALARM_MATRIX || !g_have_snapshot) return false;
-    if (g_alarm_view != HMI_ALARM_VIEW_ACTIVE) return false;
+    if (g_alarm_view == HMI_ALARM_VIEW_HISTORY) return false;
     const hmi_alarm_supervisor_t *al = &g_snap.alarms;
-    static uint8_t order[HMI_MAX_TAGS];
-    uint8_t nact = hmi_alarms_sorted(al, order, HMI_MAX_TAGS);
-    if (!nact) return false;
-    hmi_rect_t ca = hmi_layout_alarm_active_card(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active(), nact);
+    bool shelved_view = g_alarm_view == HMI_ALARM_VIEW_SHELVED;
+    const hmi_tag_id_t *list = shelved_view ? g_hidden : g_alarm_order;
+    uint16_t n = shelved_view ? g_hidden_n : g_alarm_order_n;
+    if (!n) return false;
+    hmi_rect_t ca = hmi_layout_alarm_active_card(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active(), n);
     int per = hmi_layout_alarm_rows(ca);
-    int pages = (nact + per - 1) / per;
+    int pages = (n + per - 1) / per;
     int page = g_alarm_page < pages ? g_alarm_page : pages - 1;
     for (int row = 0; row < per; row++) {
         int k = page * per + row;
-        if (k >= nact) break;
-        uint8_t i = order[k];
+        if (k >= n) break;
+        hmi_tag_id_t i = list[k];
         uint8_t st = al->points[i].state;
         if (hmi_rect_contains(hmi_layout_alarm_row_ack(ca, row), x, y)) {
+            if (shelved_view) { ui_alarm_op(ALARM_OP_UNSHELVE, i, now_ms); return true; }
             if (st != ALARM_PT_UNACK && st != ALARM_PT_RTN_UNACK) return true;   /* nothing to acknowledge */
             ui_request(HMI_CMD_ACK_ALARMS, 0, now_ms);                         /* role check, denial report */
             if (g_security.current_role >= hmi_security_required_role(HMI_CMD_ACK_ALARMS))
                 hal_atomic_or(&g_ack_mask[i / 32], (int32_t)(1u << (i % 32)));
             return true;
         }
+        if (hmi_rect_contains(hmi_layout_alarm_row(ca, row), x, y)) { ui_open_alarm(i); return true; }
     }
     return false;
 }
 
 static void ui_handle_key(uint16_t key, bool shift, uint32_t now_ms)
 {
-    if (key == 'E') {                     /* EMERGENCY works in every state, dialog or not */
+    /* EMERGENCY key: works in every state, dialog or not, except while the search keyboard is open,
+     * where a PC keyboard types letters (E included). The on-screen EMERGENCY button stays live above
+     * that dialog as above every other one. */
+    if (key == 'E' && g_modal != HMI_MODAL_SEARCH) {
         ui_emergency_press(now_ms);
         return;
     }
@@ -1250,6 +1601,10 @@ static void ui_handle_key(uint16_t key, bool shift, uint32_t now_ms)
             else if (key == '-') ui_numpad_key(HMI_NP_MINUS, now_ms);
             else if (key == HMI_K_BACK) ui_numpad_key(HMI_NP_DEL, now_ms);
             else if (key == HMI_K_ENTER) ui_numpad_key(HMI_NP_OK, now_ms);
+        } else if (g_modal == HMI_MODAL_SEARCH) {
+            if (key == HMI_K_BACK) ui_search_key(HMI_KBD_DEL);
+            else if (key == HMI_K_ENTER) ui_search_key(HMI_KBD_DONE);
+            else if (key < 128) ui_search_key((char)key);
         } else if (g_modal == HMI_MODAL_CONFIRM && key == HMI_K_ENTER && g_pending_confirm.active) {
             ui_cmd_t c = g_pending_confirm;
             modal_close();
@@ -1261,7 +1616,7 @@ static void ui_handle_key(uint16_t key, bool shift, uint32_t now_ms)
         case HMI_K_TAB:    ui_navigate(shift ? -1 : 1); break;
         case HMI_K_RIGHT:  ui_navigate(1); break;
         case HMI_K_LEFT:   ui_navigate(-1); break;
-        case '1': case '2': case '3': case '4': case '5':
+        case '1': case '2': case '3': case '4': case '5': case '6':
             g_active_screen = (uint8_t)(key - '1');
             break;
         case ' ':
@@ -1291,19 +1646,27 @@ static void ui_take_snapshot(void)
     uint32_t tries = 0;
     do {
         seq = hmi_seqlock_read_begin(&g_seqlock);
-        memcpy(&g_snap, &g_shared, sizeof(g_snap));
+        uint16_t nt = g_shared.ntags <= HMI_MAX_TAGS ? g_shared.ntags : (uint16_t)HMI_MAX_TAGS;
+        uint16_t nd = g_shared.ndev <= HMI_MAX_DEVICES ? g_shared.ndev : (uint16_t)HMI_MAX_DEVICES;
+        copy_tags(&g_snap.tags, &g_shared.tags, nt, nd);
+        copy_alarms(&g_snap.alarms, &g_shared.alarms, nt);
+        g_snap.fb_watchdog = g_shared.fb_watchdog;
+        g_snap.fb_stats = g_shared.fb_stats;
+        memcpy(g_snap.devices, g_shared.devices, (size_t)nd * sizeof(g_snap.devices[0]));
+        g_snap.ntags = nt;
+        g_snap.ndev = nd;
         tries++;
     } while (hmi_seqlock_read_retry(&g_seqlock, seq));
     g_seqlock_retries += tries - 1u;
 
     if (g_snap.fb_stats.publish_ms != 0 || g_snap.fb_stats.loop_count != 0) {
         g_have_snapshot = true;
-        uint32_t crc = hmi_crc32c((const uint8_t *)&g_snap.tags, sizeof(g_snap.tags));
+        uint32_t crc = hmi_crc32c((const uint8_t *)g_snap.tags.tags, (size_t)g_snap.ntags * sizeof(g_snap.tags.tags[0]));
         if (crc != g_snap.fb_stats.snapshot_crc) g_crc_mismatches++;
     }
 
     g_ndev = 0;
-    for (uint8_t i = 0; i < HMI_MAX_DEVICES; i++) {
+    for (uint8_t i = 0; i < g_snap.ndev; i++) {
         if (hmi_device_present(&g_snap.devices[i])) g_dev_view[g_ndev++] = g_snap.devices[i];
     }
 }
@@ -1331,6 +1694,8 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
     v->data_stale      = !g_have_snapshot || v->snapshot_age_ms > HMI_SNAPSHOT_STALE_MS;
     v->crc_mismatches  = g_crc_mismatches;
     v->seqlock_retries = g_seqlock_retries;
+    v->latency_avg_us  = g_latency.avg_us;
+    v->latency_max_us  = g_latency.max_us;
     v->ui_frame_hz     = g_ui_frame_hz;
     v->exe_size_bytes  = g_exe_size;
     v->now_ms          = now_ms;
@@ -1340,18 +1705,39 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
     g_alarm_order_n    = g_have_snapshot ? hmi_alarms_sorted(&g_snap.alarms, g_alarm_order, HMI_MAX_TAGS) : 0;
     v->alarm_order     = g_have_snapshot ? g_alarm_order : NULL;
     v->alarm_order_n   = g_alarm_order_n;
+    g_hidden_n         = (g_have_snapshot && g_snap.alarms.shelved_count)
+                         ? hmi_alarms_hidden(&g_snap.alarms, g_hidden, HMI_MAX_TAGS) : 0;
+    v->hidden          = g_hidden;
+    v->hidden_n        = g_hidden_n;
+    v->almd_tag        = g_almd_tag;
     {                                            /* alarms can clear while a later page is shown */
         int pages = ui_alarm_pages();
-        if (g_alarm_page >= pages) g_alarm_page = (uint8_t)(pages - 1);
+        if (g_alarm_page >= pages) g_alarm_page = (uint16_t)(pages - 1);
     }
     v->alarm_page      = g_alarm_page;
     {                                            /* devices can leave while a later page is shown */
         int per = hmi_layout_devices_per_page(hmi_layout_content(g_renderer.screen_w, g_renderer.screen_h,
                                                                  ui_banner_active()), g_ndev);
         int pages = per > 0 ? (g_ndev + per - 1) / per : 1;
-        if (g_dev_page >= pages) g_dev_page = (uint8_t)(pages - 1);
+        if (g_dev_page >= pages) g_dev_page = (uint16_t)(pages - 1);
     }
     v->device_page     = g_dev_page;
+    if (g_focus_slot != NO_SLOT && !ui_dev(g_focus_slot)) g_focus_slot = NO_SLOT;   /* the device left */
+    v->focus_dev       = ui_dev(g_focus_slot);
+    if (g_active_screen == SCREEN_READINGS) {   /* only while it is shown: up to ~1,600 readings */
+        ui_build_readings();
+        uint32_t first = (uint32_t)g_read_page * (uint32_t)g_read_per;
+        v->read_rows    = g_read_rows + first;
+        v->read_nrows   = (uint16_t)(g_read_n > first ? (g_read_n - first < (uint32_t)g_read_per ? g_read_n - first
+                                                                                                 : (uint32_t)g_read_per) : 0u);
+        v->read_page    = g_read_page;
+        v->read_pages   = g_read_pages;
+        v->read_matches = g_read_matches;
+        v->read_total   = g_read_total;
+        v->read_filter  = g_read_filter;
+        v->read_flat    = g_read_per < READ_FLAT_BELOW;
+    }
+    v->read_query = g_read_query;
     v->toast = (g_toast[0] && (uint32_t)(now_ms - g_toast_ms) < TOAST_DURATION_MS) ? g_toast : NULL;
     v->modal = g_modal;
     v->modal_role = g_modal_role;
@@ -1373,6 +1759,34 @@ static void ui_build_view(hmi_view_t *v, uint32_t now_ms)
     v->emergency_unreached = (uint8_t)hal_atomic_load(&g_emerg_unreached);
 }
 
+/* Called once the whole frame has been handed to the platform shell: every device whose data
+ * changed since the last frame gives one latency sample. */
+static void latency_sample(uint32_t now_ms)
+{
+    if (!g_have_snapshot) return;
+    uint64_t now_us = hmi_timer_get_us();
+    for (int d = 0; d < g_snap.ndev; d++) {
+        uint64_t t = g_snap.devices[d].data_us;
+        if (!t || t == g_latency.seen_us[d] || !hmi_device_present(&g_snap.devices[d])) continue;
+        g_latency.seen_us[d] = t;
+        uint32_t us = now_us > t ? (uint32_t)(now_us - t) : 0u;
+        g_latency.win_sum_us += us;
+        g_latency.win_n++;
+        if (us > g_latency.win_max_us) g_latency.win_max_us = us;
+        g_latency.total_sum_us += us;
+        g_latency.total_n++;
+        if (us > g_latency.total_max_us) g_latency.total_max_us = us;
+        if (us > HMI_LATENCY_TARGET_MS * 1000u) g_latency.over_target++;
+    }
+    if ((uint32_t)(now_ms - g_latency.win_start_ms) >= 1000u) {
+        g_latency.avg_us = g_latency.win_n ? (uint32_t)(g_latency.win_sum_us / g_latency.win_n) : 0u;
+        g_latency.max_us = g_latency.win_max_us;
+        g_latency.win_sum_us = 0;
+        g_latency.win_n = g_latency.win_max_us = 0;
+        g_latency.win_start_ms = now_ms;
+    }
+}
+
 void app_render(app_present_fn present, void *ctx)
 {
     static hmi_view_t view;
@@ -1388,10 +1802,8 @@ void app_render(app_present_fn present, void *ctx)
         present(ctx, hmi_renderer_get_band_buffer(&g_renderer), g_renderer.current_band_y, rows,
                 g_renderer.screen_w, palette);
     }
+    latency_sample(now_ms);
 }
-
-int app_width(void)  { return g_renderer.screen_w; }
-int app_height(void) { return g_renderer.screen_h; }
 
 /* ------------------------------------------------------------------------- */
 /* UI: one frame of housekeeping                                              */
@@ -1444,7 +1856,9 @@ void app_frame(uint32_t now_ms)
         ui_toast("Inactivity: role dropped to Viewer", now_ms);
     }
 
-    /* Horn: a steady output for a wired buzzer / beacon, and 1 s pulses on the panel itself */
+    /* Horn: a steady output for a wired buzzer / beacon, and 1 s pulses on the panel itself.
+     * While an EMERGENCY is latched its own sound takes over until the reset. */
+    hal_emergency_sound(g_emergency);
     hal_horn(g_have_snapshot && g_snap.alarms.horn_sounding);
     if (g_have_snapshot && g_snap.alarms.horn_sounding && (uint32_t)(now_ms - g_ui_last_beep_ms) >= 1000u) {
         g_ui_last_beep_ms = now_ms;
@@ -1503,6 +1917,11 @@ void app_pointer_up(int x, int y)
         hmi_hit_t hit = hmi_layout_hit_test(g_renderer.screen_w, g_renderer.screen_h, g_active_screen,
                                             ui_banner_active(), g_modal, tok, ntok,
                                             g_dev_view, g_ndev, g_dev_page, g_fp_slot, tx, ty);
+        /* Device view: the content area belongs to the one device shown */
+        const hmi_device_info_t *fd = ui_dev(g_focus_slot);
+        if (fd && g_active_screen == SCREEN_PROCESS_OVERVIEW && g_modal == HMI_MODAL_NONE &&
+            hmi_rect_contains(hmi_layout_content(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active()), tx, ty))
+            hit = hmi_layout_focus_hit_test(g_renderer.screen_w, g_renderer.screen_h, ui_banner_active(), fd, tx, ty);
         ui_dispatch_hit(&hit, now_ms);
     }
     hal_request_repaint();
@@ -1511,11 +1930,6 @@ void app_pointer_up(int x, int y)
 void app_pointer_cancel(void)
 {
     hmi_gesture_cancel(&g_gesture);
-}
-
-bool app_pointer_active(void)
-{
-    return g_gesture.active;
 }
 
 void app_key(uint16_t key, bool shift)
@@ -1812,11 +2226,99 @@ static int cfg_load(const char *path, bool required)
 
 static int parse_options(int argc, char **argv);
 
+/* --- Secrets: the device key and the credential vault live in the protected system folder ---
+ * (hal_secure_dir). A key or vault left next to the program by an older installation is moved
+ * there once, so a commissioned panel keeps its key, its PINs and its audit chain. */
+static char g_default_key[HMI_PATH_MAX], g_default_vault[HMI_PATH_MAX];
+static bool g_secret_moved, g_secure_dir_refused;
+
+static bool file_exists(const char *path)
+{
+    hal_file_t *f = hal_file_open(path, HAL_FILE_READ);
+    if (!f) return false;
+    hal_file_close(f);
+    return true;
+}
+
+/* Copy (not rename: the folders may be on different drives), protect, then delete the old file */
+static bool move_secret(const char *from, const char *to)
+{
+    static uint8_t buf[4096];
+    hal_file_t *f = hal_file_open(from, HAL_FILE_READ);
+    if (!f) return false;
+    int n = hal_file_read(f, buf, sizeof(buf));
+    hal_file_close(f);
+    bool ok = false;
+    if (n > 0 && n < (int)sizeof(buf)) {
+        hal_file_t *g = hal_file_open(to, HAL_FILE_WRITE_NEW);
+        if (g) {
+            ok = hal_file_restrict(to, NULL) && hal_file_write(g, buf, (size_t)n) && hal_file_sync(g);
+            hal_file_close(g);
+            if (!ok) hal_file_remove(to);
+        }
+    }
+    hal_secure_zero(buf, sizeof(buf));
+    return ok && hal_file_remove(from);
+}
+
+/* Works out the default places only; the folder is made in secret_migrate(), once we know the
+ * defaults are used (not --key / --vault). */
+static void secret_default_paths(void)
+{
+    char dir[HMI_PATH_MAX];
+    if (hal_secure_dir(dir, sizeof(dir), false)) {
+        snprintf(g_default_key, sizeof(g_default_key), "%.240shmi.key", dir);
+        snprintf(g_default_vault, sizeof(g_default_vault), "%.240ssecurity.vault", dir);
+    } else {                                              /* no protected folder here */
+        exe_dir_path(g_default_key, sizeof(g_default_key), "hmi.key");
+        exe_dir_path(g_default_vault, sizeof(g_default_vault), "security.vault");
+    }
+    copy_str(g_key_path, sizeof(g_key_path), g_default_key);
+    copy_str(g_vault_path, sizeof(g_vault_path), g_default_vault);
+}
+
+/* Only when the default places are in use (not --key / --vault) */
+static void secret_migrate(void)
+{
+    static const char * const names[2] = { "hmi.key", "security.vault" };
+    const char *dst[2] = { g_default_key, g_default_vault };
+    const char *used[2] = { g_key_path, g_vault_path };
+    bool key_default = strcmp(g_key_path, g_default_key) == 0, vault_default = strcmp(g_vault_path, g_default_vault) == 0;
+    if (!key_default && !vault_default) return;
+    char dir[HMI_PATH_MAX];
+    if (!hal_secure_dir(dir, sizeof(dir), true)) {        /* not usable here: next to the program */
+        g_secure_dir_refused = true;
+        if (key_default) exe_dir_path(g_key_path, sizeof(g_key_path), "hmi.key");
+        if (vault_default) exe_dir_path(g_vault_path, sizeof(g_vault_path), "security.vault");
+        return;
+    }
+    for (int i = 0; i < 2; i++) {
+        char old[HMI_PATH_MAX];
+        exe_dir_path(old, sizeof(old), names[i]);
+        if (strcmp(used[i], dst[i]) != 0 || strcmp(old, dst[i]) == 0) continue;
+        if (file_exists(dst[i]) || !file_exists(old)) continue;
+        if (move_secret(old, dst[i])) g_secret_moved = true;
+    }
+}
+
+/* Sound files: emergency.mp3 / alarm.mp3 next to the program when present, else the built-in tone */
+static char g_emergency_sound[HMI_PATH_MAX], g_alarm_sound[HMI_PATH_MAX];
+
+static void sound_defaults(void)
+{
+    exe_dir_path(g_emergency_sound, sizeof(g_emergency_sound), "emergency.mp3");
+    if (!file_exists(g_emergency_sound)) g_emergency_sound[0] = '\0';
+    exe_dir_path(g_alarm_sound, sizeof(g_alarm_sound), "alarm.mp3");
+    if (!file_exists(g_alarm_sound)) g_alarm_sound[0] = '\0';
+    /* no emergency.mp3: the built-in EMERGENCY sweep, never the alarm sound - an operator must
+     * hear the difference between "an alarm" and "EMERGENCY was pressed" */
+}
+
 int app_parse_args(int argc, char **argv)
 {
     exe_dir_path(g_log_path, sizeof(g_log_path), HMI_ALARM_LOG_PATH);
-    exe_dir_path(g_vault_path, sizeof(g_vault_path), "security.vault");
-    exe_dir_path(g_key_path, sizeof(g_key_path), "hmi.key");
+    secret_default_paths();
+    sound_defaults();
 
     /* hmi.cfg (or --config) first, so the command line can add to it */
     char cfg[HMI_PATH_MAX];
@@ -1840,6 +2342,9 @@ int app_parse_args(int argc, char **argv)
     }
     int rc = parse_options(argc, argv);
     if (rc >= 0) return rc;
+    hal_sound_file(HAL_SOUND_EMERGENCY, g_emergency_sound);
+    hal_sound_file(HAL_SOUND_ALARM, g_alarm_sound);
+    secret_migrate();
     if (g_verify_path[0]) return run_verify_log();
     if (g_set_pin_role >= 0) return run_set_pin();
     return -1;
@@ -1868,10 +2373,6 @@ static int parse_options(int argc, char **argv)
                 return 64;
             }
             i++;
-        } else if (strcmp(a, "--sim") == 0) {
-            hal_console_print("--sim was removed: simulated PLCs now live in their own app, plc_simulator.exe "
-                              "(plc-simulator/). Start it, then start the HMI.\r\n");
-            return 64;
         } else if (strcmp(a, "--config") == 0 && next) {
             i++;                                            /* already handled before the other options */
         } else if (strcmp(a, "--no-config") == 0) {
@@ -1879,6 +2380,15 @@ static int parse_options(int argc, char **argv)
             g_discovery_on = false;
         } else if (strcmp(a, "--remove-after-ms") == 0 && next) {
             g_remove_after_ms = (uint32_t)strtoul(next, NULL, 10); i++;
+        } else if (strcmp(a, "--max-devices") == 0 && next) {
+            long n = strtol(next, NULL, 10);
+            if (n < 1 || n > HMI_MAX_DEVICES) {
+                char out[96];
+                snprintf(out, sizeof(out), "--max-devices: give 1..%d (the most this build holds)\r\n", HMI_MAX_DEVICES);
+                hal_console_print(out);
+                return 64;
+            }
+            hmi_devmgr_set_limit((int)n); i++;
         } else if (strcmp(a, "--log") == 0 && next) {
             copy_str(g_log_path, sizeof(g_log_path), next); i++;
         } else if (strcmp(a, "--no-log") == 0) {
@@ -1895,6 +2405,10 @@ static int parse_options(int argc, char **argv)
             g_allow_factory_pins = true;
         } else if (strcmp(a, "--no-sound") == 0) {
             hal_sound_enable(false);
+        } else if (strcmp(a, "--emergency-sound") == 0 && next) {
+            copy_str(g_emergency_sound, sizeof(g_emergency_sound), next); i++;
+        } else if (strcmp(a, "--alarm-sound") == 0 && next) {
+            copy_str(g_alarm_sound, sizeof(g_alarm_sound), next); i++;
         } else if (strcmp(a, "--color-scheme") == 0 && next) {
             if (strcmp(next, "high-performance") == 0) g_high_performance = true;
             else if (strcmp(next, "status") == 0) g_high_performance = false;
@@ -1936,25 +2450,34 @@ static void write_report(void)
     hmi_alarm_log_stats_t ls;
     hmi_alarm_log_get_stats(&ls);
     const hmi_fieldbus_stats_t *fb = &g_snap.fb_stats;
-    char devs[400];
-    size_t dl = 0;
-    devs[0] = '\0';
-    for (int d = 0; d < HMI_MAX_DEVICES; d++) {
-        const hmi_device_info_t *dv = &g_snap.devices[d];
-        int k = snprintf(devs + dl, sizeof(devs) - dl, "device%d=%s|%s|%s|state%u|ok%lu|to%lu\r\n", d,
-                         dv->state ? dv->label : "-", dv->state ? dv->endpoint : "-",
-                         dv->profile ? dv->profile->key : "-", (unsigned)dv->state,
-                         (unsigned long)dv->responses, (unsigned long)dv->timeouts);
-        if (k > 0 && (size_t)k < sizeof(devs) - dl) dl += (size_t)k;
-    }
     char buf[1800];
-    int n = snprintf(buf, sizeof(buf),
+    int n;
+    for (int d = 0; d < g_snap.ndev; d++) {         /* one line per present device */
+        const hmi_device_info_t *dv = &g_snap.devices[d];
+        if (!hmi_device_present(dv)) continue;
+        n = snprintf(buf, sizeof(buf), "device%d=%s|%s|%s|state%u|ok%lu|to%lu\r\n", d,
+                     dv->label, dv->endpoint, dv->profile->key, (unsigned)dv->state,
+                     (unsigned long)dv->responses, (unsigned long)dv->timeouts);
+        if (n > 0) hal_file_write(h, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
+    }
+    n = snprintf(buf, sizeof(buf),
+        "latency_samples=%lu\r\nlatency_avg_us=%lu\r\nlatency_max_us=%lu\r\nlatency_over_target=%lu\r\n"
+        "latency_target_ms=%u\r\nalarm_rate_10min=%u\r\nalarm_rate_peak_10min=%u\r\nalarm_floods=%lu\r\n"
+        "alarm_shelved=%u\r\nalarm_chattering=%u\r\n",
+        (unsigned long)g_latency.total_n,
+        (unsigned long)(g_latency.total_n ? g_latency.total_sum_us / g_latency.total_n : 0u),
+        (unsigned long)g_latency.total_max_us, (unsigned long)g_latency.over_target,
+        (unsigned)HMI_LATENCY_TARGET_MS, (unsigned)g_snap.alarms.rate_10min,
+        (unsigned)g_snap.alarms.rate_peak_10min, (unsigned long)g_snap.alarms.flood_count,
+        (unsigned)g_snap.alarms.shelved_count, (unsigned)g_snap.alarms.chatter_count);
+    if (n > 0) hal_file_write(h, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
+    n = snprintf(buf, sizeof(buf),
         "fieldbus_loop_hz=%lu\r\nfieldbus_period_avg_us=%lu\r\nfieldbus_period_min_us=%lu\r\n"
         "fieldbus_period_max_us=%lu\r\nfieldbus_late_count=%lu\r\nfieldbus_loop_count=%lu\r\n"
         "fieldbus_high_res_timer=%d\r\npacer_overruns=%lu\r\nui_frame_hz=%lu\r\nui_max_frame_ms=%lu\r\n"
         "seqlock_retries=%lu\r\ncrc_mismatches=%lu\r\nui_watchdog_faults=%lu\r\n"
         "ui_wd_fieldbus_alive=%d\r\nfb_wd_ui_alive=%d\r\nfb_wd_fault_count=%lu\r\n"
-        "devices_present=%u\r\n%s"
+        "devices_present=%u\r\n"
         "alarm_latch=%d\r\nalarm_highest=%d\r\nalarm_active=%u\r\nalarm_unacked=%u\r\njournal_total=%lu\r\n"
         "log_open=%d\r\nlog_records_written=%lu\r\nlog_records_lost=%lu\r\nlog_write_errors=%lu\r\n"
         "role=%s\r\naccess_denied=%lu\r\nexe_size=%lu\r\nbuild=%s\r\n",
@@ -1964,7 +2487,7 @@ static void write_report(void)
         (unsigned long)g_ui_max_frame_ms, (unsigned long)g_seqlock_retries, (unsigned long)g_crc_mismatches,
         (unsigned long)g_ui_wd_faults_seen, g_ui_wd.fieldbus_alive ? 1 : 0, g_snap.fb_watchdog.ui_alive ? 1 : 0,
         (unsigned long)g_snap.fb_watchdog.fault_count,
-        (unsigned)g_ndev, devs,
+        (unsigned)g_ndev,
         (int)g_snap.alarms.latch_state, (int)g_snap.alarms.highest_severity,
         (unsigned)g_snap.alarms.active_count, (unsigned)g_snap.alarms.unacked_count,
         (unsigned long)g_snap.alarms.journal_total,
@@ -1992,6 +2515,8 @@ int app_init(void)
     hmi_security_init(&g_security);                     /* starts as VIEWER with factory PINs */
     hmi_security_register_activity(&g_security, now_ms);
     hmi_key_status_t ks = device_key_setup(true, &g_security);
+    if (g_secret_moved) ui_post_event(ALARM_SEV_INFO, "Key and PINs moved to protected folder");
+    if (g_secure_dir_refused) ui_post_event(ALARM_SEV_WARNING, "Protected folder unsafe: key kept here");
     if (ks == HMI_KEY_CREATED) {
         ui_post_event(ALARM_SEV_INFO, "Device key created: audit log signed");
     } else if (ks != HMI_KEY_LOADED) {

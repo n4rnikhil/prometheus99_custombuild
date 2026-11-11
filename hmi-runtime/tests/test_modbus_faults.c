@@ -64,6 +64,8 @@ typedef struct {
     int           good_first;     /* requests answered normally before the fault starts */
     int           fault_count;    /* faulty replies, -1 = forever, then normal again */
     hal_atomic_t requests;
+    hal_atomic_t ident;           /* FC43 answer: 0 = exception (no identity), 1 = Acme / P1, 2 = Other / P9 */
+    hal_atomic_t drop;            /* 1 = close the current connection (the HMI reconnects) */
 #ifdef _WIN32
     HANDLE        thread;
 #else
@@ -111,8 +113,26 @@ static int build_ok(uint8_t *out, uint16_t tid, uint8_t unit, uint16_t qty, int 
 static void serve_client(srv_t *s, SOCKET c)
 {
     for (;;) {
-        uint8_t rq[12];
-        if (recv_exact(s, c, rq, 12) < 0) return;
+        uint8_t rq[264];
+        if (hal_atomic_exchange(&s->drop, 0)) return;
+        if (recv_exact(s, c, rq, 7) < 0) return;
+        int rest = ((rq[4] << 8) | rq[5]) - 1;
+        if (rest < 1 || rest > 250 || recv_exact(s, c, rq + 7, rest) < 0) return;
+        if (rq[7] == 0x2B) {                   /* FC43 / MEI 0x0E: Read Device Identification */
+            uint8_t o[64];
+            int id = (int)hal_atomic_load(&s->ident);
+            put16(o, (uint16_t)((rq[0] << 8) | rq[1])); put16(o + 2, 0); o[6] = rq[6];
+            if (id == 0) { put16(o + 4, 3); o[7] = 0xAB; o[8] = 1; send(c, (const char *)o, 9, SEND_FLAGS); continue; }
+            const char *v = id == 1 ? "Acme" : "Other", *p = id == 1 ? "P1" : "P9";
+            size_t lv = strlen(v), lp = strlen(p);
+            o[7] = 0x2B; o[8] = 0x0E; o[9] = rq[9]; o[10] = 0x01; o[11] = 0; o[12] = 0; o[13] = 2;
+            int k = 14;
+            o[k++] = 0; o[k++] = (uint8_t)lv; memcpy(o + k, v, lv); k += (int)lv;
+            o[k++] = 1; o[k++] = (uint8_t)lp; memcpy(o + k, p, lp); k += (int)lp;
+            put16(o + 4, (uint16_t)(k - 6));
+            send(c, (const char *)o, k, SEND_FLAGS);
+            continue;
+        }
         uint16_t tid = (uint16_t)((rq[0] << 8) | rq[1]);
         uint8_t unit = rq[6];
         uint16_t qty = (uint16_t)((rq[10] << 8) | rq[11]);
@@ -287,7 +307,7 @@ static void run_scenario(const char *name, fault_t fault, int good_first, int fa
         responses = d[0].responses;
         if (d[0].state == HMI_DEV_ONLINE) { if (offline) online_after_offline = true; online = true; }
         if (d[0].state == HMI_DEV_OFFLINE) { if (online) offline_after_online = true; offline = true; }
-        for (uint8_t i = 0; i < hmi_alarms_journal_count(&al); i++)
+        for (uint16_t i = 0; i < hmi_alarms_journal_count(&al); i++)
             if (strstr(hmi_alarms_journal_newest(&al, i)->message, "comm loss active")) alarm = true;
         switch (expect) {
             case EXPECT_ONLINE:                done = online && responses >= 15; break;
@@ -340,9 +360,90 @@ static void run_scenario(const char *name, fault_t fault, int good_first, int fa
     server_stop(&srv);
 }
 
+/* Identity re-checked after every connect: a different device at the same address is blocked,
+ * the right one comes back. */
+static void poll_until(hmi_tag_table_t *tags, hmi_alarm_supervisor_t *al, uint32_t ms, int want_state)
+{
+    uint32_t t0 = hmi_timer_get_ms();
+    while ((uint32_t)(hmi_timer_get_ms() - t0) < ms) {
+        uint32_t now = hmi_timer_get_ms();
+        hmi_devmgr_poll(tags, al, now);
+        hmi_alarms_evaluate(al, tags, now);
+        hmi_device_info_t d[HMI_MAX_DEVICES];
+        hmi_devmgr_publish(d, now);
+        if (want_state >= 0 && d[0].state == want_state) return;
+        SLEEP_1MS();
+    }
+}
+
+static bool journal_says(const hmi_alarm_supervisor_t *al, const char *text)
+{
+    for (uint16_t i = 0; i < hmi_alarms_journal_count(al); i++)
+        if (strstr(hmi_alarms_journal_newest(al, i)->message, text)) return true;
+    return false;
+}
+
+static void run_identity(void)
+{
+    const char *name = "identity checked on every connect";
+    static hmi_tag_table_t tags;
+    static hmi_alarm_supervisor_t al;
+    srv_t srv;
+    hmi_tag_registry_reset();
+    hmi_tags_init(&tags);
+    hmi_alarms_init(&al);
+    hmi_devmgr_init(0);
+    if (!server_start(&srv, F_NORMAL, 0, 0)) { check(false, name, "fake server could not start"); hmi_devmgr_shutdown(); return; }
+    hal_atomic_store(&srv.ident, 1);
+    hmi_device_candidate_t c;
+    memset(&c, 0, sizeof(c));
+    snprintf(c.host, sizeof(c.host), "127.0.0.1");
+    c.port = srv.port;
+    c.unit = 1;
+    c.explicit_target = true;
+    c.identified = true;
+    snprintf(c.id.vendor, sizeof(c.id.vendor), "Acme");
+    snprintf(c.id.product, sizeof(c.id.product), "P1");
+    check(hmi_devmgr_attach(&c, &tags, &al, hmi_timer_get_ms()), name, "attach failed");
+    poll_until(&tags, &al, 4000, HMI_DEV_ONLINE);
+    hmi_device_info_t d[HMI_MAX_DEVICES];
+    hmi_devmgr_publish(d, hmi_timer_get_ms());
+    check(d[0].state == HMI_DEV_ONLINE && d[0].ident == HMI_IDENT_OK, name, "same identity: not ONLINE / not checked");
+    /* another device answers at the same address */
+    hal_atomic_store(&srv.ident, 2);
+    hal_atomic_store(&srv.drop, 1);
+    poll_until(&tags, &al, 6000, -1);
+    hmi_devmgr_publish(d, hmi_timer_get_ms());
+    uint32_t rsp_blocked = d[0].responses, wr_ok = d[0].writes_ok;
+    check(d[0].state == HMI_DEV_OFFLINE && d[0].ident == HMI_IDENT_MISMATCH, name, "other identity not blocked");
+    check(journal_says(&al, "other device answers"), name, "no journal record for the blocked device");
+    check(hmi_tag_read_value(&tags, HMI_DEV_TAG(0, d[0].profile->comm_tag)) == 1, name, "comm-loss alarm not raised");
+    if (d[0].profile && d[0].profile->n_actions)                /* a command now must not get through */
+        hmi_devmgr_action(0, 0, 1, &tags, &al, hmi_timer_get_ms());
+    poll_until(&tags, &al, 3000, -1);
+    hmi_devmgr_publish(d, hmi_timer_get_ms());
+    check(d[0].responses == rsp_blocked && d[0].writes_ok == wr_ok, name, "data read or written while blocked");
+    /* a device without identity, where one had answered before, is blocked too */
+    hal_atomic_store(&srv.ident, 0);
+    poll_until(&tags, &al, 4000, -1);
+    hmi_devmgr_publish(d, hmi_timer_get_ms());
+    check(d[0].state == HMI_DEV_OFFLINE, name, "a device that stopped identifying itself is not blocked");
+    /* the right device comes back */
+    hal_atomic_store(&srv.ident, 1);
+    poll_until(&tags, &al, 15000, HMI_DEV_ONLINE);
+    hmi_devmgr_publish(d, hmi_timer_get_ms());
+    check(d[0].state == HMI_DEV_ONLINE && d[0].ident == HMI_IDENT_OK, name, "right device not accepted again");
+    check(journal_says(&al, "identity checked"), name, "no journal record for the identity check");
+    printf("  %-34s state=%u req=%lu rsp=%lu connects=%lu\n", name, (unsigned)d[0].state,
+           (unsigned long)d[0].requests, (unsigned long)d[0].responses, (unsigned long)d[0].connects);
+    hmi_devmgr_shutdown();
+    server_stop(&srv);
+}
+
 int main(void)
 {
     hmi_timer_init();
+    run_identity();
     printf("Modbus fault injection (in-process fake server, loopback only)\n");
     run_scenario("normal replies",                       F_NORMAL,        0, 0,  EXPECT_ONLINE);
     run_scenario("stale transaction id then valid",      F_STALE_TID,     0, -1, EXPECT_ONLINE);

@@ -171,27 +171,93 @@ bool hal_instance_lock(const char *path)
  * muted, a soft ding, or off in the sound scheme. --no-sound turns it off (a quiet bench). */
 static uint8_t s_alarm_wav[44 + 2 * 8000];   /* 0.6 s at 11025 Hz fits: 13230 bytes + header */
 static bool    s_sound_on = true;
-static int     s_sound_state = -1;
+static int     s_sound_state = -1;               /* alarm sound: -1 unknown, 0 off, 1 on */
+static int     s_emer_state = -1;                /* EMERGENCY sound */
+static char    s_sound_path[2][MAX_PATH];        /* HAL_SOUND_ALARM, HAL_SOUND_EMERGENCY */
+static bool    s_mci_open[2];
+static const char * const s_alias[2] = { "hmi_alarm", "hmi_emergency" };
 
-void hal_horn(bool on)
+/* A sound file looped through MCI (MP3 and WAV). false = it could not be played: use the tone.
+ * The device is closed when the sound stops, so its decoder memory is given back. */
+static bool file_loop(int kind, bool on)
 {
-    if (!s_sound_on || s_sound_state == (int)on) return;
-    s_sound_state = on;
+    char cmd[MAX_PATH + 64];
+    if (!on) {
+        if (!s_mci_open[kind]) return true;
+        snprintf(cmd, sizeof(cmd), "close %s", s_alias[kind]);
+        mciSendStringA(cmd, NULL, 0, NULL);
+        s_mci_open[kind] = false;
+        return true;
+    }
+    if (!s_sound_path[kind][0]) return false;
+    if (!s_mci_open[kind]) {
+        snprintf(cmd, sizeof(cmd), "open \"%s\" type mpegvideo alias %s", s_sound_path[kind], s_alias[kind]);
+        if (mciSendStringA(cmd, NULL, 0, NULL) != 0) return false;
+        s_mci_open[kind] = true;
+    }
+    snprintf(cmd, sizeof(cmd), "play %s from 0 repeat", s_alias[kind]);
+    if (mciSendStringA(cmd, NULL, 0, NULL) == 0) return true;
+    file_loop(kind, false);
+    return false;
+}
+
+/* The built-in sounds: the two-tone alarm, or the EMERGENCY sweep (a different sound on purpose) */
+static void tone_loop(int kind, bool on)
+{
+    static uint8_t s_emer_wav[sizeof(s_alarm_wav)];
     if (on) {
-        if (!s_alarm_wav[0] && !hal_alarm_tone_wav(s_alarm_wav, sizeof(s_alarm_wav), 11025u)) return;
-        PlaySoundA((LPCSTR)s_alarm_wav, NULL, SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+        uint8_t *w = kind == HAL_SOUND_EMERGENCY ? s_emer_wav : s_alarm_wav;
+        if (!w[0] && !(kind == HAL_SOUND_EMERGENCY ? hal_emergency_tone_wav(w, sizeof(s_emer_wav), 11025u)
+                                                   : hal_alarm_tone_wav(w, sizeof(s_alarm_wav), 11025u))) return;
+        PlaySoundA((LPCSTR)w, NULL, SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
     } else {
         PlaySoundA(NULL, NULL, 0);
     }
 }
 
-void hal_beep(void) {}                       /* the looped tone above is the horn */
+void hal_sound_file(int kind, const char *path)
+{
+    if (kind != HAL_SOUND_ALARM && kind != HAL_SOUND_EMERGENCY) return;
+    snprintf(s_sound_path[kind], sizeof(s_sound_path[kind]), "%s", path ? path : "");
+}
+
+void hal_horn(bool on)
+{
+    if (s_emer_state == 1) on = false;           /* the EMERGENCY sound has taken over */
+    if (!s_sound_on || s_sound_state == (int)on) return;
+    s_sound_state = on;
+    if (!on) { file_loop(HAL_SOUND_ALARM, false); tone_loop(HAL_SOUND_ALARM, false); return; }
+    if (!file_loop(HAL_SOUND_ALARM, true)) tone_loop(HAL_SOUND_ALARM, true);
+}
+
+void hal_emergency_sound(bool on)
+{
+    if (!s_sound_on || s_emer_state == (int)on) return;
+    s_emer_state = on;
+    if (on) {
+        file_loop(HAL_SOUND_ALARM, false);       /* stop the alarm sound first */
+        tone_loop(HAL_SOUND_ALARM, false);
+        s_sound_state = -1;
+        if (!file_loop(HAL_SOUND_EMERGENCY, true)) tone_loop(HAL_SOUND_EMERGENCY, true);
+    } else {
+        file_loop(HAL_SOUND_EMERGENCY, false);
+        tone_loop(HAL_SOUND_EMERGENCY, false);
+        s_sound_state = -1;                      /* the alarm sound resumes if still needed */
+    }
+}
+
+void hal_beep(void) {}                       /* the looped sound above is the horn */
 
 void hal_sound_enable(bool on)
 {
-    if (!on && s_sound_state == 1) PlaySoundA(NULL, NULL, 0);
+    if (!on) {
+        file_loop(HAL_SOUND_ALARM, false);
+        file_loop(HAL_SOUND_EMERGENCY, false);
+        tone_loop(HAL_SOUND_ALARM, false);
+    }
     s_sound_on = on;
     s_sound_state = -1;
+    s_emer_state = -1;
 }
 
 void hal_trim_memory(void)

@@ -18,7 +18,7 @@ typedef enum {
 } hmi_device_state_t;
 
 typedef enum {
-    HMI_TRANSPORT_LOOPBACK = 0,  /* in-process Modbus server (tests: the PLC Simulator's models) */
+    HMI_TRANSPORT_LOOPBACK = 0,  /* in-process Modbus server (tests: tests/fixtures) */
     HMI_TRANSPORT_TCP = 1        /* Modbus TCP */
 } hmi_transport_t;
 
@@ -38,6 +38,9 @@ typedef struct {
     uint32_t connects, writes_ok, writes_failed;
     uint32_t rtt_us, max_rtt_us;
     uint8_t  stop_result;       /* hmi_stop_result_t: what the last EMERGENCY / STOP ALL did to this device */
+    uint8_t  ident;             /* hmi_ident_t: identity check of the current connection */
+    uint64_t data_us;           /* monotonic us when the last complete read cycle landed in the tag table
+                                 * (the start of the data-to-screen latency measurement) */
 } hmi_device_info_t;
 
 /* Outcome of the software stop for one device (shown on the EMERGENCY screen) */
@@ -49,6 +52,15 @@ typedef enum {
     HMI_STOP_FAILED,            /* NOT stopped: the stop could not be queued, or only partly */
     HMI_STOP_NO_CONTROL         /* NOT stopped: the module has no stop control */
 } hmi_stop_result_t;
+
+/* Identity check: after every connect the device must report the same vendor and product (FC43)
+ * as when it was attached, before anything is read from it or written to it. */
+typedef enum {
+    HMI_IDENT_NONE = 0,         /* the device gave no identity when attached: cannot be checked */
+    HMI_IDENT_CHECKING,         /* asked, no answer yet: nothing is read or written */
+    HMI_IDENT_OK,               /* same vendor and product as when attached */
+    HMI_IDENT_MISMATCH          /* a different device answers at this address: blocked */
+} hmi_ident_t;
 
 /* A device found by discovery, handed to the device manager */
 typedef struct {

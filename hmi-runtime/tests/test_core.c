@@ -68,7 +68,10 @@ static void test_tags_registry(void)
 #if HMI_MAX_DEVICES == 8
     CHECK(HMI_MAX_TAGS == 224 && HMI_DEV_TAG(7, 23) == 223);
 #endif
-    CHECK(HMI_MAX_TAGS <= 255);                          /* tag ids are 8-bit */
+#if HMI_MAX_DEVICES == 128
+    CHECK(HMI_MAX_TAGS == 3104 && HMI_DEV_TAG(127, 23) == 3103);
+#endif
+    CHECK(HMI_MAX_TAGS <= 65535 && sizeof(hmi_tag_id_t) == 2);   /* tag ids are 16-bit */
     CHECK(hmi_tag_register_meta(T_META, 2));
     hmi_tag_bind_meta(HMI_DEV_TAG(HMI_MAX_DEVICES - 1, 0), &T_META[0]);
     CHECK(hmi_tag_get_meta(HMI_DEV_TAG(HMI_MAX_DEVICES - 1, 0)) == &T_META[0]);
@@ -406,7 +409,10 @@ static void test_layout(void)
             for (int n = 1; n <= HMI_MAX_DEVICES; n++) {
                 make_devices(devs, n);
                 int per = hmi_layout_devices_per_page(c, n);
-                CHECK(per >= 1 && per <= n && (n <= 4 ? per == n : per >= 4));
+                bool tiles = hmi_layout_device_tiles(c, n);
+                /* up to 4 devices: all at once; more: at least 3 per page (640x400 with the banner) */
+                CHECK(per >= 1 && per <= n && (n <= 4 ? per == n : per >= 3));
+                CHECK(!tiles || n > 4);                           /* tiles only for many devices */
                 if (per < n) {                                    /* pages: Previous / Next below the cards */
                     hmi_rect_t ar = hmi_layout_process_area(c, n);
                     for (int dir = 0; dir < 2; dir++) {
@@ -419,7 +425,7 @@ static void test_layout(void)
                     hmi_rect_t h0 = hmi_layout_device_open(hmi_layout_device_panel(c, n, 0));   /* page 2 shows devs[per] */
                     hmi_hit_t p2 = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE,
                                                        NULL, 0, devs, (uint8_t)n, 1, 0xFF, h0.x + h0.w / 2, h0.y + h0.h / 2);
-                    CHECK(p2.kind == HMI_HIT_DEVICE_OPEN && p2.param == devs[per].slot);
+                    CHECK(p2.kind == (tiles ? HMI_HIT_DEVICE_FOCUS : HMI_HIT_DEVICE_OPEN) && p2.param == devs[per].slot);
                     CHECK(hmi_layout_device_panel(c, n, per).w == 0);
                 }
                 for (int a = 0; a < per; a++) {
@@ -432,10 +438,11 @@ static void test_layout(void)
                         CHECK(!overlap);
                     }
                     hmi_rect_t body = hmi_layout_device_body(pa);
-                    if (hmi_layout_device_summary(pa)) {          /* too small for widgets: one big tap target */
+                    if (tiles) CHECK(pa.w >= HMI_LAYOUT_TILE_MIN_W && pa.h >= HMI_LAYOUT_TILE_MIN_H);
+                    if (tiles || hmi_layout_device_summary(pa)) { /* a tile or a summary card: one big tap target */
                         hmi_hit_t sh_ = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE,
                                                             NULL, 0, devs, (uint8_t)n, 0, 0xFF, pa.x + pa.w / 2, pa.y + pa.h / 2);
-                        CHECK(sh_.kind == HMI_HIT_DEVICE_OPEN && sh_.param == devs[a].slot);
+                        CHECK(sh_.kind == (tiles ? HMI_HIT_DEVICE_FOCUS : HMI_HIT_DEVICE_OPEN) && sh_.param == devs[a].slot);
                         continue;
                     }
                     uint8_t nt = 0;
@@ -451,7 +458,7 @@ static void test_layout(void)
                         CHECK(hmi_profile_action(devs[a].profile, hmi_token_get_tag(tk[i])) != NULL);
                     }
                 }
-                if (!hmi_layout_device_summary(hmi_layout_device_panel(c, n, 0)))
+                if (!tiles && !hmi_layout_device_summary(hmi_layout_device_panel(c, n, 0)))
                     CHECK(hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, banner != 0, HMI_MODAL_NONE, NULL, 0,
                                               devs, (uint8_t)n, 0, 0xFF, c.x + 30, c.y + 46).kind == HMI_HIT_NONE);
             }
@@ -1174,6 +1181,24 @@ static void test_alarm_tone(void)
     CHECK(wn == 44u + 2u * n && memcmp(wav, "RIFF", 4) == 0 && memcmp(wav + 8, "WAVEfmt ", 8) == 0);
     CHECK(wav[24] == (uint8_t)(11025u & 0xFF) && wav[34] == 16 && memcmp(wav + 36, "data", 4) == 0);
     CHECK(hal_alarm_tone_wav(wav, 40, 11025u) == 0);
+
+    /* EMERGENCY: its own sound - four rising sweeps, not the two-tone */
+    static int16_t em[11025];
+    size_t en = hal_emergency_tone_pcm(em, sizeof(em) / sizeof(em[0]), 11025u);
+    size_t per = 11025u * 15u / 100u;
+    CHECK(en == 4u * per);
+    int lo_z = 0, hi_z = 0, epeak = 0;
+    for (size_t i = 1; i < per; i++) {                             /* first and last quarter of a sweep */
+        bool cross = (em[i - 1] < 0) != (em[i] < 0);
+        if (cross && i < per / 4) lo_z++;
+        if (cross && i >= per - per / 4) hi_z++;
+    }
+    for (size_t i = 0; i < en; i++) { int a = em[i] < 0 ? -em[i] : em[i]; if (a > epeak) epeak = a; }
+    CHECK(hi_z > lo_z + lo_z / 2);                                 /* the pitch rises */
+    CHECK(epeak > 10000 && epeak < 32767);
+    CHECK(em[0] == 0 && em[en - 1] == 0);                          /* loops without a click */
+    CHECK(memcmp(em, pcm, sizeof(int16_t) * 600) != 0);
+    CHECK(hal_emergency_tone_wav(wav, sizeof(wav), 11025u) == 44u + 2u * en);
 }
 
 static void test_color_scheme(void)
@@ -1366,6 +1391,315 @@ static void test_atomics(void)
     CHECK(hal_atomic_load(&a) == INT32_MAX);
 }
 
+/* ------------------------------------------------------------------ */
+/* ISA-18.2 handling: shelve, out of service, flood, chatter, journal */
+
+static bool journal_has_text(const hmi_alarm_supervisor_t *s, const char *text)
+{
+    for (uint16_t i = 0; i < hmi_alarms_journal_count(s); i++)
+        if (strstr(hmi_alarms_journal_newest(s, i)->message, text)) return true;
+    return false;
+}
+
+static const hmi_tag_meta_t ZERO_LIMIT_META = { 22, TAG_TYPE_ANALOG, "SUPPLY SP", "C", -100, 500, 0, 0, 1, 0, NULL, NULL, NULL };
+static const hmi_tag_meta_t INFO_META = { 23, TAG_TYPE_DIGITAL, "NOTE", "", 0, 1, 0, 0, 0, ALARM_SEV_INFO, NULL, NULL, NULL };
+static hmi_tag_meta_t g_flood_meta[12];
+
+static void test_alarm_handling(void)
+{
+    static hmi_tag_table_t t;
+    static hmi_alarm_supervisor_t s;
+    hmi_tag_registry_reset();
+    CHECK(hmi_tag_register_meta(T_META, 2));
+    CHECK(hmi_tag_register_meta(&ZERO_LIMIT_META, 1));
+    CHECK(hmi_tag_register_meta(&INFO_META, 1));
+    hmi_tags_init(&t);
+    hmi_alarms_init(&s);
+    hmi_tag_write_digital(&t, 21, false, QUALITY_GOOD);
+    hmi_tag_write_digital(&t, 23, false, QUALITY_GOOD);
+
+    /* a limit of 0 on a range that goes below 0 is "no limit" */
+    hmi_tag_write_analog(&t, 22, 100, QUALITY_GOOD);
+    hmi_alarms_evaluate(&s, &t, 1000);
+    CHECK(s.points[22].state == ALARM_PT_NORMAL);
+
+    /* shelve: hidden from the summary, the counts and the horn; still evaluated */
+    eval(&s, &t, 860, 2000);
+    CHECK(s.points[20].state == ALARM_PT_UNACK && s.horn_sounding && s.unacked_count == 1);
+    CHECK(hmi_alarms_can_hide(20) && !hmi_alarms_can_hide(21) && !hmi_alarms_can_hide(999));
+    CHECK(hmi_alarms_shelve(&s, 20, 60000, 2100));
+    eval(&s, &t, 870, 2200);
+    hmi_tag_id_t order[8], hidden[8];
+    CHECK(s.shelved_count == 1 && s.unacked_count == 0 && !s.horn_sounding && !s.current_action.active);
+    CHECK(hmi_alarms_sorted(&s, order, 8) == 0);
+    CHECK(hmi_alarms_hidden(&s, hidden, 8) == 1 && hidden[0] == 20);
+    CHECK(journal_has_text(&s, "Shelved 1 min"));
+    CHECK(hmi_alarms_acknowledge_all(&s, 2300) == 0 && s.points[20].state == ALARM_PT_UNACK);  /* not seen: not acked */
+    eval(&s, &t, 960, 2400);                                  /* escalates while shelved: still hidden */
+    CHECK(s.points[20].peak_severity == ALARM_SEV_CRITICAL && !s.horn_sounding);
+    /* time up: back in the list, the horn sounds again */
+    eval(&s, &t, 960, 2100 + 60000);
+    CHECK(!(s.points[20].flags & HMI_ALARM_F_SHELVED) && s.unacked_count == 1 && s.horn_sounding);
+    CHECK(journal_has_text(&s, "Unshelved (time up)"));
+    /* stop-priority points can never be hidden */
+    CHECK(!hmi_alarms_shelve(&s, 21, 60000, 70000) && !hmi_alarms_set_out_of_service(&s, 21, true, 70000));
+    CHECK(!hmi_alarms_shelve(&s, 20, 0, 70000));              /* zero duration refused */
+
+    /* shelve across the 32-bit timer wrap */
+    uint32_t near = 0xFFFFFF00u;
+    CHECK(hmi_alarms_shelve(&s, 20, 1000, near));
+    eval(&s, &t, 960, near + 500u);
+    CHECK(s.points[20].flags & HMI_ALARM_F_SHELVED);
+    eval(&s, &t, 960, near + 1000u);
+    CHECK(!(s.points[20].flags & HMI_ALARM_F_SHELVED));
+
+    /* early unshelve, out of service and return */
+    CHECK(hmi_alarms_shelve(&s, 20, 60000, 100));
+    CHECK(hmi_alarms_unshelve(&s, 20, 200) && !(s.points[20].flags & HMI_ALARM_F_HIDDEN));
+    CHECK(!hmi_alarms_unshelve(&s, 20, 210));                 /* nothing to undo */
+    CHECK(hmi_alarms_set_out_of_service(&s, 20, true, 300));
+    CHECK(!hmi_alarms_set_out_of_service(&s, 20, true, 310)); /* already out */
+    CHECK(hmi_alarms_shelve(&s, 20, 60000, 320));             /* shelved and out of service: listed once */
+    CHECK(hmi_alarms_hidden(&s, hidden, 8) == 1);
+    CHECK(hmi_alarms_unshelve(&s, 20, 330) && (s.points[20].flags & HMI_ALARM_F_OOS));
+    CHECK(hmi_alarms_unshelve(&s, 20, 340) && !(s.points[20].flags & HMI_ALARM_F_HIDDEN));
+    CHECK(journal_has_text(&s, "Out of service") && journal_has_text(&s, "Back in service"));
+
+    /* flood: more than 10 new alarms in 10 minutes starts it, fewer than 5 ends it */
+    hmi_alarms_init(&s);
+    for (int i = 0; i < 12; i++) {
+        g_flood_meta[i] = T_META[0];
+        g_flood_meta[i].tag_id = (hmi_tag_id_t)(40 + i);
+        CHECK(hmi_tag_register_meta(&g_flood_meta[i], 1));
+        hmi_tag_write_analog(&t, (hmi_tag_id_t)(40 + i), 100, QUALITY_GOOD);
+    }
+    hmi_tag_write_analog(&t, 20, 100, QUALITY_GOOD);
+    hmi_alarms_evaluate(&s, &t, 600000);
+    CHECK(!s.flood && s.rate_10min == 0);
+    for (int i = 0; i < 12; i++) hmi_tag_write_analog(&t, (hmi_tag_id_t)(40 + i), 900, QUALITY_GOOD);
+    hmi_alarms_evaluate(&s, &t, 601000);
+    CHECK(s.flood && s.rate_10min == 12 && s.flood_count == 1 && journal_has_text(&s, "Alarm flood: 12"));
+    hmi_alarms_acknowledge_all(&s, 602000);
+    hmi_tag_write_digital(&t, 23, true, QUALITY_GOOD);         /* an Info alarm during a flood: silent */
+    hmi_alarms_evaluate(&s, &t, 603000);
+    CHECK(s.points[23].state == ALARM_PT_UNACK && s.unacked_count == 1 && !s.horn_sounding);
+    hmi_alarms_evaluate(&s, &t, 601000 + 11u * 60000u);       /* 11 min later: rate drops, flood over */
+    CHECK(!s.flood && s.rate_10min < HMI_ALARM_FLOOD_OFF && journal_has_text(&s, "Alarm flood over"));
+    CHECK(s.rate_peak_10min == 13);
+    hmi_alarms_evaluate(&s, &t, 601000 + 60u * 60000u);       /* a long gap: buckets cleared */
+    CHECK(s.rate_10min == 0);
+    CHECK(s.horn_sounding);                                    /* no flood: the Info alarm sounds again */
+
+    /* chattering: 3 annunciations within 60 s */
+    hmi_alarms_init(&s);
+    uint32_t c0 = 5000000u;
+    for (int k = 0; k < 3; k++) {
+        eval(&s, &t, 860, c0 + (uint32_t)k * 10000u);
+        hmi_alarms_acknowledge_point(&s, 20, c0 + (uint32_t)k * 10000u + 1u);
+        eval(&s, &t, 700, c0 + (uint32_t)k * 10000u + 5000u);
+    }
+    CHECK((s.points[20].flags & HMI_ALARM_F_CHATTER) && s.chatter_count == 1 && journal_has_text(&s, "Chattering"));
+    eval(&s, &t, 700, c0 + 3u * HMI_ALARM_CHATTER_MS);
+    CHECK(!(s.points[20].flags & HMI_ALARM_F_CHATTER));
+
+    /* journal: 512 records, O(1) lookup by sequence number */
+    hmi_alarms_init(&s);
+    for (int i = 0; i < 600; i++) hmi_alarms_log_event(&s, (uint32_t)i, HMI_ALARM_TAG_SYSTEM, ALARM_SEV_INFO, 0, "x");
+    CHECK(hmi_alarms_journal_count(&s) == HMI_ALARM_JOURNAL_SIZE && s.journal_total == 600);
+    CHECK(hmi_alarms_journal_by_seq(&s, 600) == hmi_alarms_journal_newest(&s, 0));
+    CHECK(hmi_alarms_journal_by_seq(&s, 600 - HMI_ALARM_JOURNAL_SIZE + 1)->seq == 600 - HMI_ALARM_JOURNAL_SIZE + 1);
+    CHECK(hmi_alarms_journal_by_seq(&s, 600 - HMI_ALARM_JOURNAL_SIZE) == NULL);
+    CHECK(hmi_alarms_journal_by_seq(&s, 601) == NULL && hmi_alarms_journal_by_seq(&s, 0) == NULL);
+    CHECK(hmi_alarms_journal_newest(&s, HMI_ALARM_JOURNAL_SIZE - 1)->seq == 600 - HMI_ALARM_JOURNAL_SIZE + 1);
+    CHECK(hmi_alarms_journal_newest(&s, HMI_ALARM_JOURNAL_SIZE) == NULL);
+    hmi_tag_registry_reset();
+}
+
+/* Summary order with points above tag id 255, and max smaller than the number shown */
+#if HMI_MAX_DEVICES >= 16
+static hmi_tag_meta_t g_sort_meta[60];
+#endif
+
+static void test_alarm_sort_many(void)
+{
+#if HMI_MAX_DEVICES >= 16
+    static hmi_tag_table_t t;
+    static hmi_alarm_supervisor_t s;
+    hmi_tag_registry_reset();
+    hmi_tags_init(&t);
+    hmi_alarms_init(&s);
+    for (int i = 0; i < 60; i++) {
+        hmi_tag_id_t id = HMI_DEV_TAG(10 + i / 20, i % 20);
+        g_sort_meta[i] = T_META[0];
+        g_sort_meta[i].tag_id = id;
+        hmi_tag_bind_meta(id, &g_sort_meta[i]);
+        hmi_tag_write_analog(&t, id, (int16_t)(i % 3 == 0 ? 960 : 870), QUALITY_GOOD);
+        hmi_alarms_evaluate(&s, &t, 1000u + (uint32_t)i * 10u);
+        if (i % 4 == 0) hmi_alarms_acknowledge_point(&s, id, 1000u + (uint32_t)i * 10u + 1u);
+    }
+    static hmi_tag_id_t all[HMI_MAX_TAGS], top[7];
+    uint16_t n = hmi_alarms_sorted(&s, all, HMI_MAX_TAGS);
+    CHECK(n == 60);
+    bool ordered = true;
+    for (uint16_t k = 1; k < n; k++) {
+        const hmi_alarm_point_t *a = &s.points[all[k - 1]], *b = &s.points[all[k]];
+        bool ua = a->state == ALARM_PT_UNACK || a->state == ALARM_PT_RTN_UNACK;
+        bool ub = b->state == ALARM_PT_UNACK || b->state == ALARM_PT_RTN_UNACK;
+        if (a->peak_severity < b->peak_severity) ordered = false;
+        else if (a->peak_severity == b->peak_severity && !ua && ub) ordered = false;
+        else if (a->peak_severity == b->peak_severity && ua == ub && (int32_t)(a->since_ms - b->since_ms) < 0) ordered = false;
+    }
+    CHECK(ordered);
+    CHECK(all[0] > 255 || HMI_DEV_TAG(10, 0) <= 255);
+    CHECK(hmi_alarms_sorted(&s, top, 7) == 7 && memcmp(top, all, sizeof(top)) == 0);
+    for (int i = 0; i < 60; i++) hmi_tag_bind_meta(HMI_DEV_TAG(10 + i / 20, i % 20), NULL);
+    hmi_tag_registry_reset();
+#endif
+}
+
+/* Build-19 screens: Readings, the search keyboard, the alarm dialog, three alarm tabs */
+static void test_layout_build19(void)
+{
+    /* devices that all fit are never drawn as tall strips (8 in a tall window: 2 x 4, not 8 x 1) */
+    static const int tall[][2] = { {1000, 1000}, {900, 1200}, {1400, 1000}, {1920, 1080}, {800, 480} };
+    for (unsigned k = 0; k < sizeof(tall) / sizeof(tall[0]); k++)
+        for (int n = 5; n <= 12; n++) {
+            hmi_rect_t c = hmi_layout_content(tall[k][0], tall[k][1], false);
+            if (hmi_layout_devices_per_page(c, n) < n) continue;   /* pages: the full grid is used */
+            for (int i = 0; i < n; i++) {
+                hmi_rect_t p = hmi_layout_device_panel(c, n, i);
+                CHECK(p.w > 0 && p.h > 0 && p.h <= 2 * p.w + 40);
+            }
+        }
+
+    static const int sizes[][2] = { {640, 400}, {800, 480}, {1024, 600}, {1920, 1080} };
+    for (unsigned k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+        int w = sizes[k][0], h = sizes[k][1];
+        for (int banner = 0; banner < 2; banner++) {
+            bool b = banner != 0;
+            hmi_rect_t c = hmi_layout_content(w, h, b);
+            hmi_rect_t card = hmi_layout_read_card(w, h, b);
+            int rows = hmi_layout_read_rows(card);
+            CHECK(rows >= 1);
+            hmi_rect_t pv = hmi_layout_read_page(card, 0), nx = hmi_layout_read_page(card, 1);
+            for (int r = 0; r < rows; r++) {
+                hmi_rect_t rr = hmi_layout_read_row(card, r);
+                CHECK(rr.h >= HMI_LAYOUT_READ_ROW_MIN_H && rr.x >= card.x && rr.x + rr.w <= card.x + card.w);
+                CHECK(rr.y + rr.h <= pv.y);                       /* rows end above the footer */
+                hmi_hit_t hr = hmi_layout_hit_test(w, h, SCREEN_READINGS, b, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF,
+                                                   rr.x + rr.w / 2, rr.y + rr.h / 2);
+                CHECK(hr.kind == HMI_HIT_READ_ROW && hr.param == r);
+            }
+            CHECK(pv.x + pv.w <= nx.x && nx.x + nx.w <= card.x + card.w && pv.y + pv.h <= card.y + card.h);
+            for (int d = 0; d < 2; d++) {
+                hmi_rect_t pr = hmi_layout_read_page(card, d);
+                hmi_hit_t hp = hmi_layout_hit_test(w, h, SCREEN_READINGS, b, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF,
+                                                   pr.x + pr.w / 2, pr.y + pr.h / 2);
+                CHECK(hp.kind == HMI_HIT_READ_PAGE && hp.param == d);
+            }
+            hmi_rect_t prev = { c.x, c.y, 120, 1 };                /* the "Readings" title */
+            for (int f = 0; f < HMI_READ_FILTERS; f++) {
+                hmi_rect_t fr = hmi_layout_read_filter(w, h, b, f);
+                CHECK(fr.x >= prev.x + prev.w && fr.y >= c.y && fr.y + fr.h <= c.y + HMI_LAYOUT_TITLE_H);
+                hmi_hit_t hf = hmi_layout_hit_test(w, h, SCREEN_READINGS, b, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF,
+                                                   fr.x + fr.w / 2, fr.y + fr.h / 2);
+                CHECK(hf.kind == HMI_HIT_READ_FILTER && hf.param == f);
+                prev = fr;
+            }
+            hmi_rect_t sr = hmi_layout_read_search(w, h, b);
+            CHECK(sr.x >= prev.x + prev.w && sr.x + sr.w <= c.x + c.w && sr.w >= 80);
+            CHECK(hmi_layout_hit_test(w, h, SCREEN_READINGS, b, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF,
+                                      sr.x + sr.w / 2, sr.y + sr.h / 2).kind == HMI_HIT_READ_SEARCH);
+        }
+        /* search keyboard: every key inside the dialog, on screen, hit as itself */
+        hmi_rect_t m = hmi_layout_modal(w, h, HMI_MODAL_SEARCH);
+        CHECK(m.y >= HMI_LAYOUT_HEADER_H && m.y + m.h <= h && m.x >= 0 && m.x + m.w <= w);
+        hmi_rect_t dsp = hmi_layout_kbd_display(w, h);
+        for (int key = 0; key < HMI_KBD_KEYS; key++) {
+            hmi_rect_t kr = hmi_layout_kbd_key(w, h, key);
+            CHECK(kr.x >= m.x && kr.x + kr.w <= m.x + m.w && kr.y >= dsp.y + dsp.h && kr.y + kr.h <= m.y + m.h);
+            CHECK(kr.h >= 34 && kr.w >= 40 && hmi_layout_kbd_char(key) != 0 && hmi_layout_kbd_label(key)[0]);
+            hmi_hit_t hk = hmi_layout_hit_test(w, h, SCREEN_READINGS, false, HMI_MODAL_SEARCH, NULL, 0, NULL, 0, 0, 0xFF,
+                                               kr.x + kr.w / 2, kr.y + kr.h / 2);
+            CHECK(hk.kind == HMI_HIT_KBD_KEY && hk.param == key);
+        }
+        CHECK(hmi_layout_kbd_char(-1) == 0 && hmi_layout_kbd_char(HMI_KBD_KEYS) == 0);
+        /* alarm dialog: four buttons inside it, hit as themselves; EMERGENCY still reachable above it */
+        hmi_rect_t am = hmi_layout_modal(w, h, HMI_MODAL_ALARM);
+        CHECK(am.y >= HMI_LAYOUT_HEADER_H && am.y + am.h <= h);
+        for (int bt = 0; bt < HMI_ALMD_BUTTONS; bt++) {
+            hmi_rect_t br = hmi_layout_almd_button(w, h, bt);
+            CHECK(br.x >= am.x && br.x + br.w <= am.x + am.w && br.y >= am.y && br.y + br.h <= am.y + am.h && br.h >= 44);
+            hmi_hit_t hb = hmi_layout_hit_test(w, h, SCREEN_ALARM_MATRIX, false, HMI_MODAL_ALARM, NULL, 0, NULL, 0, 0, 0xFF,
+                                               br.x + br.w / 2, br.y + br.h / 2);
+            CHECK(hb.kind == HMI_HIT_ALMD_BTN && hb.param == bt);
+        }
+        hmi_rect_t e = hmi_layout_estop_button(w, h);
+        CHECK(hmi_layout_hit_test(w, h, SCREEN_ALARM_MATRIX, false, HMI_MODAL_ALARM, NULL, 0, NULL, 0, 0, 0xFF,
+                                  e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
+        CHECK(hmi_layout_hit_test(w, h, SCREEN_READINGS, false, HMI_MODAL_SEARCH, NULL, 0, NULL, 0, 0, 0xFF,
+                                  e.x + 5, e.y + 5).kind == HMI_HIT_ESTOP);
+        /* three alarm tabs and three title buttons do not overlap */
+        hmi_rect_t tabs[HMI_ALARM_VIEWS];
+        for (int v = 0; v < HMI_ALARM_VIEWS; v++) {
+            tabs[v] = hmi_layout_alarm_tab(w, h, v);
+            hmi_hit_t ht = hmi_layout_hit_test(w, h, SCREEN_ALARM_MATRIX, false, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF,
+                                               tabs[v].x + tabs[v].w / 2, tabs[v].y + tabs[v].h / 2);
+            CHECK(ht.kind == HMI_HIT_ALARM_TAB && ht.param == v);
+        }
+        hmi_rect_t rs = hmi_layout_screen_button(w, h, false, HMI_HIT_ESTOP_RESET);
+        int right_most_tab = 0;
+        for (int v = 0; v < HMI_ALARM_VIEWS; v++)
+            if (tabs[v].x + tabs[v].w > right_most_tab) right_most_tab = tabs[v].x + tabs[v].w;
+        CHECK(right_most_tab <= rs.x);
+        /* the dock has a tab for every screen */
+        for (int sc = 0; sc < SCREEN_COUNT; sc++) {
+            hmi_rect_t dt = hmi_layout_dock_tab(w, h, sc);
+            hmi_hit_t hd = hmi_layout_hit_test(w, h, SCREEN_PROCESS_OVERVIEW, false, HMI_MODAL_NONE, NULL, 0, NULL, 0, 0, 0xFF,
+                                               dt.x + dt.w / 2, dt.y + dt.h / 2);
+            CHECK(hd.kind == HMI_HIT_NAV_TAB && hd.param == sc);
+        }
+    }
+    CHECK(SCREEN_COUNT == 6 && SCREEN_READINGS == 1);
+    /* device view: back and controls buttons, header, and every device button hit as itself */
+    {
+        hmi_device_info_t one[1];
+        make_devices(one, 1);
+        static const int vs[][2] = { {800, 480}, {1024, 600}, {1920, 1080} };
+        for (unsigned k = 0; k < sizeof(vs) / sizeof(vs[0]); k++) {
+            int w = vs[k][0], h = vs[k][1];
+            hmi_rect_t c = hmi_layout_content(w, h, false), p = hmi_layout_focus_panel(c);
+            hmi_rect_t bk = hmi_layout_focus_button(c, 0), ct = hmi_layout_focus_button(c, 1);
+            CHECK(p.y + p.h <= bk.y && bk.x + bk.w < ct.x);
+            CHECK(hmi_layout_focus_hit_test(w, h, false, one, bk.x + 5, bk.y + 5).kind == HMI_HIT_FOCUS_BACK);
+            hmi_hit_t hc = hmi_layout_focus_hit_test(w, h, false, one, ct.x + 5, ct.y + 5);
+            CHECK(hc.kind == HMI_HIT_DEVICE_OPEN && hc.param == one[0].slot);
+            hmi_rect_t body = hmi_layout_device_body(p);
+            uint8_t nt = 0;
+            const uint32_t *tk = hmi_layout_device_manifest(one[0].profile, body, &nt);
+            for (uint8_t i = 0; tk && i < nt; i++) {
+                if (hmi_token_get_type(tk[i]) != WIDGET_ACTION_BUTTON) continue;
+                hmi_rect_t r = hmi_layout_token_rect(tk[i], body);
+                hmi_hit_t hb = hmi_layout_focus_hit_test(w, h, false, one, r.x + r.w / 2, r.y + r.h / 2);
+                CHECK(hb.kind == HMI_HIT_WIDGET_BUTTON && hb.param == HMI_DEV_TAG(one[0].slot, hmi_token_get_tag(tk[i])));
+            }
+        }
+    }
+    /* new commands: roles and names */
+    CHECK(hmi_security_required_role(HMI_CMD_SHELVE_ALARM) == ROLE_OPERATOR);
+    CHECK(hmi_security_required_role(HMI_CMD_ALARM_SERVICE) == ROLE_MAINTENANCE);
+    CHECK(strcmp(hmi_security_command_name(HMI_CMD_SHELVE_ALARM), "COMMAND") != 0);
+    CHECK(strcmp(hmi_security_command_name(HMI_CMD_ALARM_SERVICE), "COMMAND") != 0);
+    /* the protected folder's path is worked out without making it */
+    char dir[300];
+#if defined(_WIN32) || defined(__linux__)
+    CHECK(hal_secure_dir(dir, sizeof(dir), false));
+    size_t dl = strlen(dir);
+    CHECK(dl > 2 && (dir[dl - 1] == '\\' || dir[dl - 1] == '/') && strstr(dir, "rometheus") != NULL);
+#endif
+    CHECK(!hal_secure_dir(dir, 1, false));
+}
+
 int main(void)
 {
     test_crc();
@@ -1393,6 +1727,9 @@ test_hal();
     test_color_scheme();
     test_alarm_tone();
     test_log_sync_policy();
+    test_alarm_handling();
+    test_alarm_sort_many();
+    test_layout_build19();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

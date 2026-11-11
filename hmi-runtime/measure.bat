@@ -4,7 +4,7 @@ REM ==========================================================================
 REM  Runtime audit: starts the HMI for 8 s, samples RAM / threads while it
 REM  runs, then prints the HMI's own measured report (loop rate, jitter,
 REM  integrity counters) and verifies the alarm log hash chain.
-REM    measure.bat                 simulator
+REM    measure.bat                 the HMI alone (no PLC)
 REM    measure.bat 127.0.0.1:1502  against a Modbus TCP PLC
 REM ==========================================================================
 cd /d "%~dp0"

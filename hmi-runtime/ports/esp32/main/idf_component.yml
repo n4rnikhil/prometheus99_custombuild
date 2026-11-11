@@ -1,4 +1,5 @@
 dependencies:
   idf: ">=5.3"
-  espressif/esp_lcd_touch_gt911: "^1.1.0"
+  espressif/esp_lcd_touch: "^1.2.1"
+  espressif/esp_lcd_touch_gt911: "^1.2.1"
   joltwallet/littlefs: "^1.14.0"

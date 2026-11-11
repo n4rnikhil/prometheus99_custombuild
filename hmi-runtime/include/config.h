@@ -56,8 +56,10 @@
 #define HMI_WATCHDOG_TICK_MS        50     /* evaluation period */
 #define HMI_FAULT_INJECT_STALL_MS   750    /* test: fieldbus thread deliberately stalls this long */
 
-/* --- Snapshot staleness (UI marks data stale when the last publish is older) --- */
-#define HMI_SNAPSHOT_STALE_MS       500
+/* --- Snapshot hand-off to the UI --- */
+#define HMI_PUBLISH_PERIOD_MS       10     /* fieldbus -> UI snapshot copy period (the screen draws every ~33 ms) */
+#define HMI_SNAPSHOT_STALE_MS       500    /* the UI marks data stale when the last publish is older */
+#define HMI_LATENCY_TARGET_MS       100    /* data-to-screen latency target shown on Diagnostics */
 
 /* --- Modbus TCP --- */
 #define HMI_MODBUS_DEFAULT_PORT     502
@@ -79,15 +81,21 @@
 #endif
 
 /* --- Capacities (statically bounded) --- */
-/* Tag id map: 0..31 runtime (8..11 host telemetry, 13 HMI watchdog),
- * then HMI_MAX_DEVICES blocks of HMI_DEVICE_TAG_SPAN tags, one per plugged-in PLC. */
+/* Tag id map: 0..31 runtime (8..11 host telemetry, 13 HMI watchdog, 14 devices not shown),
+ * then HMI_MAX_DEVICES blocks of HMI_DEVICE_TAG_SPAN tags, one per connected device.
+ * Tag ids are 16-bit. HMI_MAX_DEVICES is the build's capacity (memory is reserved for it at
+ * start); --max-devices lowers the limit at run time. */
+typedef uint16_t hmi_tag_id_t;
 #ifndef HMI_MAX_DEVICES
-#define HMI_MAX_DEVICES             8      /* PLCs, drives and meters attached at once (1..9) */
+#define HMI_MAX_DEVICES             128    /* PLCs, drives and meters attached at once */
 #endif
 #define HMI_DEVICE_TAG_BASE         32
 #define HMI_DEVICE_TAG_SPAN         24
-#define HMI_MAX_TAGS                (HMI_DEVICE_TAG_BASE + HMI_MAX_DEVICES * HMI_DEVICE_TAG_SPAN)  /* 8 devices: 224 x 8 B */
-#define HMI_DEV_TAG(slot, rel)      ((uint8_t)(HMI_DEVICE_TAG_BASE + (slot) * HMI_DEVICE_TAG_SPAN + (rel)))
+#define HMI_MAX_TAGS                (HMI_DEVICE_TAG_BASE + HMI_MAX_DEVICES * HMI_DEVICE_TAG_SPAN)  /* 128 devices: 3104 tags */
+#define HMI_DEV_TAG(slot, rel)      ((hmi_tag_id_t)(HMI_DEVICE_TAG_BASE + (slot) * HMI_DEVICE_TAG_SPAN + (rel)))
+#if HMI_MAX_DEVICES < 1 || HMI_MAX_DEVICES > 250 || HMI_MAX_TAGS > 65535
+#error "HMI_MAX_DEVICES must be 1..250 (slot numbers are 8-bit; 0xFF means no slot)"
+#endif
 
 /* --- Plug and play --- */
 #define HMI_DISCOVERY_PERIOD_MS     3000   /* how often the discovery thread looks for new PLCs */
@@ -99,7 +107,6 @@
 #define HMI_DEVICE_REMOVE_MS        10000  /* offline this long -> removed from the dashboard (0 = never) */
 #define HMI_DEVICE_SLOT_COOLDOWN_MS 1500   /* a freed slot is not reused before this */
 #define HMI_MAX_WIDGETS_PER_SCREEN  24
-#define HMI_MAX_SCREENS             5
 #define HMI_TREND_SAMPLES           60     /* 60 s at 1 Hz */
 #ifndef HMI_HEARTBEAT_MS
 #define HMI_HEARTBEAT_MS            1000u  /* HMI -> PLC heartbeat write period (devices that have one) */
@@ -112,14 +119,22 @@
 #define HMI_ALARM_LOG_SYNC_MS       250u
 #endif
 #ifndef HMI_ALARM_JOURNAL_SIZE
-/* In-memory circular journal between the fieldbus thread and the log writer. During an alarm
- * flood (ISA-18.2: more than 10 alarms in 10 min per operator, often hundreds in seconds) the
- * writer must not fall behind and replace audit records by "RECORDS LOST": 64 x 72 B = 4.5 KB. */
-#define HMI_ALARM_JOURNAL_SIZE      64
+/* In-memory circular journal between the fieldbus thread and the log writer (the UI thread, once
+ * a frame). During an alarm flood (ISA-18.2: more than 10 alarms in 10 min per operator, often
+ * hundreds in seconds, e.g. a power dip across many devices) the writer must not fall behind and
+ * replace audit records by "RECORDS LOST": 512 x 72 B = 36 KB. */
+#define HMI_ALARM_JOURNAL_SIZE      512
 #endif
-#if HMI_ALARM_JOURNAL_SIZE > 255
-#error "HMI_ALARM_JOURNAL_SIZE must fit the uint8_t journal indices"
+#if HMI_ALARM_JOURNAL_SIZE < 8 || HMI_ALARM_JOURNAL_SIZE > 65535
+#error "HMI_ALARM_JOURNAL_SIZE must fit the uint16_t journal indices"
 #endif
+/* ISA-18.2 alarm handling */
+#define HMI_ALARM_EVAL_MS           10     /* alarm evaluation period (devices answer every 100 ms) */
+#define HMI_ALARM_SHELVE_MS         (60u * 60u * 1000u)   /* a shelved alarm comes back after 1 hour */
+#define HMI_ALARM_FLOOD_ON          10     /* more than this many new alarms in 10 min: flood */
+#define HMI_ALARM_FLOOD_OFF         5      /* fewer than this in 10 min: flood over */
+#define HMI_ALARM_CHATTER_COUNT     3      /* this many annunciations of one point ... */
+#define HMI_ALARM_CHATTER_MS        60000u /* ... within this window: chattering */
 #define HMI_INPUT_QUEUE_SIZE        16
 
 /* --- Driver modules compiled in (the generic Modbus driver is always present) ---
@@ -185,12 +200,13 @@ typedef enum {
 
 #define HMI_ROLE_COUNT 4
 
-/* --- Screens --- */
+/* --- Screens (dock order, ISA-101: overview first, then detail, then alarms, then support) --- */
 typedef enum {
-    SCREEN_PROCESS_OVERVIEW = 0,
+    SCREEN_PROCESS_OVERVIEW = 0,   /* every device: cards, or tiles when there are many */
+    SCREEN_READINGS,               /* every reading of every device: grouped, filtered, searchable, paged */
+    SCREEN_ALARM_MATRIX,
     SCREEN_FIELD_DIAGNOSTICS,
     SCREEN_HOST_TELEMETRY,
-    SCREEN_ALARM_MATRIX,
     SCREEN_SECURITY_SETTINGS,
     SCREEN_COUNT
 } hmi_screen_id_t;
@@ -224,9 +240,5 @@ typedef enum {
     ALARM_LATCH_UNACKNOWLEDGED = 1, /* at least one alarm needs acknowledgement */
     ALARM_LATCH_ACKNOWLEDGED = 2    /* all acknowledged, at least one still active */
 } hmi_alarm_latch_t;
-
-#if HMI_MAX_DEVICES < 1 || HMI_MAX_DEVICES > 9
-#error "HMI_MAX_DEVICES must be 1..9 (tag ids are 8-bit: 32 + 9 x 24 = 248)"
-#endif
 
 #endif /* INDUSTRIAL_HMI_CONFIG_H */

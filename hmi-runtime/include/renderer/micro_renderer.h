@@ -1,6 +1,6 @@
 /**
  * @file micro_renderer.h
- * @brief Band-buffer rasteriser and the five HMI screens
+ * @brief Band-buffer rasteriser and the HMI screens
  * @standards ISA-101 situational awareness
  *
  * The frame is rendered one horizontal band at a time into ONE static
@@ -45,6 +45,20 @@ typedef struct {
     uint8_t buffer[HMI_DISPLAY_MAX_BUF_SIZE];
 } hmi_renderer_t;
 
+/* One row of the Readings list */
+typedef enum {
+    HMI_READ_ROW_DEVICE = 0,   /* group heading: a device (slot), or this HMI (slot HMI_READ_SLOT_HMI) */
+    HMI_READ_ROW_CONTINUED,    /* the same heading repeated at the top of a page, marked "continued" */
+    HMI_READ_ROW_TAG,          /* one reading */
+    HMI_READ_ROW_BLANK         /* spacer, so a heading never ends a page */
+} hmi_read_row_kind_t;
+#define HMI_READ_SLOT_HMI 0xFFu
+typedef struct {
+    uint8_t      kind;         /* hmi_read_row_kind_t */
+    uint8_t      slot;         /* device slot, or HMI_READ_SLOT_HMI */
+    hmi_tag_id_t tag;          /* HMI_READ_ROW_TAG: absolute tag id */
+} hmi_read_row_t;
+
 /* Everything one frame needs. All pointers may be NULL (rendered as "--"). */
 typedef struct {
     const hmi_tag_table_t        *tags;
@@ -63,16 +77,31 @@ typedef struct {
     uint32_t snapshot_age_ms;
     uint32_t crc_mismatches;       /* UI-side end-to-end CRC check failures */
     uint32_t seqlock_retries;
+    uint32_t latency_avg_us;       /* data-to-screen latency over the last second (0 = no sample yet) */
+    uint32_t latency_max_us;       /*   and its worst case in that second */
     uint32_t ui_frame_hz;          /* measured */
     uint32_t exe_size_bytes;       /* measured at startup (0 = unknown) */
     uint32_t now_ms;
     uint64_t utc_ms;               /* wall clock at now_ms (ms since 1970, UTC); 0 = no clock: show uptime */
     int32_t  tz_offset_s;          /* local time = UTC + this (operators read local time) */
     uint8_t  alarm_view;           /* HMI_ALARM_VIEW_ACTIVE / _HISTORY */
-    uint8_t  alarm_page;           /* page of that view (clamped by the renderer) */
-    uint8_t  device_page;          /* process screen page when there are more devices than fit */
-    const uint8_t *alarm_order;    /* active alarms in display order, sorted once per frame; NULL: */
-    uint8_t  alarm_order_n;        /*   the renderer sorts them itself (alarm_order_n entries) */
+    uint16_t alarm_page;           /* page of that view (clamped by the renderer) */
+    uint16_t device_page;          /* process screen page when there are more devices than fit */
+    const hmi_device_info_t *focus_dev; /* process screen: one device's full view (a tile was tapped), or NULL */
+    /* Readings screen: the rows of the page shown, built once per frame by the app */
+    const hmi_read_row_t *read_rows;
+    uint16_t read_nrows;           /* rows on this page (<= hmi_layout_read_rows) */
+    uint16_t read_page, read_pages;
+    uint16_t read_matches;         /* readings that pass the filter and the search */
+    uint16_t read_total;           /* readings that exist */
+    uint8_t  read_filter;          /* HMI_READ_FILTER_* */
+    bool     read_flat;            /* short screen: no device headings, each row says "Device: reading" */
+    const char *read_query;        /* search text ("" = none) */
+    hmi_tag_id_t almd_tag;         /* HMI_MODAL_ALARM: the alarm shown */
+    const hmi_tag_id_t *hidden;    /* Alarms > Shelved: shelved and out-of-service points */
+    uint16_t hidden_n;
+    const hmi_tag_id_t *alarm_order; /* active alarms in display order, sorted once per frame; NULL: */
+    uint16_t alarm_order_n;        /*   the renderer sorts them itself (alarm_order_n entries) */
     const char *toast;             /* transient one-line message (NULL = none) */
     /* Sign-in dialog */
     uint8_t  modal;                /* hmi_modal_t */

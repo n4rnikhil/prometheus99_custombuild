@@ -18,14 +18,14 @@ for t in x86_64-linux-gnu:cc aarch64-linux-gnu:aarch64-linux-gnu-gcc arm-linux-g
     case $name in x86_64*) label=linux-x86_64 ;; aarch64*) label=raspberrypi-arm64 ;; *) label=raspberrypi-armhf ;; esac
     D="$OUT/prometheus-hmi-$label"; rm -rf "$D"; mkdir -p "$D"
     B="$WORK/$label"; mkdir -p "$B"
-    cp -r "$ROOT/hmi-runtime" "$ROOT/plc-simulator" "$B/"
+    cp -r "$ROOT/hmi-runtime" "$B/"
     (cd "$B/hmi-runtime" && make -s clean && make -s industrial_hmi CC=$cc OPT="-Os -ffunction-sections -fdata-sections -idirafter $X11INC" >/dev/null && cp industrial_hmi "$D/")
-    (cd "$B/plc-simulator" && make -s clean && make -s CC=$cc >/dev/null && cp plc_simulator_cli "$D/")
     cp "$ROOT"/hmi-runtime/installer/linux/* "$D/"
-    cp "$ROOT/hmi-runtime/examples/bench.cfg" "$D/hmi.cfg"
+    cp "$ROOT/hmi-runtime/examples/starter.cfg" "$D/hmi.cfg"
+    mkdir -p "$D/examples" && cp "$ROOT"/hmi-runtime/examples/*.cfg "$D/examples/"
     python3 -c "from PIL import Image; Image.open('$ROOT/hmi-runtime/res/industrial_hmi.ico').convert('RGBA').resize((256,256)).save('$D/prometheus-hmi.png')" 2>/dev/null \
         || echo "(no PIL: add a 256x256 prometheus-hmi.png to $D)"
-    printf 'Prometheus HMI for Linux (%s)\n\n  ./install.sh        then open "Prometheus HMI (bench)" from the applications menu\n  ./prometheus-hmi-bench   run without installing\n\nDesktop: opens as a window (X11, or XWayland on Wayland desktops).\nNo desktop (a panel or a Pi console): uses the framebuffer. Server: add --headless.\nBench only: hmi.cfg allows the factory PINs (Operator 1111).\n' "$label" > "$D/README.txt"
+    printf 'Prometheus HMI for Linux (%s)\n\n  ./install.sh        then open "Prometheus HMI" from the applications menu\n  ./prometheus-hmi    run without installing\n\nFirst set the role PINs: ./industrial_hmi --set-pin operator (and maintenance, engineer),\nthen list your devices in hmi.cfg. Test bench: --config examples/bench.cfg (factory PINs).\nDesktop: opens as a window (X11, or XWayland on Wayland desktops).\nNo desktop (a panel or a Pi console): uses the framebuffer. Server: add --headless.\n' "$label" > "$D/README.txt"
     (cd "$OUT" && tar -czf "prometheus-hmi-$label.tar.gz" "prometheus-hmi-$label")
 done
 (cd "$OUT" && sha256sum prometheus-hmi-*.tar.gz >> SHA256SUMS.txt)

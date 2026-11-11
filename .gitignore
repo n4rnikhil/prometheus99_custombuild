@@ -1,8 +1,7 @@
-# Build outputs (industrial_hmi.exe, plc_simulator.exe and plc_simulator_cli.exe are tracked as
-# ready-to-run files: download the folder and double-click)
+# Build outputs (hmi-runtime/industrial_hmi.exe is tracked as a ready-to-run file:
+# download the folder and double-click)
 **/tests/*.exe
 **/tools/*.exe
-plc-simulator/plc_simulator_cli
 *.o
 *.obj
 *.res
@@ -31,7 +30,7 @@ measure_output.txt
 *.tmp
 *.bak
 
-# Python caches (from tests/ simulators)
+# Python caches (from tests/)
 __pycache__/
 *.py[cod]
 *$py.class
@@ -57,8 +56,6 @@ hmi-runtime/industrial_hmi
 **/tests/test_core_mcu
 **/tests/test_integration
 **/tests/test_modbus_faults
-plc-simulator/plc_simulator_cli
-**/tests/test_plc_models
 
 # Release output (hmi-runtime/installer/build_*_release.sh)
 dist/

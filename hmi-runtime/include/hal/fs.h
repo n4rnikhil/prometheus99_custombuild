@@ -50,4 +50,16 @@ bool        hal_file_remove(const char *path);
  * ESP32: nothing to do (single-user flash file system). */
 bool        hal_file_restrict(const char *path, const char *like);
 
+/* The protected folder for secrets (device key, credential vault), created on first use and then
+ * limited to the account that created it:
+ *   Windows  %ProgramData%\Prometheus HMI\   protected DACL: SYSTEM, Administrators, this account
+ *   Linux    /var/lib/prometheus-hmi/ when run as root, else ~/.local/state/prometheus-hmi/   mode 0700
+ * A folder that already exists is used only when it is a real folder owned by this account (or, on
+ * Windows, by SYSTEM or Administrators); it is then protected again. One that another account
+ * made first is refused.
+ * Writes the path with a trailing separator. create = false only works out the path (nothing is
+ * made). false: no such folder on this system (ESP32), or it could not be created; the caller
+ * then keeps its secrets next to the program. */
+bool        hal_secure_dir(char *out, size_t cap, bool create);
+
 #endif /* INDUSTRIAL_HMI_HAL_FS_H */

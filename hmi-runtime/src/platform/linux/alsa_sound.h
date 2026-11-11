@@ -4,6 +4,7 @@
 #include <stdbool.h>
 bool alsa_sound_start(void);   /* false: no libasound - the panel runs without the tone */
 void alsa_sound_set(bool on);  /* follow the horn */
+void alsa_sound_emergency(bool on);   /* the EMERGENCY sweep instead of the two-tone */
 void alsa_sound_enable(bool on);
 void alsa_sound_stop(void);
 #endif

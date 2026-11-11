@@ -1,6 +1,6 @@
 # Prometheus HMI — User Manual
 
-Operator panel and PLC simulator for machines controlled over Modbus TCP.
+The operator panel for machines controlled over Modbus TCP.
 
 ---
 
@@ -14,14 +14,14 @@ Operator panel and PLC simulator for machines controlled over Modbus TCP.
 6. [The screen at a glance](#6-the-screen-at-a-glance)
 7. [Signing in and user roles](#7-signing-in-and-user-roles)
 8. [Process screen](#8-process-screen)
-9. [Operating a device](#9-operating-a-device)
-10. [Alarms](#10-alarms)
-11. [EMERGENCY and restarting after a stop](#11-emergency-and-restarting-after-a-stop)
-12. [Diagnostics screen](#12-diagnostics-screen)
-13. [Telemetry screen](#13-telemetry-screen)
-14. [Settings screen](#14-settings-screen)
-15. [Keyboard shortcuts](#15-keyboard-shortcuts)
-16. [The PLC simulator](#16-the-plc-simulator)
+9. [Readings screen](#9-readings-screen)
+10. [Operating a device](#10-operating-a-device)
+11. [Alarms](#11-alarms)
+12. [EMERGENCY and restarting after a stop](#12-emergency-and-restarting-after-a-stop)
+13. [Diagnostics screen](#13-diagnostics-screen)
+14. [Telemetry screen](#14-telemetry-screen)
+15. [Settings screen](#15-settings-screen)
+16. [Keyboard shortcuts](#16-keyboard-shortcuts)
 17. [Configuration](#17-configuration)
 18. [Commissioning a plant](#18-commissioning-a-plant)
 19. [Audit log](#19-audit-log)
@@ -33,28 +33,28 @@ Operator panel and PLC simulator for machines controlled over Modbus TCP.
 
 ## 1. Introduction
 
-Prometheus HMI is a human–machine interface (HMI): the screen an operator uses to watch and run a
-machine or a process. It connects to PLCs, variable speed drives and energy meters over Modbus
-TCP, finds them on the network by itself, and gives each one a screen with its live values and
-controls.
+Prometheus HMI is a human–machine interface (HMI): the screen an operator uses to watch and run
+machines or a process. It connects to PLCs, variable speed drives and energy meters over Modbus
+TCP, finds them on the network by itself, and shows every live value. It handles alarms and
+lets operators run each device.
 
-The package contains two programs:
+| Program | File |
+|---|---|
+| **HMI runtime** | `industrial_hmi.exe` (Windows), `industrial_hmi` (Linux, Raspberry Pi) |
 
-| Program | File | What it does |
-|---|---|---|
-| **HMI runtime** | `industrial_hmi.exe` (Windows), `industrial_hmi` (Linux) | The operator panel. |
-| **PLC simulator** | `plc_simulator.exe` (window), `plc_simulator_cli` (console) | Simulated PLCs, drives and meters for training and testing without a real plant. |
+One HMI holds up to **128 devices**.
 
 **Who this manual is for**
 
-- **Operators** — sections 5 to 15.
-- **Engineers and administrators** — all sections, in particular 17 to 21.
+- **Operators** — sections 5 to 16.
+- **Engineers and administrators** — all sections, in particular 17 to 21. Installing, backing up
+  and upgrading are in the [Install and Operations Guide](INSTALL-AND-OPERATIONS.md).
 
 ## 2. Safety information
 
 > **The EMERGENCY button is a software stop, not a certified emergency stop.**
 > It sends stop requests to the machines over the network. It depends on this software, the PC,
-> the network and the PLC program. Every machine must have its own hardwired emergency stop as
+> the network and each PLC program. Every machine must have its own hardwired emergency stop, as
 > required by ISO 13850 and IEC 60204-1. In an emergency, press the hardwired emergency stop as
 > well.
 
@@ -62,8 +62,8 @@ The package contains two programs:
   ISO 13849. Safety functions belong in the machine's safety circuits and safety PLC.
 - Only trained persons may operate machines from the HMI. Every command is recorded with the role
   that sent it.
-- Device register maps supplied for products other than the Altivar status and command words have
-  not been verified against real hardware. An engineer must check each map against the device
+- Register maps for products other than the Altivar status and command words have not been
+  verified against real hardware. An engineer must check each map against the device
   documentation before the HMI is used on a real machine.
 - Modbus TCP has no built-in security. Keep the HMI and the controllers on a separate, protected
   control network.
@@ -73,11 +73,11 @@ The package contains two programs:
 | Item | Minimum |
 |---|---|
 | **Windows** | Windows 10 or 11 (64-bit), including Windows 10 IoT panel PCs |
-| **Linux** | any 64-bit x86 distribution; desktop (X11 or Wayland with XWayland), framebuffer panel, or headless server |
+| **Linux** | any 64-bit x86 distribution; desktop (X11, or Wayland with XWayland), framebuffer panel, or headless server |
 | **Raspberry Pi** | Pi 3, 4 or 5 (64-bit OS) or Pi Zero 2 / 2 / 3 (32-bit OS) |
 | **Display** | 800 × 480 recommended (7-inch panel); 640 × 400 minimum |
-| **Memory** | under 1 MB for the HMI itself |
-| **Disk** | under 1 MB for the programs, plus space for the alarm log |
+| **Memory** | Task Manager: under 1 MB up to about 48 devices; 1.25 MB with 96 (measured on Windows) |
+| **Disk** | under 1 MB for the program, plus space for the audit log |
 | **Input** | touch screen, mouse or keyboard |
 | **Sound** | speakers or headset for the alarm tone (optional) |
 | **Network** | Ethernet or Wi-Fi to the controllers (Modbus TCP, port 502 or the device's port) |
@@ -86,32 +86,21 @@ No other software, runtime or framework is needed.
 
 ## 4. Installation
 
-### 4.1 Windows — run from the folder (no installation)
-
-1. Download the project folder (or the portable ZIP) and unpack it anywhere.
-2. Double-click **`plc-simulator\plc_simulator.exe`** to start the simulator.
-3. Press **Open HMI** in the simulator window.
-
-To run the HMI on its own, use `hmi-runtime\industrial_hmi.exe`.
-
-### 4.2 Windows — installer
+### 4.1 Windows — installer
 
 1. Run **`Prometheus-HMI-Setup-<version>.exe`**.
-2. If Windows shows *"Windows protected your PC"*, choose **More info → Run anyway**.
-3. Follow the installer. No administrator rights are needed; the programs are installed for the
+2. If Windows shows *"Windows protected your PC"*, choose **More info → Run anyway** (the program
+   is not digitally signed).
+3. Follow the installer. No administrator rights are needed. The program is installed for the
    current user in `%LOCALAPPDATA%\Programs\Prometheus HMI`.
 
-The installer creates:
+The installer adds **Prometheus HMI** to the desktop and the Start menu, and **Uninstall
+Prometheus HMI** to the Start menu. Uninstalling keeps the audit log, the device key and the
+PIN vault.
 
-| Shortcut | Starts |
-|---|---|
-| **Prometheus HMI** (desktop) | the simulator with a drive, a tank and a meter, then the HMI |
-| Start menu → **Prometheus HMI (bench with simulator)** | the same |
-| Start menu → **Prometheus HMI** | the HMI alone (reads `hmi.cfg` in the install folder) |
-| Start menu → **PLC Simulator** | the simulator alone |
-| Start menu → **Uninstall Prometheus HMI** | removes the programs |
+### 4.2 Windows — without installing
 
-Uninstalling keeps the alarm log, the device key and the PIN vault.
+Copy `industrial_hmi.exe` into any folder and start it. It needs nothing else.
 
 ### 4.3 Linux PC and Raspberry Pi
 
@@ -121,25 +110,19 @@ cd prometheus-hmi-linux-x86_64
 ./install.sh
 ```
 
-The installer needs no root rights. It puts the programs in `~/.local/lib/prometheus-hmi`, adds
-the commands `prometheus-hmi` and `prometheus-hmi-bench`, and adds two entries to the applications
-menu: **Prometheus HMI** and **Prometheus HMI (bench)**.
-
-To run without installing, start `./prometheus-hmi-bench` in the unpacked folder.
-To uninstall: `./install.sh --remove` (settings, log, key and vault are kept in
-`~/.local/share/prometheus-hmi`).
+The installer needs no root rights. It puts the program in `~/.local/lib/prometheus-hmi`, adds the
+command `prometheus-hmi`, and adds **Prometheus HMI** to the applications menu.
+To uninstall: `./install.sh --remove` (settings, log, key and vault are kept).
 
 ## 5. Starting the HMI
 
-| Situation | How to start |
-|---|---|
-| Training or testing on one PC | start the simulator, press **Open HMI** (Windows), or open **Prometheus HMI (bench)** (Linux) |
-| A real plant | start **Prometheus HMI** / `industrial_hmi`; it reads its settings from `hmi.cfg` |
+Start **Prometheus HMI** from the desktop or menu, or run `industrial_hmi`. It reads its settings
+from `hmi.cfg` (section 17).
 
 On start-up the HMI:
 
-1. checks that no other copy is already running with the same data folder (a second start brings
-   the running window forward instead);
+1. checks that no other copy is already running on the same files (a second start brings the
+   running window forward instead);
 2. loads its device key and PINs;
 3. scans the configured network ranges and attaches every PLC and drive it recognises.
 
@@ -159,15 +142,15 @@ it draws directly to the screen (framebuffer); on a server, start it with `--hea
 | **Prometheus HMI** and *n devices online* | number of devices currently connected |
 | Moon button | switches between the dark theme and the high-contrast outdoor theme |
 | **Health indicator** | the HMI's own health: **HMI OK**, **PLC offline**, **Data stale**, **Watchdog trip**, **UI stalled** or **Failover latch** |
-| **Alarm indicator** | **No alarms**, *n* **active**, or *n* **unack.** (unacknowledged); its colour and shape show the highest priority |
+| **Alarm indicator** | **No alarms**, *n* **active**, or *n* **unack.** (unacknowledged); its shape and colour show the highest priority |
 | **Role indicator** | the signed-in role (**Viewer**, **Operator**, **Maintenance**, **Engineer**). Tap it to sign in or switch role |
-| **EMERGENCY** | stops every device and locks the panel on the red EMERGENCY screen (see section 11) |
+| **EMERGENCY** | stops every device and locks the panel on the red EMERGENCY screen (section 12) |
 
 **Alarm banner** — appears under the header while an alarm needs attention. It shows the most
 important alarm and two numbered steps telling the operator what to do.
 
-**Navigation bar (bottom)** — **Process**, **Diagnostics**, **Telemetry**, **Alarms**,
-**Settings**. A red badge on **Alarms** shows the number of unacknowledged alarms.
+**Navigation bar (bottom)** — **Process**, **Readings**, **Alarms**, **Diagnostics**,
+**Telemetry**, **Settings**. A red badge on **Alarms** shows the number of unacknowledged alarms.
 
 **Colours**
 
@@ -175,13 +158,13 @@ important alarm and two numbered steps telling the operator what to do.
 |---|---|
 | Green | normal, running, online |
 | Grey | stopped, idle, not available |
-| Amber | warning, abnormal but not critical |
+| Amber | warning, abnormal but not critical, bad data |
 | Red | alarm, stop, offline, fault — and the EMERGENCY / Stop buttons |
-| Blue | information |
+| Blue | information alarms |
 
-Colour is never the only signal: alarm priority is also shown by shape and by a word.
-Sites that follow ISA-101 strictly can start the HMI with `--color-scheme high-performance`,
-which shows normal states in grey instead of green.
+Colour is never the only signal: alarm priority is also shown by shape and by a word. Sites that
+follow ISA-101 strictly can start the HMI with `--color-scheme high-performance`, which shows
+normal states in grey instead of green.
 
 ## 7. Signing in and user roles
 
@@ -194,60 +177,102 @@ works, but nothing else can be changed.
 2. Choose the role.
 3. Enter the PIN on the keypad and press **OK**.
 
-On a device faceplate you can also simply tap the control you need: if your role is too low, the
-HMI asks for the PIN of the role that control requires, then carries out the action. Buttons on the
-Alarms screen (**Ack**, **Silence horn**, **Reset stop**) stay greyed out until you sign in.
+You can also simply tap the control you need, on a faceplate or in an alarm's dialog. If your
+role is too low, the HMI asks for the PIN of the role that control requires, then carries out the
+action.
 
 | Role | Can do |
 |---|---|
 | **Viewer** | watch all screens; EMERGENCY |
-| **Operator** | start and stop devices, change setpoints and modes, acknowledge alarms, silence the horn, reset a stop |
-| **Maintenance** | everything an Operator can, plus tuning parameters, resetting the watchdog failover and resetting an EMERGENCY |
+| **Operator** | start and stop devices, change setpoints and modes, acknowledge and shelve alarms, silence the horn, reset a stop |
+| **Maintenance** | everything an Operator can, plus tuning parameters, taking alarms out of service, resetting the watchdog failover and resetting an EMERGENCY |
 | **Engineer** | everything, plus raw register writes and watchdog tests |
 
 **Rules**
 
 - After **3 wrong PINs**, PIN entry is locked for **30 seconds**.
 - After **5 minutes** without any input the HMI returns to **Viewer** (auto-logout).
-- In **test mode** (bench) the factory PINs are **1111** (Operator), **2222** (Maintenance) and
-  **3333** (Engineer). On a commissioned panel the factory PINs never work (section 18).
+- A new panel has no site PINs, so only Viewer can sign in until they are set (section 18).
+- On a test bench, `--allow-factory-pins` allows **1111** (Operator), **2222** (Maintenance) and
+  **3333** (Engineer). On a commissioned panel the factory PINs never work.
 
 ## 8. Process screen
 
-The Process screen shows one card per device.
+<p align="center"><img src="img/overview_tiles.png" alt="Process screen with many devices" width="640"></p>
 
-| Part of the card | Meaning |
+The Process screen shows every device. Its layout depends on how many there are:
+
+| Devices | Layout |
 |---|---|
-| Name, address, model | e.g. *Altivar drive 1 · 127.0.0.1:1502 · ATV340…* |
-| **Online** / **Offline** | connection state |
-| Main value | the most important measurement (frequency, level, power …) |
-| State | e.g. **Running**, **Stopped**, **Stop latch**, **Normal**, **High**, **Stale** |
-| **Details >** | opens the device faceplate |
+| 1 to 4 | one large card per device, with its own gauges, tank, pump and buttons |
+| 5 or more, if they fit | a grid of cards |
+| more than fit as cards | **tiles**: name, status, alarm count, main value and run state |
 
-If a device goes offline, its card says so and a communication alarm is raised. After 10 seconds
-offline the card is removed (configurable with `--remove-after-ms`); it returns automatically
-when the device comes back.
+**Tiles.** Each tile shows:
+- the device name with its status dot;
+- the number of its alarms, with the shape of the highest priority;
+- the name of the main value and the run state (**Running**, **Stopped**, **Stop latch**,
+  **Offline**);
+- the main value, in colour only when it is in alarm, and a trend line of its last 60 seconds.
 
-On small displays the cards become compact summary cards showing the main value and its state.
+A tile with room to spare shows a larger 60-second chart, and a very tall one also shows bars for a
+few more readings. Tile charts are scaled to the recent values so small changes are visible; the
+scale is written at the top right of the chart (for example "72.0 to 77.0 %"). The charts in the
+device view always use the full range of the reading.
 
-**More devices than fit on the screen.** One HMI handles up to **8 devices** (PLCs, drives and
-meters). Large screens show them all at once; on a 7-inch panel four fit, and **< Previous** /
-**Next >** buttons at the bottom of the Process screen show the others (*Devices 5–8 of 8*).
-Alarms from every device appear in the alarm banner and on the Alarms screen whatever page is shown.
+Tap a tile to open the **device view**: that device alone, with all its graphics (gauges, tank,
+pumps, the 60-second trend) and its buttons. **< All devices** goes back; **Controls >** opens the
+faceplate. Tapping **Process** in the dock also goes back to all devices.
 
-If more than 8 devices are found, the extra ones are **not shown and not controlled**: the HMI raises
-a **Devices not shown** warning, names each one in Alarms → History (*192.168.10.51:502 NOT shown*),
-and EMERGENCY reports them as not stopped. Devices listed with `--plc` always get a place before
-devices found by scanning. Use a second HMI for the other machines.
+**Pages.** When even the tiles do not fit, **< Previous** and **Next >** appear at the bottom with
+*Devices 1–12 of 96 – page 1 of 8*. The buttons also say how many devices on the other pages are
+in alarm, for example **Next (6 in alarm) >**. The alarm banner and the Alarms screen always
+cover every device, whatever page is shown.
 
-## 9. Operating a device
+If a device goes offline, its card or tile says so, and a communication alarm is raised. After
+10 seconds offline it is removed (configurable with `--remove-after-ms`). It returns
+automatically when the device comes back.
+
+**More devices than this HMI holds.** One HMI holds up to 128 devices, or fewer if the site set
+`--max-devices`. Devices beyond the limit are **not shown and not controlled**:
+- the HMI raises a **Devices not shown** warning;
+- it names each one in Alarms → History;
+- EMERGENCY reports them as not stopped.
+
+Devices listed with `--plc` always get a place first. Use a second HMI for the other machines.
+
+## 9. Readings screen
+
+<p align="center"><img src="img/readings.png" alt="Readings screen" width="640"></p>
+
+The Readings screen lists **every reading of every device**, so any value can be found however
+many devices there are.
+
+| Part | Use |
+|---|---|
+| **All** / **In alarm** / **Bad data** | show every reading, only those in alarm, or only those without good data |
+| **Search...** | opens a keyboard. Type part of a device name, product, address, reading name or unit. The list narrows as you type. **Done** closes the keyboard and keeps the search; **Clear** empties it |
+| Device rows | a heading per device, with its status. A page that starts in the middle of a device repeats the heading, marked *continued* |
+| Reading rows | name, value with unit, a **range bar** (where the value sits, with the high and high-high limits marked), and a status: *New alarm*, *Acknowledged*, *Cleared, unack.*, *Bad data*, *No data* or *Stale*. Nothing is shown when all is normal |
+| Footer | *144 of 1074 readings shown*, and **< Previous** / **Next >** |
+
+Tap a reading or a device heading to open that device's faceplate.
+
+On a small screen with the alarm banner showing, the headings are left out to fit more rows.
+Each row then names its device, for example *Boiler 1: Water temp*.
+
+A PC keyboard types into the search box while it is open, including the letter E. The
+**EMERGENCY** button at the top stays active above the keyboard.
+
+## 10. Operating a device
 
 <p align="center"><img src="img/faceplate.png" alt="Device faceplate" width="640"></p>
 
-Tap **Details >** on a device card to open its **faceplate**.
+Tap a tile, a card's **Details >**, a reading, or **Open device** in an alarm's dialog, to open
+the device's **faceplate**.
 
 - **Left — Values:** every measurement and status of the device.
-- **Right — Controls:** every action, with its current state underneath its name.
+- **Right — Controls:** every action, with its current state under its name.
 - **Close** returns to the previous screen.
 
 **Commands**
@@ -262,17 +287,17 @@ Tap **Details >** on a device card to open its **faceplate**.
 Some commands ask **"Are you sure?"** first (mode changes, burner start, counter resets,
 compressor stop, raw writes, stop resets). Press **Confirm** (or Enter) to go ahead, or **Cancel**.
 
-**Blocked controls** — a start is refused while an interlock is active (for example an
-emergency stop, a fault or a jam). The button shows **Blocked:** and the reason. Clear the cause
-at the machine, then try again.
+**Blocked controls** — a start is refused while an interlock is active (for example an emergency
+stop, a fault or a jam). The button shows **Blocked:** and the reason. Clear the cause at the
+machine, then try again.
 
 Every command is written to the audit log with the role, the device, the command and the value.
 
-## 10. Alarms
+## 11. Alarms
 
 <p align="center"><img src="img/alarms.png" alt="Alarm summary" width="640"></p>
 
-### 10.1 Priorities
+### 11.1 Priorities
 
 | Priority | Symbol | Meaning |
 |---|---|---|
@@ -281,17 +306,18 @@ Every command is written to the audit log with the role, the device, the command
 | **Warning** | amber triangle | action needed soon |
 | **Info** | blue circle | for information |
 
-### 10.2 States
+### 11.2 States
 
 | State | Meaning | Action |
 |---|---|---|
 | **New** | the condition is active and nobody has acknowledged it | read it, act, acknowledge |
 | **Acknowledged** | active, and an operator has acknowledged it | fix the cause |
 | **Cleared** | the condition has gone, but nobody acknowledged it | acknowledge |
+| **Chattering** | it came in 3 or more times within a minute | find the cause; shelve it if it hides other alarms |
 
 An alarm leaves the list when it is both cleared and acknowledged.
 
-### 10.3 Alarm sound
+### 11.3 Alarm sound
 
 While any alarm is unacknowledged and the horn is not silenced, the HMI plays a two-tone alarm
 signal on the PC's speakers. If a wired horn or stack light is connected (Linux GPIO), it is
@@ -300,22 +326,61 @@ switched as well.
 - **Silence horn** stops the sound; the alarms stay unacknowledged.
 - Acknowledging all alarms also stops the sound.
 - A new alarm sounds again.
+- During an **alarm flood** (section 11.6), Info alarms do not sound.
+- During an **EMERGENCY** the panel loops its own EMERGENCY sound until the reset: a fast rising
+  siren, different from the alarm sound on purpose, so nobody mistakes one for the other.
+  `emergency.mp3` next to the program replaces it (Windows).
+- `alarm.mp3` (included with the program) replaces the two-tone alarm sound (Windows). Other files
+  can be chosen with `--emergency-sound <file>` and `--alarm-sound <file>`. Do not use the same file
+  for both.
 
-### 10.4 Working with the Alarms screen
+### 11.4 The Alarms screen
 
 | Button | Does |
 |---|---|
-| **Active (n)** / **History** | switch between current alarms and the event history |
+| **Active** / **Shelved** / **History** | current alarms; shelved and out-of-service alarms; the event history |
 | **Ack** (on a row) | acknowledge that alarm only — the recommended way |
-| **Acknowledge all** | acknowledge every alarm (for a known flood of alarms) |
+| A tap anywhere else on a row | opens that alarm's dialog (section 11.5) |
+| **Acknowledge all** | acknowledge every shown alarm (for a known flood of alarms) |
 | **Silence horn** | stop the alarm sound |
-| **Reset stop** | reset a machine's stop latch (section 11) |
+| **Reset stop** | reset a machine's stop latch (section 12) |
 | **Previous** / **Next** | page through long lists |
 
 Active alarms are sorted by priority, then unacknowledged first, then newest first. Times are
-local wall-clock times.
+local wall-clock times. The card title shows *n active – n unacknowledged – n new in 10 min*.
 
-### 10.5 The alarm banner
+### 11.5 The alarm dialog
+
+<p align="center"><img src="img/alarm_dialog.png" alt="Alarm dialog" width="640"></p>
+
+Tap an alarm to see:
+- its name, priority, state and the time it came in;
+- the value now and its limits;
+- the two steps of guidance;
+- a note if it is shelved, out of service or chattering.
+
+It has four buttons:
+
+| Button | Does | Role |
+|---|---|---|
+| **Acknowledge** | acknowledge this alarm | Operator |
+| **Shelve for 60 min** / **Unshelve** | hide this alarm for one hour; it comes back by itself, or earlier with Unshelve | Operator |
+| **Out of service** / **Return to service** | hide this alarm until Maintenance returns it (for example a broken sensor) | Maintenance |
+| **Open device** | open the device's faceplate | anyone |
+
+A shelved or out-of-service alarm is still checked and recorded, but it is not shown in the list,
+counted, or sounded. Find it under **Alarms → Shelved**, with the minutes left and an **Unshelve**
+or **Return** button. **Stop alarms (stop latches) can never be shelved or taken out of service.**
+Every shelve, unshelve and change of service is recorded in the audit log.
+
+### 11.6 Alarm floods
+
+When more than **10 new alarms** come in within **10 minutes**, the HMI declares an **alarm flood**.
+The Alarms screen then says **ALARM FLOOD – n new in 10 min – work from the top** in amber. Work
+through the list from the top: the highest priorities are first. The flood ends when fewer than 5
+new alarms came in during the last 10 minutes. The start and end are recorded in the audit log.
+
+### 11.7 The alarm banner
 
 The banner under the header shows the most important alarm with two steps of guidance, for
 example:
@@ -326,7 +391,7 @@ example:
 
 **Acknowledge** on the banner acknowledges that alarm.
 
-## 11. EMERGENCY and restarting after a stop
+## 12. EMERGENCY and restarting after a stop
 
 <p align="center"><img src="img/emergency.png" alt="The EMERGENCY screen" width="640"></p>
 
@@ -339,10 +404,13 @@ When pressed, the HMI:
 2. sends each device its stop: the stop latch, every Stop/Off control and the stopping mode;
 3. turns the whole panel **red** and shows, machine by machine, **Stop sent**, **Nothing to stop**
    (meters) or **NOT STOPPED** — offline, no stop control, or found on the network but not on this
-   HMI (more than 8 devices). Stop those at the machine;
+   HMI. Machines NOT stopped are listed first. Stop those at the machine;
 4. stays on the red screen. Nothing else can be operated. A machine that comes back online, or
    is found, while the EMERGENCY lasts is stopped as soon as it answers;
 5. stops sending the HMI heartbeat, so PLC programs that watch it stop their machines as well.
+
+When there are more machines than fit on the screen, the last line says how many more there are
+and how many of them were NOT stopped.
 
 Pressing EMERGENCY again sends the stop again. The press and the reset are both recorded in the
 signed audit log with the role that was signed in.
@@ -365,10 +433,10 @@ signed audit log with the role that was signed in.
 5. Start the machines again from their faceplates. **Nothing restarts by itself.**
 
 **HMI heartbeat** — while the HMI is running, it sends a heartbeat signal to PLCs that support it.
-If the HMI stops, freezes, or its cable is pulled, the PLC program stops the machine by itself after
-5 seconds and stays stopped until an operator resets it.
+If the HMI stops, freezes, or its cable is pulled, the PLC program stops the machine by itself
+after 5 seconds and stays stopped until an operator resets it.
 
-## 12. Diagnostics screen
+## 13. Diagnostics screen
 
 <p align="center"><img src="img/diagnostics.png" alt="Diagnostics" width="640"></p>
 
@@ -377,16 +445,16 @@ For engineers and maintenance staff.
 | Card | Shows |
 |---|---|
 | **Fieldbus loop** | the communication loop rate (normally about 1000 Hz), its period, minimum/maximum and late cycles |
-| **Integrity** | data checksum, checksum errors (should be 0), age of the data on screen, retries |
+| **Integrity** | data checksum, checksum errors (should be 0), age of the data on screen, **Latency avg/max** (the time from a device's data arriving to it being on the screen, over the last second; target under 100 ms), retries |
 | **Devices** | each device's response time, address, and successful / total requests |
 | **Register map** | the first device's registers: address, name, value and raw hexadecimal value |
 
-## 13. Telemetry screen
+## 14. Telemetry screen
 
 Shows the health of the computer running the HMI: **CPU load**, **memory in use**, and the HMI's
 own memory use. Each value has warning and alarm limits; a sustained high CPU load raises an alarm.
 
-## 14. Settings screen
+## 15. Settings screen
 
 <p align="center"><img src="img/settings.png" alt="Settings" width="640"></p>
 
@@ -403,12 +471,12 @@ frame buffer and display refresh rate.
 | **Test watchdog** | simulates a communication-loop failure to test the watchdog | Engineer |
 | **Reset failover** | clears the watchdog failover latch after a fault | Maintenance |
 
-## 15. Keyboard shortcuts
+## 16. Keyboard shortcuts
 
 | Key | Action |
 |---|---|
-| **E** | EMERGENCY (always works) |
-| **1** – **5** | Process, Diagnostics, Telemetry, Alarms, Settings |
+| **E** | EMERGENCY (always works, except while the search keyboard is open: there it types an E) |
+| **1** – **6** | Process, Readings, Alarms, Diagnostics, Telemetry, Settings |
 | **Tab** / **Shift+Tab**, **←** / **→** | next / previous screen |
 | **A** or **Space** | acknowledge all alarms |
 | **S** | silence horn |
@@ -417,57 +485,15 @@ frame buffer and display refresh rate.
 | **T** or **C** | switch theme |
 | **Esc** | close the open dialog |
 | **0**–**9**, **.**, **-**, **Backspace**, **Enter** | keypad entry in PIN and value dialogs; Enter also confirms |
-
-## 16. The PLC simulator
-
-<p align="center"><img src="img/plc_lab.png" alt="PLC simulator" width="720"></p>
-
-The simulator creates PLCs, drives and meters on your PC. Each one is a real Modbus TCP server, so
-the HMI talks to it exactly as it would to real hardware.
-
-### 16.1 The simulator window
-
-| Element | Use |
-|---|---|
-| **This PC** / **Network** | serve only this PC (default) or the whole network, so an HMI on another computer can connect |
-| **Open HMI** | starts the HMI on this PC |
-| **Add** buttons | add a device: Tank skid, Altivar ATV340 / ATV630, Conveyor, Boiler, Pump station, Compressor, Air handler, ABB drive, EM6400NG meter, Unknown device |
-| **-** / **+** next to a value | change a process value (level, pressure, temperature …) |
-| Coloured toggles | force an input or a fault (overload, local control, stop latch …) |
-| **Unplug** | disconnect the device from the network (and plug it back in) |
-| **Freeze link** | the device stops answering — tests communication-loss alarms |
-| **Error replies** | the device answers with Modbus errors |
-| **STOP** / **RUN** | switch a PLC between RUN and STOP |
-| **Remove** | delete the device from the bench |
-| **Activity** | log of everything that happens, including every command the HMI sends |
-
-Devices use TCP ports 1502, 1503, 1504 … in the order they are added.
-
-### 16.2 Console simulator
-
-`plc_simulator_cli` runs the simulator without a window (Windows console, Linux, Raspberry Pi):
-
-```sh
-plc_simulator_cli --add atv340 --add tank --add meter --network --status 10
-```
-
-| Option | Meaning |
-|---|---|
-| `--add <type>` | add a device (repeatable): `tank`, `atv340`, `atv630`, `conveyor`, `boiler`, `pumps`, `compressor`, `ahu`, `abb`, `meter`, `unknown` |
-| `--port <n>` | first TCP port (default 1502) |
-| `--network` | listen on all network interfaces (default: this PC only) |
-| `--status <s>` | print every device's values every *s* seconds |
-| `--run-for <s>` | stop after *s* seconds |
-
-The window version accepts `--add`, `--port`, `--network` and `--open-hmi`.
+| letters, digits, **Backspace**, **Enter** | typing in the Readings search keyboard; Enter closes it |
 
 ## 17. Configuration
 
 ### 17.1 The configuration file
 
-The HMI reads `hmi.cfg` from its own folder at start-up (Linux launcher: `~/.local/share/prometheus-hmi/hmi.cfg`).
-Write one or more options per line; `#` starts a comment. Options given on the command line are
-added to those in the file.
+The HMI reads `hmi.cfg` from its own folder at start-up (Linux launcher:
+`~/.local/share/prometheus-hmi/hmi.cfg`). Write one or more options per line; `#` starts a comment.
+Options given on the command line are added to those in the file.
 
 ```text
 # Plant network: discover every PLC and drive on this subnet
@@ -479,7 +505,10 @@ added to those in the file.
 --remove-after-ms 30000
 ```
 
-Examples are in `hmi-runtime/examples/`: `bench.cfg` (simulator) and `lab-site.cfg` (real network).
+Examples are in `hmi-runtime/examples/`:
+- `starter.cfg`: a new site, commented;
+- `lab-site.cfg`: a real network;
+- `bench.cfg`: test devices on the same PC, with factory PINs.
 
 ### 17.2 Options
 
@@ -490,6 +519,7 @@ Examples are in `hmi-runtime/examples/`: `bench.cfg` (simulator) and `lab-site.c
 | `--scan <range>` | discovery range: `192.168.1.0/24`, `10.0.0.5:502-510`, `/uN` for a unit id |
 | `--plc <ip[:port][/uN][@module]>` | attach a device even if it does not identify itself; `@module` forces a driver (e.g. `@em6400`, `@altivar`, `@generic`) |
 | `--no-discovery` | attach only the `--plc` devices, no scanning |
+| `--max-devices <n>` | attach at most *n* devices (1 to 128; default 128) |
 | `--remove-after-ms <n>` | remove offline devices from the screen after *n* ms (0 = never; default 10000) |
 
 **Files and security**
@@ -497,9 +527,9 @@ Examples are in `hmi-runtime/examples/`: `bench.cfg` (simulator) and `lab-site.c
 | Option | Meaning |
 |---|---|
 | `--config <file>` / `--no-config` | read another configuration file / none |
-| `--log <path>` / `--no-log` | audit log file (default `alarms.log`) / no log |
-| `--key <path>` | device key (default `hmi.key`) |
-| `--vault <path>` | PIN vault (default `security.vault`) |
+| `--log <path>` / `--no-log` | audit log file (default `alarms.log` next to the program) / no log |
+| `--key <path>` | device key (default `hmi.key` in the protected folder, section 20) |
+| `--vault <path>` | PIN vault (default `security.vault` in the protected folder) |
 | `--set-pin <role>` | set the PIN of `operator`, `maintenance` or `engineer`, then exit |
 | `--verify-log <path>` | check an audit log's signatures, then exit |
 | `--allow-factory-pins` | **test bench only**: allow the factory PINs |
@@ -511,11 +541,20 @@ Examples are in `hmi-runtime/examples/`: `bench.cfg` (simulator) and `lab-site.c
 | `--color-scheme status` | normal states in green (default) |
 | `--color-scheme high-performance` | normal states in grey (strict ISA-101) |
 | `--no-sound` | no alarm tone from the speakers |
+| `--emergency-sound <file>` | sound looped during an EMERGENCY (Windows; MP3 or WAV; default `emergency.mp3` next to the program, else the built-in siren) |
+| `--alarm-sound <file>` | sound instead of the two-tone alarm (Windows; default `alarm.mp3` next to the program) |
 | `--window` | Linux: force a desktop window |
 | `--fb <device>` | Linux: force the framebuffer (e.g. `/dev/fb0`) |
 | `--headless` | Linux: no display (communication, alarms and log only) |
 | `--horn-gpio <chip>:<line>` | Linux: drive a GPIO line for a horn or stack light, e.g. `gpiochip0:17` |
 | `--horn-fail-safe` | invert that line: on when healthy, off on alarm or if the HMI fails |
+
+**Measuring**
+
+| Option | Meaning |
+|---|---|
+| `--report <file>` | write the HMI's own measurements (loop timing, latency, alarm rate, devices) on exit |
+| `--exit-after-ms <n>` | close by itself after *n* ms |
 
 **Environment variables**
 
@@ -541,31 +580,33 @@ Do this once, before the HMI is used on real machines.
    industrial_hmi.exe --set-pin engineer
    ```
 
-   A window asks for the new PIN twice; the digits are hidden. PINs must have **6 to 8 digits**
-   and must not be a repeated digit or a straight run (`111111`, `123456`, `987654` are refused).
+   It asks for the new PIN twice; the digits are hidden. PINs must have **6 to 8 digits** and
+   must not be a repeated digit or a straight run (`111111`, `123456`, `987654` are refused).
    PINs are never typed on the command line.
 
-   Once any site PIN exists the panel is **commissioned**: factory PINs and test mode are refused
-   from then on, even if `--allow-factory-pins` is given, and the attempt is logged. Roles that
-   have no site PIN yet cannot sign in, so set all three.
-4. **Protect the device key.** The first start creates `hmi.key`. It signs the audit log and the
-   PIN vault. Keep it on the panel, readable only by the HMI account. Do not copy it to other
-   panels or into backups that others can read.
+   Once any site PIN exists the panel is **commissioned**. From then on, factory PINs and test
+   mode are refused, even if `--allow-factory-pins` is given, and the attempt is logged. Roles
+   that have no site PIN yet cannot sign in, so set all three.
+4. **Back up the device key.** The first start creates `hmi.key` in the protected folder
+   (section 20). It signs the audit log and the PIN vault. Keep an offline copy. Never copy it to
+   other panels or into backups that others can read.
 5. **Connect the heartbeat.** For each PLC that should stop when the HMI is lost, add the heartbeat
-   logic to the PLC program (the HMI writes a changing counter every second; the PLC stops the
-   machine when it has not changed for 5 seconds).
+   logic to the PLC program. The HMI writes a changing counter every second; the PLC stops the
+   machine when it has not changed for 5 seconds.
 6. **Separate the network.** Put the HMI and the controllers in their own network zone.
-7. **Test** EMERGENCY and its reset, every machine's stop, the alarm sound and the hardwired emergency stops.
+7. **Test** EMERGENCY and its reset, every machine's stop, the alarm sound and the hardwired
+   emergency stops.
 
 **Returning a bench PC to test mode:** close the HMI, delete `security.vault` (keep `hmi.key`) and
-start it again with `--allow-factory-pins` or from the simulator.
+start it again with `--allow-factory-pins`.
 
 ## 19. Audit log
 
-The HMI writes every alarm, event, sign-in and command to `alarms.log`. Each record is chained to
-the previous one and signed with the panel's device key, so records that are changed, inserted or
-deleted inside the log are detected. A chain cannot show records cut off the **end** of the newest
-file, or a whole old file deleted: copy the log off the panel regularly if that matters.
+The HMI writes every alarm, event, sign-in, shelve and command to `alarms.log`. Each record is
+chained to the previous one and signed with the panel's device key. Records that are changed,
+inserted or deleted inside the log are therefore detected. A chain cannot show records cut off
+the **end** of the newest file, or a whole old file deleted: copy the log off the panel regularly
+if that matters.
 
 To check a log:
 
@@ -573,37 +614,44 @@ To check a log:
 industrial_hmi.exe --verify-log alarms.log
 ```
 
-The result is **VERIFIED** (the chain is intact) or **FAILED** with the first bad line. Use the same
-device key that wrote the log.
+The result is **VERIFIED** (the chain is intact) or **FAILED** with the first bad line. Use the
+same device key that wrote the log.
 
 ## 20. Files and folders
 
-| File | Created | Contents |
-|---|---|---|
-| `hmi.cfg` | by you | site configuration |
-| `alarms.log` | by the HMI | signed audit log of alarms, events and commands |
-| `hmi.key` | first start | the panel's device key — keep it secret and with the panel |
-| `hmi.key.lock` | while running | prevents two HMIs using the same files |
-| `security.vault` | `--set-pin` | site PINs (keyed hashes, signed) |
-| `crash.log` | after a crash | information for the developers |
+| File | Where | Created | Contents |
+|---|---|---|---|
+| `hmi.cfg` | next to the program | by you | site configuration |
+| `alarms.log` | next to the program | by the HMI | signed audit log of alarms, events and commands |
+| `hmi.key` | protected folder | first start | the panel's device key — keep it secret and with the panel |
+| `hmi.key.lock` | protected folder | while running | prevents two HMIs using the same files |
+| `security.vault` | protected folder | `--set-pin` | site PINs (keyed hashes, signed) |
+| `crash.log` | next to the program | after a crash | information for the developers |
 
-| Installation | Folder |
-|---|---|
-| Windows, run from folder | next to `industrial_hmi.exe` (`hmi-runtime\`) |
-| Windows, installer | `%LOCALAPPDATA%\Programs\Prometheus HMI` |
-| Linux, installed | `~/.local/share/prometheus-hmi` |
+**Protected folder**
+- **Windows:** `%ProgramData%\Prometheus HMI`. Only SYSTEM, Administrators and the account that
+  runs the HMI can open it.
+- **Linux, Raspberry Pi:** `/var/lib/prometheus-hmi` when run as root, otherwise
+  `~/.local/state/prometheus-hmi`. The Linux launcher keeps all files in
+  `~/.local/share/prometheus-hmi`. Both are readable by the owner only.
+
+An older installation kept `hmi.key` and `security.vault` next to the program. The first start of
+this version moves them into the protected folder, and records the move in the audit log.
 
 ## 21. Troubleshooting
 
 | Problem | Cause and solution |
 |---|---|
-| **No devices appear** | Check the network cable and IP addresses. Check the `--scan` range in `hmi.cfg`. Devices that do not identify themselves (energy meters, unknown devices) must be listed with `--plc`. With the simulator, make sure it is running and that its devices are plugged in. |
-| **"Devices not shown" warning** | More than 8 devices were found. The extra ones are not on this HMI and EMERGENCY does not reach them; their addresses are in Alarms → History. Narrow the `--scan` range, list the important devices with `--plc`, or use a second HMI. |
+| **No devices appear** | Check the network cable and IP addresses. Check the `--scan` range in `hmi.cfg`. Devices that do not identify themselves (energy meters, unknown devices) must be listed with `--plc`. |
+| **"Devices not shown" warning** | More devices were found than this HMI holds (128, or the site's `--max-devices`). The extra ones are not on this HMI, and EMERGENCY does not reach them; their addresses are in Alarms → History. Narrow the `--scan` range, list the important devices with `--plc`, or use a second HMI. |
 | **A device shows Offline** | The device does not answer: check power, cable, IP address and port. The HMI reconnects by itself. |
+| **A device shows "Other device - blocked"** | After reconnecting, a different device answered at that address (another vendor or product). Nothing is read from it or sent to it. Check the device and its IP address. After 10 s offline it is removed, and a correct device is then attached with its own driver. |
+| **A value cannot be found** | Use **Readings → Search...**, or the **In alarm** / **Bad data** filters. |
+| **An alarm is missing from the list** | It may be shelved or out of service: look under **Alarms → Shelved**. |
 | **Cannot sign in with 1111** | The panel is commissioned (a site PIN exists), or the HMI was started without test mode. Use the site PIN, or see section 18 to return a bench PC to test mode. |
 | **"PIN entry locked for 30 s"** | Three wrong PINs. Wait 30 seconds. |
 | **A button says Blocked:** | An interlock is active (emergency stop, fault, jam …). Clear the cause at the machine. |
-| **No alarm sound** | Check the PC volume and output device. Check that `--no-sound` is not set. On Linux, check the message *"no sound device"* in the terminal and set `HMI_SOUND_DEVICE` if needed. |
+| **No alarm sound** | Check the PC volume and output device. Check that `--no-sound` is not set. During an alarm flood, Info alarms are silent. On Linux, look for *"no sound device"* in the terminal and set `HMI_SOUND_DEVICE` if needed. |
 | **Nothing happens when starting the HMI a second time** | It is already running; the running window is brought forward. |
 | **"This display is … The HMI needs 640x400 or larger."** | The window or screen is too small. Enlarge the window or use a larger display. |
 | **Linux: "desktop window unavailable"** | No usable desktop session or X11 library. Install `libx11-6`, or use `--fb` on a panel, or `--headless` on a server. |
@@ -619,10 +667,15 @@ device key that wrote the log.
 | **PLC** | Programmable logic controller: the computer that runs the machine |
 | **Modbus TCP** | the industrial network protocol used between the HMI and the devices |
 | **Faceplate** | the detail window of one device, with its values and controls |
+| **Reading** | one value from a device, such as a level, a speed or a status |
 | **Interlock** | a condition that blocks a command for safety or protection |
 | **Stop latch** | a PLC state that keeps a machine stopped until it is reset |
 | **Acknowledge** | confirm that an alarm has been seen |
-| **Bench / test mode** | training setup with simulated devices and factory PINs |
+| **Shelve** | hide one alarm for a limited time; it comes back by itself |
+| **Out of service** | hide one alarm until maintenance returns it |
+| **Alarm flood** | more alarms than an operator can handle: here, more than 10 in 10 minutes |
+| **Chattering alarm** | an alarm that keeps coming and going |
+| **Bench / test mode** | training setup with test devices and factory PINs |
 | **Commissioned** | a panel with site PINs, ready for real machines |
 | **Heartbeat** | a changing signal from the HMI that tells the PLC the HMI is alive |
 | **Audit log** | the signed record of everything that happened on the HMI |

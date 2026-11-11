@@ -36,6 +36,9 @@ uint32_t hal_exe_size(void);
  * complete WAV file image. Return the samples / bytes written (0 = buffer too small). */
 size_t hal_alarm_tone_pcm(int16_t *out, size_t max_samples, uint32_t rate);
 size_t hal_alarm_tone_wav(uint8_t *out, size_t cap, uint32_t rate);
+/* The EMERGENCY sound: a fast rising sweep (0.6 s, loops cleanly), same formats. */
+size_t hal_emergency_tone_pcm(int16_t *out, size_t max_samples, uint32_t rate);
+size_t hal_emergency_tone_wav(uint8_t *out, size_t cap, uint32_t rate);
 
 /* Overwrite memory in a way the optimiser may not remove (PINs). */
 static inline void hal_secure_zero(void *p, size_t n)

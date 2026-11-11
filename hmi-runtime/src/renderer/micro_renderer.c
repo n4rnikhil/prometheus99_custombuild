@@ -464,13 +464,13 @@ static const char* state_label(uint8_t st)
     }
 }
 
-static uint8_t point_sev(const hmi_view_t *v, uint8_t tag)
+static uint8_t point_sev(const hmi_view_t *v, hmi_tag_id_t tag)
 {
     if (!v->alarms || tag >= HMI_MAX_TAGS) return ALARM_SEV_NONE;
     return v->alarms->points[tag].severity;
 }
 
-static bool tag_value(const hmi_view_t *v, uint8_t tag, int16_t *val, uint8_t *q)
+static bool tag_value(const hmi_view_t *v, hmi_tag_id_t tag, int16_t *val, uint8_t *q)
 {
     if (!v->tags || tag >= HMI_MAX_TAGS) { *val = 0; *q = QUALITY_COMM_FAULT; return false; }
     *val = v->tags->tags[tag].value;
@@ -478,7 +478,7 @@ static bool tag_value(const hmi_view_t *v, uint8_t tag, int16_t *val, uint8_t *q
     return q_ok(*q);
 }
 
-static void fmt_value(char *out, size_t cap, const hmi_view_t *v, uint8_t tag)
+static void fmt_value(char *out, size_t cap, const hmi_view_t *v, hmi_tag_id_t tag)
 {
     int16_t val; uint8_t q;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
@@ -647,7 +647,7 @@ static int icos(int i) { return s_sin32[(i + 8) & 31]; }
 /* Manifest widgets                                                           */
 /* ========================================================================= */
 
-static void w_card(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
+static void w_card(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag)
 {
     if (!band_hits(r, b.y, b.h)) return;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
@@ -684,7 +684,7 @@ static const hmi_font_t * const s_hero_fonts[3] = { &hmi_font_hero_l, &hmi_font_
 /* Largest hero font (0 = large .. 2 = small) whose line fits the rect height and
  * whose value + unit fits the width. Width is checked against the widest digits
  * the tag can show, so the size does not jump as the value changes. */
-static int hero_fit(hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
+static int hero_fit(hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag)
 {
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
     char val[16], widest[16];
@@ -700,7 +700,7 @@ static int hero_fit(hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
     return 2;
 }
 
-static void w_hero(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag, int font_idx)
+static void w_hero(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag, int font_idx)
 {
     if (!band_hits(r, b.y, b.h)) return;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
@@ -720,7 +720,7 @@ static void w_hero(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t
     if (unit[0]) hmi_draw_text(r, &hmi_font_title, end + 6, y + f->ascent - hmi_font_title.ascent, unit, C_MUTED);
 }
 
-static void w_bar(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
+static void w_bar(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag)
 {
     if (!band_hits(r, b.y, b.h)) return;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
@@ -773,7 +773,7 @@ static void w_bar(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t 
 
 /* Status chip. "Running" / "Stopped" only for a motor (a tag the device starts); any other
  * signal is named ("Network control: On", "Flame: Off"), so a stopped drive never shows "Running". */
-static void w_pill(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag,
+static void w_pill(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag,
                    const hmi_device_info_t *dev, uint8_t rel)
 {
     if (!band_hits(r, b.y, b.h)) return;
@@ -867,7 +867,7 @@ static btn_style_t control_look(const hmi_view_t *v, const hmi_device_info_t *de
     return st;
 }
 
-static void w_button(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag,
+static void w_button(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag,
                      const hmi_device_info_t *dev, uint8_t rel)
 {
     if (!band_hits(r, b.y, b.h)) return;
@@ -889,30 +889,66 @@ static void w_button(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8
     button(r, bb, label, st);
 }
 
-static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag, uint8_t slot)
+/* Range of a zoomed trend: the last 60 s with a margin, at least 5 % of the full scale (so
+ * noise is not blown up), inside the full scale. false = no samples: use the full scale. */
+static bool trend_range(const hmi_tag_meta_t *m, const int16_t *s, uint8_t n, int *lo, int *hi)
+{
+    int a = m->max_val, z = m->min_val;
+    for (int i = 0; i < n; i++) {
+        if (s[i] == HMI_TREND_GAP) continue;
+        int sv = s[i] < m->min_val ? m->min_val : s[i] > m->max_val ? m->max_val : s[i];
+        if (sv < a) a = sv;
+        if (sv > z) z = sv;
+    }
+    if (z < a) return false;
+    int full = m->max_val - m->min_val, min_span = full / 20 > 2 ? full / 20 : 2;
+    int pad = (z - a) / 5;
+    if (z - a + 2 * pad < min_span) pad = (min_span - (z - a) + 1) / 2;
+    *lo = a - pad; *hi = z + pad;
+    if (*lo < m->min_val) { *hi += m->min_val - *lo; *lo = m->min_val; }
+    if (*hi > m->max_val) { *lo -= *hi - m->max_val; *hi = m->max_val; }
+    if (*lo < m->min_val) *lo = m->min_val;
+    if (*hi <= *lo) *hi = *lo + 1;
+    return true;
+}
+
+/* A 60 s trend. zoom: scaled to the recent values (tiles), with the scale written at the top right;
+ * otherwise the full scale of the reading (device widgets). */
+static void trend_draw(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag, uint8_t slot, bool zoom)
 {
     if (!band_hits(r, b.y, b.h)) return;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
     if (!m || m->max_val <= m->min_val) return;
+    int16_t samples[HMI_TREND_SAMPLES];
+    uint8_t n = v->tags ? hmi_tags_copy_trend(v->tags, slot, samples, HMI_TREND_SAMPLES) : 0;
+    int lo = m->min_val, hi = m->max_val;
+    bool zoomed = zoom && trend_range(m, samples, n, &lo, &hi) && (lo != m->min_val || hi != m->max_val);
     hmi_draw_text(r, &hmi_font_caption, b.x, b.y, "LAST 60 SECONDS", C_MUTED);
+    if (zoomed) {                                            /* the scale shown, never a bare zoom */
+        char a[16], z[16], txt[48];
+        hmi_format_scaled(a, sizeof(a), (int16_t)lo, m->decimals);
+        hmi_format_scaled(z, sizeof(z), (int16_t)hi, m->decimals);
+        snprintf(txt, sizeof(txt), "%s to %s %s", a, z, m->unit ? m->unit : "");
+        int cw = hmi_text_width(&hmi_font_caption, "LAST 60 SECONDS") + 12;
+        if (hmi_text_width(&hmi_font_caption, txt) <= b.w - cw)
+            text_right(r, &hmi_font_caption, b.x + b.w, b.y, txt, C_MUTED);
+    }
 
     hmi_rect_t p = { b.x, b.y + 20, b.w, b.h - 20 };
     if (p.h < 12) return;
     for (int i = 0; i <= 2; i++) hmi_draw_rect(r, p.x, p.y + (p.h - 1) * i / 2, p.w, 1, C_LINE);
 
-    int span = m->max_val - m->min_val;
-    #define TREND_Y(val) (p.y + p.h - 2 - (int)(((long)((val) - m->min_val) * (p.h - 4)) / span))
-    /* dashed limit lines */
+    int span = hi - lo;
+    #define TREND_Y(val) (p.y + p.h - 2 - (int)(((long)((val) - lo) * (p.h - 4)) / span))
+    /* dashed limit lines, where they fall inside the scale */
     int16_t lim[2] = { m->warn_high, m->trip_high };
     uint8_t lc[2] = { C_ORANGE, C_RED };
     for (int k = 0; k < 2; k++) {
-        if (lim[k] <= m->min_val || lim[k] >= m->max_val) continue;
+        if (lim[k] <= lo || lim[k] >= hi || lim[k] <= m->min_val) continue;
         int ly = TREND_Y(lim[k]);
         for (int x = p.x; x < p.x + p.w; x += 8) hmi_draw_rect(r, x, ly, 4, 1, lc[k]);
     }
 
-    int16_t samples[HMI_TREND_SAMPLES];
-    uint8_t n = v->tags ? hmi_tags_copy_trend(v->tags, slot, samples, HMI_TREND_SAMPLES) : 0;
     if (n < 2) {
         hmi_draw_text(r, &hmi_font_body, p.x + 4, p.y + p.h / 2 - 8, "Collecting data...", C_DIM);
         return;
@@ -925,8 +961,8 @@ static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_
     for (int i = 0; i < n; i++) {
         int16_t sv = samples[i];
         if (sv == HMI_TREND_GAP) { have_prev = false; continue; }   /* no data: break the line */
-        if (sv < m->min_val) sv = m->min_val;
-        if (sv > m->max_val) sv = m->max_val;
+        if (sv < lo) sv = (int16_t)lo;
+        if (sv > hi) sv = (int16_t)hi;
         int x = p.x + ((first + i) * (p.w - 1)) / (HMI_TREND_SAMPLES - 1);
         int y = TREND_Y(sv);
         if (have_prev) hmi_draw_line(r, px_prev, py_prev, x, y, 2, v->data_stale ? C_DIM : C_TEXT);
@@ -938,7 +974,12 @@ static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_
     #undef TREND_Y
 }
 
-static void w_tank(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
+static void w_trend(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag, uint8_t slot)
+{
+    trend_draw(r, b, v, tag, slot, false);
+}
+
+static void w_tank(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag)
 {
     if (!band_hits(r, b.y, b.h)) return;
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
@@ -970,7 +1011,7 @@ static void w_tank(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t
     }
 }
 
-static void w_pump(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, uint8_t tag)
+static void w_pump(hmi_renderer_t *r, hmi_rect_t b, const hmi_view_t *v, hmi_tag_id_t tag)
 {
     if (!band_hits(r, b.y, b.h)) return;
     int16_t val; uint8_t q;
@@ -1014,7 +1055,7 @@ static void render_manifest(hmi_renderer_t *r, const hmi_view_t *v, const uint32
     int hero_font = 0;                       /* one hero size per manifest, set by the tightest widget */
     for (uint8_t i = 0; i < n; i++) {
         if (hmi_token_get_type(tok[i]) != WIDGET_HERO_DIGIT) continue;
-        uint8_t t = hmi_token_get_tag(tok[i]);
+        hmi_tag_id_t t = hmi_token_get_tag(tok[i]);
         if (dev) t = HMI_DEV_TAG(dev->slot, t);
         int f = hero_fit(hmi_layout_token_rect(tok[i], content), v, t);
         if (f > hero_font) hero_font = f;
@@ -1029,7 +1070,7 @@ static void render_manifest(hmi_renderer_t *r, const hmi_view_t *v, const uint32
             continue;
         }
         if (dev && rel >= HMI_DEVICE_TAG_SPAN) continue;
-        uint8_t tag = dev ? HMI_DEV_TAG(dev->slot, rel) : rel;
+        hmi_tag_id_t tag = dev ? HMI_DEV_TAG(dev->slot, rel) : rel;
         if (tag >= HMI_MAX_TAGS) continue;
         switch (type) {
             case WIDGET_CONTAINER_CARD: w_card(r, b, v, tag);   break;
@@ -1055,7 +1096,8 @@ static void device_status(const hmi_device_info_t *d, char *out, size_t cap, uin
         case HMI_DEV_ONLINE:     snprintf(out, cap, d->transport == HMI_TRANSPORT_LOOPBACK ? "Loopback" : "Online"); *col = C_OK; break;
         case HMI_DEV_CONNECTING: snprintf(out, cap, "Connecting"); *col = C_ORANGE; break;
         case HMI_DEV_OFFLINE:
-            if (d->remove_in_ms) snprintf(out, cap, "Offline - removing in %lu s", (unsigned long)((d->remove_in_ms + 999u) / 1000u));
+            if (d->ident == HMI_IDENT_MISMATCH) snprintf(out, cap, "Other device - blocked");
+            else if (d->remove_in_ms) snprintf(out, cap, "Offline - removing in %lu s", (unsigned long)((d->remove_in_ms + 999u) / 1000u));
             else snprintf(out, cap, "Offline - reconnecting");
             *col = C_RED;
             break;
@@ -1118,6 +1160,160 @@ static void render_empty_dashboard(hmi_renderer_t *r, const hmi_view_t *v, hmi_r
     text_center(r, &hmi_font_caption, t3, drv, C_DIM);
 }
 
+/* The device's main value: the tag its module trends, else its first analog reading. */
+static hmi_tag_id_t main_tag(const hmi_device_info_t *dev)
+{
+    const hmi_device_profile_t *pf = dev->profile;
+    uint8_t rel = pf->trend_tag;
+    if (rel == HMI_REL_NONE || rel >= HMI_DEVICE_TAG_SPAN) {
+        rel = 0;
+        for (uint8_t i = 0; i < pf->meta_count; i++) if (pf->meta[i].type == TAG_TYPE_ANALOG) { rel = (uint8_t)pf->meta[i].tag_id; break; }
+    }
+    return HMI_DEV_TAG(dev->slot, rel);
+}
+
+/* Run state for a summary: the stop latch, else the first start/stop control. NULL = none. */
+static const char *run_state(const hmi_view_t *v, const hmi_device_info_t *dev, uint8_t *col)
+{
+    const hmi_device_profile_t *pf = dev->profile;
+    *col = C_MUTED;
+    if (pf->estop_tag != HMI_REL_NONE && hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, pf->estop_tag)) &&
+        v->tags && v->tags->tags[HMI_DEV_TAG(dev->slot, pf->estop_tag)].value) { *col = C_RED; return "Stop latch"; }
+    for (uint8_t k = 0; k < pf->n_actions; k++) {
+        if (!hmi_act_is_stop(pf->actions[k].kind)) continue;
+        int16_t rv; uint8_t rq;
+        if (tag_value(v, HMI_DEV_TAG(dev->slot, pf->actions[k].rel_tag), &rv, &rq) && !v->data_stale) {
+            *col = rv ? C_OK : C_MUTED;
+            return rv ? "Running" : "Stopped";
+        }
+    }
+    return NULL;
+}
+
+/* Alarms of one device: how many points are not NORMAL, and the highest priority among them. */
+static int device_alarms(const hmi_view_t *v, uint8_t slot, uint8_t *worst)
+{
+    *worst = ALARM_SEV_NONE;
+    if (!v->alarms) return 0;
+    int n = 0;
+    for (int rel = 0; rel < HMI_DEVICE_TAG_SPAN; rel++) {
+        const hmi_alarm_point_t *pt = &v->alarms->points[HMI_DEV_TAG(slot, rel)];
+        if (pt->state == ALARM_PT_NORMAL) continue;
+        n++;
+        if (pt->peak_severity > *worst) *worst = pt->peak_severity;
+    }
+    return n;
+}
+
+/* A small 60 s trend of one tag (overview tiles): grey line, newest sample at the right */
+static void sparkline(hmi_renderer_t *r, hmi_rect_t p, const hmi_view_t *v, hmi_tag_id_t tag, uint8_t slot)
+{
+    const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
+    if (!m || m->max_val <= m->min_val || p.w < 20 || p.h < 8 || !v->tags) return;
+    int16_t samples[HMI_TREND_SAMPLES];
+    uint8_t n = hmi_tags_copy_trend(v->tags, slot, samples, HMI_TREND_SAMPLES);
+    hmi_draw_rect(r, p.x, p.y + p.h - 1, p.w, 1, C_LINE);
+    if (n < 2) return;
+    int lo = m->min_val, hi = m->max_val;
+    trend_range(m, samples, n, &lo, &hi);                  /* the shape of the last 60 s */
+    int span = hi - lo, first = HMI_TREND_SAMPLES - n;
+    int px = 0, py = 0;
+    bool have = false;
+    for (int i = 0; i < n; i++) {
+        int16_t sv = samples[i];
+        if (sv == HMI_TREND_GAP) { have = false; continue; }
+        if (sv < lo) sv = (int16_t)lo;
+        if (sv > hi) sv = (int16_t)hi;
+        int x = p.x + ((first + i) * (p.w - 1)) / (HMI_TREND_SAMPLES - 1);
+        int y = p.y + p.h - 2 - (int)(((long)(sv - lo) * (p.h - 3)) / span);
+        if (have) hmi_draw_line(r, px, py, x, y, 1, v->data_stale ? C_DIM : C_NEUTRAL);
+        px = x; py = y; have = true;
+    }
+    if (have) hmi_draw_circle(r, px, py, 2, v->data_stale ? C_DIM : C_TEXT);
+}
+
+/* Overview tile (many devices): status dot and name, alarm count with its priority symbol, the
+ * main value with its 60 s trend, and the run state. The whole tile opens the device view. */
+static void render_device_tile(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t p, const hmi_device_info_t *dev)
+{
+    if (!dev->profile) return;
+    hmi_draw_round_frame(r, p.x, p.y, p.w, p.h, 12, C_CARD, C_LINE);
+    char st[40], name[48], val[24], line[48];
+    uint8_t col;
+    device_status(dev, st, sizeof(st), &col);
+    int x = p.x + 12, right = p.x + p.w - 12;
+
+    uint8_t worst;
+    int nal = device_alarms(v, dev->slot, &worst);
+    int rw = 0;
+    if (nal) {
+        snprintf(line, sizeof(line), "%d", nal);
+        int nw = hmi_text_width(&hmi_font_body_b, line);
+        text_right(r, &hmi_font_body_b, right, p.y + 10, line, C_TEXT);
+        sev_icon(r, right - nw - 12, p.y + 19, 8, worst, C_WHITE);
+        rw = nw + 26;
+    }
+    hmi_draw_circle(r, x + 4, p.y + 19, 4, col);
+    text_fit(r, &hmi_font_body_b, x + 14, p.y + 10, right - rw - (x + 14), dev->label, C_TEXT);
+
+    hmi_tag_id_t tag = main_tag(dev);
+    const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
+    nice_name(name, sizeof(name), m ? m->name : "Value");
+    fmt_value(val, sizeof(val), v, tag);
+    int16_t raw; uint8_t q;
+    bool ok = dev->state == HMI_DEV_ONLINE && tag_value(v, tag, &raw, &q) && !v->data_stale;
+    uint8_t sev = point_sev(v, tag);
+    uint8_t vc = !ok ? C_DIM : sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_TEXT;
+    const hmi_font_t *vf = p.h >= 120 ? &hmi_font_headline : &hmi_font_title;
+    int vy = p.y + p.h - 12 - vf->line_h;
+
+    /* middle row: value name, and on the right the run state or why there is no data */
+    const char *rs = NULL;
+    uint8_t rc = C_MUTED;
+    if (dev->state != HMI_DEV_ONLINE) {
+        rs = dev->ident == HMI_IDENT_MISMATCH ? "Other device" : dev->state == HMI_DEV_OFFLINE ? "Offline" : "Connecting";
+        rc = col;
+    }
+    else rs = run_state(v, dev, &rc);
+    int my = vy - hmi_font_body_b.line_h - 2;
+    int sw_ = 0;
+    if (rs) {
+        sw_ = hmi_text_width(&hmi_font_body_b, rs) + 14;
+        hmi_draw_circle(r, right - sw_ + 4, my + 9, 4, rc);
+        hmi_draw_text(r, &hmi_font_body_b, right - sw_ + 14, my, rs, C_TEXT);
+        sw_ += 8;
+    }
+    text_fit(r, &hmi_font_caption, x, my + 2, right - sw_ - x, name, C_MUTED);
+
+    /* a tall tile uses its middle: the 60 s trend of the main value, and more readings as bars */
+    hmi_rect_t mid = { x, p.y + 40, right - x, my - 10 - (p.y + 40) };
+    bool big_trend = mid.h >= 70 && mid.w >= 120;
+    if (big_trend) {
+        const hmi_device_profile_t *pf = dev->profile;
+        int nb = mid.h >= 120 ? (mid.h - 80) / 40 : 0;     /* the chart keeps at least 80 px */
+        if (nb > 3) nb = 3;
+        int used = 0;
+        for (uint8_t i = 0; i < pf->meta_count && used < nb; i++) {
+            if (pf->meta[i].type != TAG_TYPE_ANALOG) continue;
+            hmi_tag_id_t bt = HMI_DEV_TAG(dev->slot, pf->meta[i].tag_id);
+            if (bt == tag || !hmi_tag_get_meta(bt)) continue;
+            used++;
+            hmi_rect_t bb = { mid.x, mid.y + mid.h - used * 40 + 4, mid.w, 32 };
+            w_bar(r, bb, v, bt);
+        }
+        hmi_rect_t tr = { mid.x, mid.y, mid.w, mid.h - used * 40 };
+        trend_draw(r, tr, v, tag, dev->slot, true);
+    }
+    /* bottom row: the value, and its last 60 s on the right when the tile is wide enough */
+    snprintf(line, sizeof(line), "%s %s", val, (m && m->unit) ? m->unit : "");
+    int spark_w = big_trend ? 0 : p.w >= 260 ? p.w / 3 : p.w >= 170 ? 48 : 0;
+    text_fit(r, vf, x, vy, right - x - (spark_w ? spark_w + 8 : 0), line, vc);
+    if (spark_w) {
+        hmi_rect_t sp = { right - spark_w, vy + 2, spark_w, vf->line_h - 4 };
+        sparkline(r, sp, v, tag, dev->slot);
+    }
+}
+
 /* Summary card for a panel too small for the device's widgets: the main value, its state and a
  * clear way in. Nothing is drawn over anything else, whatever the number of devices. */
 static void render_device_summary(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t p, const hmi_device_info_t *dev)
@@ -1126,12 +1322,7 @@ static void render_device_summary(hmi_renderer_t *r, const hmi_view_t *v, hmi_re
     hmi_draw_round_frame(r, b.x, b.y, b.w, b.h - 4, 14, C_CARD, C_LINE);
     const hmi_device_profile_t *pf = dev->profile;
     if (!pf) return;
-    uint8_t rel = pf->trend_tag;
-    if (rel == HMI_REL_NONE || rel >= HMI_DEVICE_TAG_SPAN) {
-        rel = 0;
-        for (uint8_t i = 0; i < pf->meta_count; i++) if (pf->meta[i].type == TAG_TYPE_ANALOG) { rel = pf->meta[i].tag_id; break; }
-    }
-    uint8_t tag = HMI_DEV_TAG(dev->slot, rel);
+    hmi_tag_id_t tag = main_tag(dev);
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
     char name[48], val[24], line[48];
     nice_name(name, sizeof(name), m ? m->name : "Value");
@@ -1150,18 +1341,8 @@ static void render_device_summary(hmi_renderer_t *r, const hmi_view_t *v, hmi_re
     int rw = hmi_text_width(&hmi_font_body_b, go) + 24;
 
     /* run state of the first start/stop control, if the device has one */
-    const char *st = NULL;
-    uint8_t sc = C_MUTED;
-    if (pf->estop_tag != HMI_REL_NONE && hmi_tag_get_meta(HMI_DEV_TAG(dev->slot, pf->estop_tag)) &&
-        v->tags && v->tags->tags[HMI_DEV_TAG(dev->slot, pf->estop_tag)].value) { st = "Stop latch"; sc = C_RED; }
-    for (uint8_t k = 0; !st && k < pf->n_actions; k++) {
-        if (!hmi_act_is_stop(pf->actions[k].kind)) continue;
-        int16_t rv; uint8_t rq;
-        if (tag_value(v, HMI_DEV_TAG(dev->slot, pf->actions[k].rel_tag), &rv, &rq) && !v->data_stale) {
-            st = rv ? "Running" : "Stopped";
-            sc = rv ? C_OK : C_MUTED;
-        }
-    }
+    uint8_t sc;
+    const char *st = run_state(v, dev, &sc);
     if (st) {
         int sw_ = hmi_text_width(&hmi_font_body_b, st);
         int sx = right - rw - sw_;
@@ -1178,17 +1359,42 @@ static void render_device_summary(hmi_renderer_t *r, const hmi_view_t *v, hmi_re
 static void render_devices(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t c)
 {
     if (!v->devices || v->ndev == 0) { render_empty_dashboard(r, v, c); return; }
+    if (v->focus_dev) {                          /* device view: one device with all its graphics */
+        const hmi_device_info_t *dev = v->focus_dev;
+        hmi_rect_t p = hmi_layout_focus_panel(c);
+        if (band_hits(r, p.y, p.h)) {
+            device_header(r, p, dev);
+            hmi_rect_t body = hmi_layout_device_body(p);
+            uint8_t nt = 0;
+            const uint32_t *tk = hmi_layout_device_manifest(dev->profile, body, &nt);
+            render_manifest(r, v, tk, nt, body, dev);
+        }
+        button(r, hmi_layout_focus_button(c, 0), "< All devices", BTN_PLAIN);
+        button(r, hmi_layout_focus_button(c, 1), "Controls >", BTN_PRIMARY);
+        return;
+    }
     int per = hmi_layout_devices_per_page(c, v->ndev);
     int pages = per > 0 ? (v->ndev + per - 1) / per : 1;
     int page = v->device_page < pages ? v->device_page : pages - 1;
+    bool tiles = hmi_layout_device_tiles(c, v->ndev);
     if (pages > 1) {                         /* more devices than one screen holds: Previous / Next */
         hmi_rect_t pv = hmi_layout_device_pager(c, 0), nx = hmi_layout_device_pager(c, 1);
         if (band_hits(r, pv.y, pv.h)) {
-            button(r, pv, "< Previous", page > 0 ? BTN_PLAIN : BTN_DISABLED);
-            button(r, nx, "Next >", page + 1 < pages ? BTN_PLAIN : BTN_DISABLED);
-            char t[48];
+            /* the page buttons say when a device on another page is in alarm (never hidden) */
+            int before = 0, after = 0;
+            for (int k = 0; k < v->ndev; k++) {
+                uint8_t w;
+                if (k / per == page || !device_alarms(v, v->devices[k].slot, &w)) continue;
+                if (k / per < page) before++; else after++;
+            }
+            char t[96];
+            snprintf(t, sizeof(t), before ? "< Previous (%d in alarm)" : "< Previous", before);
+            button(r, pv, t, page > 0 ? BTN_PLAIN : BTN_DISABLED);
+            snprintf(t, sizeof(t), after ? "Next (%d in alarm) >" : "Next >", after);
+            button(r, nx, t, page + 1 < pages ? BTN_PLAIN : BTN_DISABLED);
             int last = (page + 1) * per < v->ndev ? (page + 1) * per : v->ndev;
-            snprintf(t, sizeof(t), "Devices %d-%d of %u", page * per + 1, last, (unsigned)v->ndev);
+            snprintf(t, sizeof(t), "Devices %d-%d of %u  -  page %d of %d", page * per + 1, last,
+                     (unsigned)v->ndev, page + 1, pages);
             hmi_rect_t lab = { pv.x + pv.w, pv.y, nx.x - (pv.x + pv.w), pv.h };
             text_center(r, &hmi_font_body, lab, t, C_MUTED);
         }
@@ -1197,6 +1403,7 @@ static void render_devices(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t c)
         const hmi_device_info_t *dev = &v->devices[page * per + k];
         hmi_rect_t p = hmi_layout_device_panel(c, v->ndev, k);
         if (!band_hits(r, p.y, p.h)) continue;
+        if (tiles) { render_device_tile(r, v, p, dev); continue; }
         device_header(r, p, dev);
         if (hmi_layout_device_summary(p)) { render_device_summary(r, v, p, dev); continue; }
         hmi_rect_t body = hmi_layout_device_body(p);
@@ -1329,7 +1536,7 @@ static void render_banner(hmi_renderer_t *r, const hmi_view_t *v)
     }
 }
 
-typedef enum { ICON_PROCESS, ICON_DIAG, ICON_TELEMETRY, ICON_ALARM, ICON_SETTINGS } icon_t;
+typedef enum { ICON_PROCESS, ICON_READINGS, ICON_DIAG, ICON_TELEMETRY, ICON_ALARM, ICON_SETTINGS } icon_t;
 
 static void draw_icon(hmi_renderer_t *r, icon_t ic, int cx, int cy, uint8_t c, uint8_t bg)
 {
@@ -1338,6 +1545,12 @@ static void draw_icon(hmi_renderer_t *r, icon_t ic, int cx, int cy, uint8_t c, u
             hmi_draw_round_frame(r, cx - 8, cy - 10, 16, 20, 5, bg, c);
             hmi_draw_round_frame(r, cx - 7, cy - 9, 14, 18, 4, bg, c);
             hmi_draw_round_rect(r, cx - 5, cy, 10, 7, 2, c);
+            break;
+        case ICON_READINGS:  /* list */
+            for (int k = -1; k <= 1; k++) {
+                hmi_draw_circle(r, cx - 8, cy + k * 7, 2, c);
+                hmi_draw_round_rect(r, cx - 4, cy + k * 7 - 1, 15, 3, 1, c);
+            }
             break;
         case ICON_DIAG:      /* pulse */
             hmi_draw_line(r, cx - 11, cy, cx - 5, cy, 2, c);
@@ -1374,14 +1587,21 @@ static void render_dock(hmi_renderer_t *r, const hmi_view_t *v)
     if (!band_hits(r, d.y, d.h)) return;
     hmi_draw_rect(r, d.x, d.y, d.w, d.h, C_CARD);
     separator(r, 0, d.y, sw);
-    static const char * const labels[SCREEN_COUNT] = { "Process", "Diagnostics", "Telemetry", "Alarms", "Settings" };
+    static const char * const labels[SCREEN_COUNT] = {
+        [SCREEN_PROCESS_OVERVIEW] = "Process",     [SCREEN_READINGS] = "Readings",
+        [SCREEN_ALARM_MATRIX] = "Alarms",          [SCREEN_FIELD_DIAGNOSTICS] = "Diagnostics",
+        [SCREEN_HOST_TELEMETRY] = "Telemetry",     [SCREEN_SECURITY_SETTINGS] = "Settings" };
+    static const icon_t icons[SCREEN_COUNT] = {
+        [SCREEN_PROCESS_OVERVIEW] = ICON_PROCESS,  [SCREEN_READINGS] = ICON_READINGS,
+        [SCREEN_ALARM_MATRIX] = ICON_ALARM,        [SCREEN_FIELD_DIAGNOSTICS] = ICON_DIAG,
+        [SCREEN_HOST_TELEMETRY] = ICON_TELEMETRY,  [SCREEN_SECURITY_SETTINGS] = ICON_SETTINGS };
     for (int i = 0; i < SCREEN_COUNT; i++) {
         hmi_rect_t t = hmi_layout_dock_tab(sw, sh, i);
         bool on = (i == v->active_screen);
         uint8_t c = on ? C_TEXT : C_DIM;
         int cx = t.x + t.w / 2;
         if (on) hmi_draw_rect(r, t.x + t.w / 4, t.y + 1, t.w / 2, 3, C_TEXT);   /* where am I: a bar, not a colour */
-        draw_icon(r, (icon_t)i, cx, t.y + 20, c, C_CARD);
+        draw_icon(r, icons[i], cx, t.y + 20, c, C_CARD);
         int lw = hmi_text_width(&hmi_font_caption, labels[i]);
         hmi_draw_text(r, &hmi_font_caption, cx - lw / 2, t.y + 36, labels[i], c);
         if (i == SCREEN_ALARM_MATRIX && v->alarms && v->alarms->unacked_count) {
@@ -1463,6 +1683,16 @@ static void render_diagnostics(hmi_renderer_t *r, const hmi_view_t *v, bool bann
         if (rows-- > 0) { kv_row(r, x, y, w, "CRC errors", b1, v->crc_mismatches ? C_RED : C_OK); y += rh; }
         snprintf(b1, sizeof(b1), "%lu ms", (unsigned long)v->snapshot_age_ms);
         if (rows-- > 0) { kv_row(r, x, y, w, "Snapshot age", b1, v->data_stale ? C_RED : C_TEXT); y += rh; }
+        if (v->latency_max_us)
+            snprintf(b1, sizeof(b1), "%lu / %lu ms", (unsigned long)((v->latency_avg_us + 500u) / 1000u),
+                     (unsigned long)((v->latency_max_us + 500u) / 1000u));
+        else
+            snprintf(b1, sizeof(b1), "-");
+        if (rows-- > 0) {
+            kv_row(r, x, y, w, "Latency avg/max", b1,
+                   v->latency_max_us > HMI_LATENCY_TARGET_MS * 1000u ? C_ORANGE : C_TEXT);
+            y += rh;
+        }
         snprintf(b1, sizeof(b1), "%lu", (unsigned long)v->seqlock_retries);
         if (rows-- > 0) { kv_row(r, x, y, w, "Seqlock retries", b1, C_TEXT); }
     }
@@ -1533,7 +1763,7 @@ static void render_diagnostics(hmi_renderer_t *r, const hmi_view_t *v, bool bann
                 for (uint8_t i = 0; i < bm->count && y + 18 <= c3.y + c3.h - 8; i++) {
                     uint8_t rel = bm->rel_tags[i];
                     if (rel == HMI_REL_NONE) continue;
-                    uint8_t id = HMI_DEV_TAG(d0->slot, rel);
+                    hmi_tag_id_t id = HMI_DEV_TAG(d0->slot, rel);
                     const hmi_tag_meta_t *m = hmi_tag_get_meta(id);
                     int16_t val; uint8_t q;
                     bool ok = tag_value(v, id, &val, &q);
@@ -1583,15 +1813,17 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
     if (band_hits(r, c.y, HMI_LAYOUT_TITLE_H))
         hmi_draw_text(r, &hmi_font_headline, c.x + 2, c.y + 4, "Alarms", C_TEXT);
     /* The app sorts once per frame; this runs once per band, so only sort here without it */
-    uint8_t own[HMI_MAX_TAGS];
-    const uint8_t *order = v->alarm_order;
-    uint8_t nact = v->alarm_order_n;
+    static hmi_tag_id_t own[HMI_MAX_TAGS];         /* only used when the app did not sort */
+    const hmi_tag_id_t *order = v->alarm_order;
+    uint16_t nact = v->alarm_order_n;
     if (!order) {
         nact = al ? hmi_alarms_sorted(al, own, HMI_MAX_TAGS) : 0;
         order = own;
     }
-    snprintf(b1, sizeof(b1), "Active (%u)", (unsigned)nact);
-    tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_ACTIVE), b1, v->alarm_view == HMI_ALARM_VIEW_ACTIVE);
+    tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_ACTIVE), "Active", v->alarm_view == HMI_ALARM_VIEW_ACTIVE);
+    if (al && al->shelved_count) snprintf(b2, sizeof(b2), "Shelved %u", (unsigned)al->shelved_count);
+    else snprintf(b2, sizeof(b2), "Shelved");
+    tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_SHELVED), b2, v->alarm_view == HMI_ALARM_VIEW_SHELVED);
     tab_button(r, hmi_layout_alarm_tab(sw, sh, HMI_ALARM_VIEW_HISTORY), "History", v->alarm_view == HMI_ALARM_VIEW_HISTORY);
 
     bool can_ack = role_allows(v, HMI_CMD_ACK_ALARMS);
@@ -1610,8 +1842,15 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
 
     hmi_rect_t ca = hmi_layout_alarm_active_card(sw, sh, banner, nact);
     if (v->alarm_view == HMI_ALARM_VIEW_ACTIVE) {
-        snprintf(b1, sizeof(b1), "Active alarms - %u unacknowledged", al ? (unsigned)al->unacked_count : 0u);
-        card(r, ca, b1);
+        /* ISA-18.2: in a flood the operator is told so, and works from the top of the list */
+        if (al && al->flood)
+            snprintf(b1, sizeof(b1), "ALARM FLOOD - %u new in 10 min - work from the top", (unsigned)al->rate_10min);
+        else
+            snprintf(b1, sizeof(b1), "%u active - %u unacknowledged - %u new in 10 min", (unsigned)nact,
+                     al ? (unsigned)al->unacked_count : 0u, al ? (unsigned)al->rate_10min : 0u);
+        card(r, ca, NULL);
+        if (band_hits(r, ca.y + 12, 20))
+            text_fit(r, &hmi_font_title, ca.x + 16, ca.y + 12, ca.w - 32, b1, (al && al->flood) ? C_ORANGE : C_TEXT);
         int per = hmi_layout_alarm_rows(ca);
         int pages = nact ? (nact + per - 1) / per : 1;
         int page = v->alarm_page < pages ? v->alarm_page : pages - 1;
@@ -1628,7 +1867,7 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
             for (int row = 0; row < per; row++) {
                 int k = page * per + row;
                 if (k >= nact) break;
-                uint8_t i = order[k];
+                hmi_tag_id_t i = order[k];
                 const hmi_alarm_point_t *pt = &al->points[i];
                 int y = hmi_layout_alarm_row_y(ca, row);
                 int ry = ca.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H;
@@ -1650,6 +1889,7 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
                     text_right(r, &hmi_font_body_b, col_val, y, t, C_TEXT);
                 }
                 const char *stl = pt->state == ALARM_PT_RTN_UNACK ? "Cleared" : unacked ? "New" : "Acknowledged";
+                if (!unacked && (pt->flags & HMI_ALARM_F_CHATTER)) stl = "Chattering";
                 text_right(r, &hmi_font_body_b, col_state, y, stl, unacked ? sc : C_MUTED);
                 fmt_clock(tm, sizeof(tm), v, pt->since_ms);
                 text_right(r, &hmi_font_body, col_time, y, tm, C_MUTED);
@@ -1657,9 +1897,50 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
             }
         }
         pager(r, ca, page, pages);
+    } else if (v->alarm_view == HMI_ALARM_VIEW_SHELVED) {
+        card(r, ca, "Shelved and out of service - not sounded, not in the list");
+        uint16_t n = v->hidden ? v->hidden_n : 0;
+        int per = hmi_layout_alarm_rows(ca);
+        int pages = n ? (n + per - 1) / per : 1;
+        int page = v->alarm_page < pages ? v->alarm_page : pages - 1;
+        if (band_hits(r, ca.y, ca.h)) {
+            int x = ca.x + 16, w = ca.w - 32;
+            int ack_x = hmi_layout_alarm_row_ack(ca, 0).x;
+            if (!n) {
+                int y = hmi_layout_alarm_row_y(ca, 0);
+                hmi_draw_text(r, &hmi_font_body_b, x, y, "No alarm is shelved or out of service", C_MUTED);
+            }
+            for (int row = 0; row < per; row++) {
+                int k = page * per + row;
+                if (k >= n) break;
+                hmi_tag_id_t i = v->hidden[k];
+                const hmi_alarm_point_t *pt = &al->points[i];
+                int y = hmi_layout_alarm_row_y(ca, row);
+                if (row) hmi_draw_rect(r, x, ca.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H, w, 1, C_LINE);
+                const hmi_tag_meta_t *m = hmi_tag_get_meta(i);
+                if (pt->state != ALARM_PT_NORMAL) sev_icon(r, x + 9, y + 10, 9, pt->peak_severity, C_WHITE);
+                else hmi_draw_circle(r, x + 9, y + 10, 4, C_DIM);
+                if (m && m->group) snprintf(b1, sizeof(b1), "%s: %s", m->group, m->name);
+                else nice_name(b1, sizeof(b1), m ? m->name : "Tag");
+                bool shelved = (pt->flags & HMI_ALARM_F_SHELVED) != 0;
+                char st[40];
+                if (shelved) {
+                    int32_t left = (int32_t)(pt->shelve_until_ms - v->now_ms);
+                    snprintf(st, sizeof(st), "Shelved, %ld min left", (long)(left > 0 ? (left + 59999) / 60000 : 0));
+                } else {
+                    snprintf(st, sizeof(st), "Out of service");
+                }
+                int stw = hmi_text_width(&hmi_font_body_b, st);
+                text_right(r, &hmi_font_body_b, ack_x - 14, y, st, C_MUTED);
+                text_fit(r, &hmi_font_body, x + 28, y, ack_x - 14 - stw - 16 - (x + 28), b1, C_TEXT);
+                bool may = role_allows(v, shelved ? HMI_CMD_SHELVE_ALARM : HMI_CMD_ALARM_SERVICE);
+                button(r, hmi_layout_alarm_row_ack(ca, row), shelved ? "Unshelve" : "Return", may ? BTN_PLAIN : BTN_DISABLED);
+            }
+        }
+        pager(r, ca, page, pages);
     } else {
         card(r, ca, "Event history - newest first");
-        uint8_t n = al ? hmi_alarms_journal_count(al) : 0;
+        uint16_t n = al ? hmi_alarms_journal_count(al) : 0;
         int per = hmi_layout_history_rows(ca);
         int pages = n ? (n + per - 1) / per : 1;
         int page = v->alarm_page < pages ? v->alarm_page : pages - 1;
@@ -1669,7 +1950,7 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
             for (int row = 0; row < per; row++) {
                 int k = page * per + row;
                 if (k >= n) break;
-                const hmi_alarm_record_t *rec = hmi_alarms_journal_newest(al, (uint8_t)k);
+                const hmi_alarm_record_t *rec = hmi_alarms_journal_newest(al, (uint16_t)k);
                 if (!rec) break;
                 fmt_clock(tm, sizeof(tm), v, rec->timestamp_ms);
                 hmi_draw_text(r, &hmi_font_body, jx, y, tm, C_MUTED);
@@ -1687,6 +1968,162 @@ static void render_alarms(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
             }
         }
         pager(r, ca, page, pages);
+    }
+}
+
+/* ---- Readings ---- */
+
+static const hmi_device_info_t *find_device(const hmi_view_t *v, uint8_t slot);
+
+/* Where a value sits in its range (ISA-101 analog indicator): a grey track, the high warning and
+ * trip limits as ticks, and a marker at the value. */
+static void range_bar(hmi_renderer_t *r, int x, int cy, int w, const hmi_tag_meta_t *m, int16_t val, bool ok)
+{
+    if (!m || m->type != TAG_TYPE_ANALOG || m->max_val <= m->min_val || w < 24) return;
+    int span = m->max_val - m->min_val;
+    hmi_draw_round_rect(r, x, cy - 3, w, 6, 3, C_TRACK);
+    if (m->warn_high > m->min_val && m->warn_high < m->max_val)
+        hmi_draw_rect(r, x + (int)((int32_t)(m->warn_high - m->min_val) * w / span), cy - 6, 2, 12, C_ORANGE);
+    if (m->trip_high > m->min_val && m->trip_high < m->max_val)
+        hmi_draw_rect(r, x + (int)((int32_t)(m->trip_high - m->min_val) * w / span), cy - 6, 2, 12, C_RED);
+    if (!ok) return;
+    int32_t pos = (int32_t)(val - m->min_val) * w / span;
+    if (pos < 0) pos = 0;
+    if (pos > w - 3) pos = w - 3;
+    hmi_draw_rect(r, x + (int)pos, cy - 7, 3, 14, C_TEXT);
+}
+
+static void read_heading(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t row, const hmi_read_row_t *it)
+{
+    hmi_draw_round_rect(r, row.x, row.y + 3, row.w, row.h - 6, 8, C_SURF);
+    int ty = row.y + (row.h - hmi_font_title.line_h) / 2;
+    int right = row.x + row.w - 12;
+    char sub[96];
+    if (it->slot == HMI_READ_SLOT_HMI) {
+        hmi_draw_text(r, &hmi_font_title, row.x + 12, ty, "This HMI", C_TEXT);
+        return;
+    }
+    const hmi_device_info_t *d = find_device(v, it->slot);
+    if (!d) return;
+    char st[40];
+    uint8_t col;
+    device_status(d, st, sizeof(st), &col);
+    const char *open = "Open >";
+    text_right(r, &hmi_font_body_b, right, row.y + (row.h - hmi_font_body_b.line_h) / 2, open, C_TEXT);
+    int sx = right - hmi_text_width(&hmi_font_body_b, open) - 16;
+    int stw = hmi_text_width(&hmi_font_body_b, st);
+    text_right(r, &hmi_font_body_b, sx, row.y + (row.h - hmi_font_body_b.line_h) / 2, st, col);
+    hmi_draw_circle(r, row.x + 14, row.y + row.h / 2, 4, col);
+    int x = hmi_draw_text(r, &hmi_font_title, row.x + 26, ty, d->label, C_TEXT);
+    if (it->kind == HMI_READ_ROW_CONTINUED) snprintf(sub, sizeof(sub), "(continued)  %s", d->endpoint);
+    else if (d->product[0]) snprintf(sub, sizeof(sub), "%s  -  %s", d->endpoint, d->product);
+    else snprintf(sub, sizeof(sub), "%s", d->endpoint);
+    text_fit(r, &hmi_font_caption, x + 10, row.y + (row.h - hmi_font_caption.line_h) / 2,
+             sx - stw - 16 - (x + 10), sub, C_MUTED);
+}
+
+static void read_tag_row(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t row, hmi_tag_id_t tag,
+                         int col_val, int col_bar, int bar_w, int col_state)
+{
+    const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
+    char name[64], val[24], line[48];
+    int ty = row.y + (row.h - hmi_font_body.line_h) / 2;
+    hmi_draw_rect(r, row.x + 12, row.y + row.h - 1, row.w - 12, 1, C_LINE);
+    const hmi_alarm_point_t *pt = v->alarms ? &v->alarms->points[tag] : NULL;
+    bool in_alarm = pt && pt->state != ALARM_PT_NORMAL;
+    if (in_alarm) sev_icon(r, row.x + 22, row.y + row.h / 2, 8, pt->peak_severity, C_WHITE);
+    if (v->read_flat && m && m->group) {                        /* no headings: name the device */
+        char nn[48];
+        nice_name(nn, sizeof(nn), m->name);
+        snprintf(name, sizeof(name), "%s: %s", m->group, nn);
+    } else {
+        nice_name(name, sizeof(name), m ? m->name : "Reading");
+    }
+    text_fit(r, in_alarm ? &hmi_font_body_b : &hmi_font_body, row.x + 40, ty, col_val - 110 - (row.x + 40), name,
+             in_alarm ? C_TEXT : C_MUTED);
+
+    int16_t raw; uint8_t q;
+    bool ok = tag_value(v, tag, &raw, &q) && !v->data_stale;
+    if (m && m->type == TAG_TYPE_DIGITAL) snprintf(val, sizeof(val), ok ? (raw ? "On" : "Off") : "--");
+    else fmt_value(val, sizeof(val), v, tag);
+    snprintf(line, sizeof(line), "%s %s", val, (m && m->unit && ok) ? m->unit : "");
+    uint8_t sev = point_sev(v, tag);
+    uint8_t vc = !ok ? C_DIM : sev >= ALARM_SEV_CRITICAL ? C_RED : sev == ALARM_SEV_WARNING ? C_ORANGE : C_TEXT;
+    text_right(r, &hmi_font_body_b, col_val, ty, line, vc);
+    range_bar(r, col_bar, row.y + row.h / 2, bar_w, m, raw, ok);
+
+    const char *st = NULL;
+    uint8_t sc = C_MUTED;
+    if (!ok) { st = v->data_stale ? "Stale" : q == QUALITY_COMM_FAULT ? "No data" : "Bad data"; sc = C_ORANGE; }
+    else if (in_alarm) {
+        st = pt->state == ALARM_PT_RTN_UNACK ? "Cleared, unack." : pt->state == ALARM_PT_UNACK ? "New alarm" : "Acknowledged";
+        sc = pt->state == ALARM_PT_ACKED ? C_MUTED : sev_color(pt->peak_severity);
+    }
+    if (st) text_right(r, &hmi_font_body_b, col_state, ty, st, sc);
+}
+
+static void render_readings(hmi_renderer_t *r, const hmi_view_t *v, bool banner)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    char t[96];
+    hmi_rect_t c = hmi_layout_content(sw, sh, banner);
+    if (band_hits(r, c.y, HMI_LAYOUT_TITLE_H)) {
+        hmi_draw_text(r, &hmi_font_headline, c.x + 2, c.y + 4, "Readings", C_TEXT);
+        static const char * const fl[HMI_READ_FILTERS] = { "All", "In alarm", "Bad data" };
+        for (int f = 0; f < HMI_READ_FILTERS; f++)
+            tab_button(r, hmi_layout_read_filter(sw, sh, banner, f), fl[f], v->read_filter == f);
+        const char *q = v->read_query ? v->read_query : "";
+        if (q[0]) snprintf(t, sizeof(t), "Search: %s", q);
+        else snprintf(t, sizeof(t), "Search...");
+        button(r, hmi_layout_read_search(sw, sh, banner), t, q[0] ? BTN_PRIMARY : BTN_PLAIN);
+    }
+
+    hmi_rect_t ca = hmi_layout_read_card(sw, sh, banner);
+    card(r, ca, NULL);
+    if (!band_hits(r, ca.y, ca.h)) return;
+    hmi_rect_t r0 = hmi_layout_read_row(ca, 0);
+    int col_state = r0.x + r0.w - 12;
+    int state_w = 128;
+    int bar_w = r0.w >= 900 ? 160 : r0.w >= 700 ? 100 : 0;
+    int col_val = col_state - state_w - 16 - bar_w - 16;
+    if (col_val > r0.x + 640) col_val = r0.x + 640;              /* wide screens: value near its name */
+    int col_bar = col_val + 16;
+    if (band_hits(r, ca.y, HMI_LAYOUT_READ_HEAD_H)) {
+        int hy = ca.y + (HMI_LAYOUT_READ_HEAD_H - hmi_font_caption.line_h) / 2 + 2;
+        hmi_draw_text(r, &hmi_font_caption, r0.x + 40, hy, "READING", C_DIM);
+        text_right(r, &hmi_font_caption, col_val, hy, "VALUE", C_DIM);
+        if (bar_w) hmi_draw_text(r, &hmi_font_caption, col_bar, hy, "RANGE", C_DIM);
+        text_right(r, &hmi_font_caption, col_state, hy, "STATUS", C_DIM);
+    }
+    if (!v->read_nrows) {
+        hmi_rect_t e = { ca.x, ca.y + HMI_LAYOUT_READ_HEAD_H + 20, ca.w, 24 };
+        text_center(r, &hmi_font_body_b, e,
+                    v->read_total ? "No reading matches this filter or search" : "No readings yet: no device connected",
+                    C_MUTED);
+    }
+    for (int k = 0; v->read_rows && k < v->read_nrows; k++) {
+        hmi_rect_t row = hmi_layout_read_row(ca, k);
+        if (!band_hits(r, row.y, row.h)) continue;
+        const hmi_read_row_t *it = &v->read_rows[k];
+        if (it->kind == HMI_READ_ROW_TAG) read_tag_row(r, v, row, it->tag, col_val, col_bar + 0, bar_w, col_state);
+        else if (it->kind != HMI_READ_ROW_BLANK) read_heading(r, v, row, it);
+    }
+
+    /* footer: where am I, and the pages */
+    hmi_rect_t pv = hmi_layout_read_page(ca, 0), nx = hmi_layout_read_page(ca, 1);
+    if (band_hits(r, pv.y, pv.h)) {
+        if (v->read_matches == v->read_total)
+            snprintf(t, sizeof(t), "%u readings", (unsigned)v->read_total);
+        else
+            snprintf(t, sizeof(t), "%u of %u readings shown", (unsigned)v->read_matches, (unsigned)v->read_total);
+        hmi_draw_text(r, &hmi_font_body, ca.x + 16, pv.y + (pv.h - hmi_font_body.line_h) / 2, t, C_MUTED);
+        if (v->read_pages > 1) {
+            button(r, pv, "< Previous", v->read_page > 0 ? BTN_PLAIN : BTN_DISABLED);
+            button(r, nx, "Next >", v->read_page + 1 < v->read_pages ? BTN_PLAIN : BTN_DISABLED);
+            snprintf(t, sizeof(t), "Page %u of %u", (unsigned)(v->read_page + 1), (unsigned)v->read_pages);
+            hmi_rect_t lab = { pv.x + pv.w, pv.y, nx.x - (pv.x + pv.w), pv.h };
+            text_center(r, &hmi_font_body, lab, t, C_MUTED);
+        }
     }
 }
 
@@ -1814,7 +2251,7 @@ static const hmi_device_info_t *find_device(const hmi_view_t *v, uint8_t slot)
 /* Current value of a device tag as operator text: "50.0 Hz", "Auto", "Running", "ACTIVE" */
 static uint8_t device_value_text(const hmi_view_t *v, const hmi_device_info_t *d, uint8_t rel, char *out, size_t cap)
 {
-    uint8_t tag = HMI_DEV_TAG(d->slot, rel);
+    hmi_tag_id_t tag = HMI_DEV_TAG(d->slot, rel);
     const hmi_tag_meta_t *m = hmi_tag_get_meta(tag);
     int16_t val; uint8_t q;
     if (!m || v->data_stale || !tag_value(v, tag, &val, &q)) { snprintf(out, cap, "--"); return C_DIM; }
@@ -1870,7 +2307,7 @@ static void render_faceplate(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t 
         if (rh > 26) rh = 26;
         int k = 0;
         for (uint8_t i = 0; i < p->meta_count; i++) {
-            uint8_t rel = p->meta[i].tag_id;
+            uint8_t rel = (uint8_t)p->meta[i].tag_id;
             if (rel == p->comm_tag) continue;
             int y = vc.y + 28 + k * rh;
             k++;
@@ -1972,6 +2409,115 @@ static void render_confirm(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
     button(r, hmi_layout_confirm_button(sw, sh, true), v->cf_ok ? v->cf_ok : "Confirm", v->cf_danger ? BTN_FILLED_RED : BTN_PRIMARY);
 }
 
+/* One alarm: what, how bad, since when, what to do, and the four things the operator can do */
+static void render_alarm_detail(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    hmi_rect_t cancel = hmi_layout_modal_cancel(sw, sh, HMI_MODAL_ALARM);
+    button(r, cancel, "Close", BTN_PLAIN);
+    hmi_tag_id_t tag = v->almd_tag;
+    const hmi_tag_meta_t *meta = hmi_tag_get_meta(tag);
+    if (!v->alarms || tag >= HMI_MAX_TAGS || !meta) return;
+    const hmi_alarm_point_t *pt = &v->alarms->points[tag];
+    char b[112], val[24], tm[24];
+    int x = m.x + 20, w = m.w - 40, y = m.y + 18;
+
+    uint8_t sev = pt->state != ALARM_PT_NORMAL ? pt->peak_severity : ALARM_SEV_NONE;
+    sev_icon(r, x + 9, y + 10, 9, sev, C_WHITE);
+    snprintf(b, sizeof(b), "%s%s%s", meta->group ? meta->group : "", meta->group ? ": " : "", meta->name);
+    text_fit(r, &hmi_font_title, x + 28, y, cancel.x - 12 - (x + 28), b, C_TEXT);
+    y += 34;
+
+    bool needs_ack = pt->state == ALARM_PT_UNACK || pt->state == ALARM_PT_RTN_UNACK;
+    fmt_clock(tm, sizeof(tm), v, pt->since_ms);
+    snprintf(b, sizeof(b), "%s  -  %s  -  since %s", sev_label(sev),
+             pt->state == ALARM_PT_NORMAL ? "Normal" : state_label(pt->state), tm);
+    text_fit(r, &hmi_font_body_b, x, y, w, b, sev ? sev_color(sev) : C_MUTED);
+    y += 24;
+
+    fmt_value(val, sizeof(val), v, tag);
+    if (meta->type == TAG_TYPE_ANALOG) {
+        char wl[16] = "-", tl[16] = "-";
+        if (meta->warn_high) hmi_format_scaled(wl, sizeof(wl), meta->warn_high, meta->decimals);
+        if (meta->trip_high) hmi_format_scaled(tl, sizeof(tl), meta->trip_high, meta->decimals);
+        snprintf(b, sizeof(b), "Now %s %s   High %s   High-high %s", val, meta->unit ? meta->unit : "", wl, tl);
+    } else {
+        int16_t raw; uint8_t q;
+        bool ok = tag_value(v, tag, &raw, &q);
+        snprintf(b, sizeof(b), "Now %s", ok ? (raw ? "On" : "Off") : "-- (no data)");
+    }
+    text_fit(r, &hmi_font_body, x, y, w, b, C_TEXT);
+    y += 24;
+
+    /* what to do */
+    snprintf(b, sizeof(b), "1. %s", meta->action1 ? meta->action1 : "Check the field device and its wiring");
+    text_fit(r, &hmi_font_body, x, y, w, b, C_TEXT);
+    y += 20;
+    snprintf(b, sizeof(b), "2. %s", meta->action2 ? meta->action2 : "Acknowledge once the cause is understood");
+    text_fit(r, &hmi_font_body, x, y, w, b, C_TEXT);
+    y += 26;
+
+    /* handling */
+    b[0] = '\0';
+    if (pt->flags & HMI_ALARM_F_SHELVED) {
+        int32_t left = (int32_t)(pt->shelve_until_ms - v->now_ms);
+        snprintf(b, sizeof(b), "Shelved: comes back by itself in %ld min.", (long)(left > 0 ? (left + 59999) / 60000 : 0));
+    } else if (pt->flags & HMI_ALARM_F_OOS) {
+        snprintf(b, sizeof(b), "Out of service: not sounded until Maintenance returns it.");
+    } else if (pt->flags & HMI_ALARM_F_CHATTER) {
+        snprintf(b, sizeof(b), "Chattering: came in %u times within a minute. Consider shelving it.", (unsigned)pt->ann_count);
+    } else if (!hmi_alarms_can_hide(tag)) {
+        snprintf(b, sizeof(b), "A stop alarm: it cannot be shelved or taken out of service.");
+    }
+    if (b[0]) text_fit(r, &hmi_font_caption, x, y, w, b, C_MUTED);
+
+    /* actions */
+    bool can_hide = hmi_alarms_can_hide(tag);
+    bool shelved = (pt->flags & HMI_ALARM_F_SHELVED) != 0, oos = (pt->flags & HMI_ALARM_F_OOS) != 0;
+    button(r, hmi_layout_almd_button(sw, sh, HMI_ALMD_ACK), "Acknowledge",
+           needs_ack ? BTN_PRIMARY : BTN_DISABLED);
+    snprintf(b, sizeof(b), shelved ? "Unshelve" : "Shelve for %lu min", (unsigned long)(HMI_ALARM_SHELVE_MS / 60000u));
+    button(r, hmi_layout_almd_button(sw, sh, HMI_ALMD_SHELVE), b, (can_hide && !oos) ? BTN_PLAIN : BTN_DISABLED);
+    button(r, hmi_layout_almd_button(sw, sh, HMI_ALMD_SERVICE), oos ? "Return to service" : "Out of service",
+           can_hide ? BTN_PLAIN : BTN_DISABLED);
+    button(r, hmi_layout_almd_button(sw, sh, HMI_ALMD_DEVICE), "Open device",
+           (meta->group && tag >= HMI_DEVICE_TAG_BASE) ? BTN_PLAIN : BTN_DISABLED);
+    hmi_rect_t foot = { m.x + 16, hmi_layout_almd_button(sw, sh, 0).y - 22, m.w - 32, 16 };
+    if (band_hits(r, foot.y, foot.h) && v->sec && v->sec->current_role == ROLE_VIEWER)
+        text_center(r, &hmi_font_caption, foot, "Signed in as Viewer: each action asks for the PIN of the role it needs", C_MUTED);
+}
+
+/* Search keyboard: the search text, then 4 rows of keys. The list filters as the operator types. */
+static void render_search_keyboard(hmi_renderer_t *r, const hmi_view_t *v, hmi_rect_t m)
+{
+    int sw = r->screen_w, sh = r->screen_h;
+    hmi_rect_t cancel = hmi_layout_modal_cancel(sw, sh, HMI_MODAL_SEARCH);
+    button(r, cancel, "Close", BTN_PLAIN);
+    char t[64];
+    snprintf(t, sizeof(t), "Search readings  -  %u match", (unsigned)v->read_matches);
+    text_fit(r, &hmi_font_title, m.x + 18, m.y + 16, cancel.x - 8 - (m.x + 18), t, C_TEXT);
+    hmi_rect_t dsp = hmi_layout_kbd_display(sw, sh);
+    if (band_hits(r, dsp.y, dsp.h)) {
+        hmi_draw_round_frame(r, dsp.x, dsp.y, dsp.w, dsp.h, 10, C_SURF, C_TEXT);
+        const char *q = v->read_query ? v->read_query : "";
+        bool empty = !q[0];
+        text_fit(r, &hmi_font_headline, dsp.x + 14, dsp.y + (dsp.h - hmi_font_headline.line_h) / 2, dsp.w - 28,
+                 empty ? "Device or reading name" : q, empty ? C_DIM : C_TEXT);
+    }
+    hmi_rect_t hint = { m.x + 16, dsp.y + dsp.h + 2, m.w - 32, 14 };
+    if (band_hits(r, hint.y, hint.h))
+        text_center(r, &hmi_font_caption, hint, "A keyboard types here too. EMERGENCY: the red button at the top.", C_MUTED);
+    for (int k = 0; k < HMI_KBD_KEYS; k++) {
+        hmi_rect_t kr = hmi_layout_kbd_key(sw, sh, k);
+        if (kr.w == 0 || !band_hits(r, kr.y, kr.h)) continue;
+        bool done = hmi_layout_kbd_char(k) == HMI_KBD_DONE;
+        hmi_draw_round_frame(r, kr.x, kr.y, kr.w, kr.h, 8, done ? C_TEXT : C_SURF, done ? C_TEXT : C_LINE);
+        const char *lab = hmi_layout_kbd_label(k);
+        const hmi_font_t *f = lab[1] ? &hmi_font_caption : &hmi_font_title;
+        text_center(r, f, kr, lab, done ? C_BG : C_TEXT);
+    }
+}
+
 static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
 {
     int sw = r->screen_w, sh = r->screen_h;
@@ -1984,6 +2530,8 @@ static void render_modal(hmi_renderer_t *r, const hmi_view_t *v)
     if (v->modal == HMI_MODAL_FACEPLATE) { render_faceplate(r, v, m); return; }
     if (v->modal == HMI_MODAL_NUMPAD)    { render_numpad(r, v, m); return; }
     if (v->modal == HMI_MODAL_CONFIRM)   { render_confirm(r, v, m); return; }
+    if (v->modal == HMI_MODAL_SEARCH)    { render_search_keyboard(r, v, m); return; }
+    if (v->modal == HMI_MODAL_ALARM)     { render_alarm_detail(r, v, m); return; }
     hmi_rect_t cancel = hmi_layout_modal_cancel(sw, sh, v->modal);
     button(r, cancel, "Cancel", BTN_PLAIN);
 
@@ -2139,17 +2687,30 @@ static void render_emergency(hmi_renderer_t *r, const hmi_view_t *v)
                  "Also press the hardwired E-stop at each machine. Machines stay stopped after Reset.", C_WHITE);
     }
 
-    /* machine by machine */
+    /* machine by machine. Items in order of what the worker must act on: machines NOT stopped
+     * first, then those still being stopped, then the stopped ones. Item index v->ndev stands for
+     * the machines on the network that this HMI does not hold. */
+    static int order[HMI_MAX_DEVICES + 1];
+    int items = 0;
+    if (v->emergency_unreached) order[items++] = v->ndev;
+    for (int pass = 0; pass < 3; pass++) {
+        for (int k = 0; v->devices && k < v->ndev; k++) {
+            bool m;
+            stop_text(v->devices[k].stop_result, &m);
+            int rank = m ? 0 : v->devices[k].stop_result == HMI_STOP_NONE ? 1 : 2;
+            if (rank == pass) order[items++] = k;
+        }
+    }
     int cap = hmi_layout_emergency_rows(sw, sh) * hmi_layout_emergency_cols(sw, sh);
-    int items = v->ndev + (v->emergency_unreached ? 1 : 0);
     int shown = items <= cap ? items : cap - 1;           /* the last place says how many more */
-    for (int k = 0; k < shown && k < items; k++) {
+    for (int k = 0; k < shown; k++) {
         hmi_rect_t row = hmi_layout_emergency_row(sw, sh, k);
         if (row.w == 0) break;
-        if (k < v->ndev) {
+        int i = order[k];
+        if (i < v->ndev) {
             bool m;
-            const char *st = stop_text(v->devices[k].stop_result, &m);
-            emergency_row(r, row, v->devices[k].label, st, m);
+            const char *st = stop_text(v->devices[i].stop_result, &m);
+            emergency_row(r, row, v->devices[i].label, st, m);
         } else {
             char name[48];
             snprintf(name, sizeof(name), "%u machine(s) not on this HMI", (unsigned)v->emergency_unreached);
@@ -2157,10 +2718,13 @@ static void render_emergency(hmi_renderer_t *r, const hmi_view_t *v)
         }
     }
     if (shown >= 0 && shown < items) {
-        hmi_rect_t row = hmi_layout_emergency_row(sw, sh, shown < 0 ? 0 : shown);
+        hmi_rect_t row = hmi_layout_emergency_row(sw, sh, shown);
         int more_missed = 0;
-        for (int k = shown; k < v->ndev; k++) { bool m; stop_text(v->devices[k].stop_result, &m); if (m) more_missed++; }
-        if (v->emergency_unreached && shown <= v->ndev) more_missed++;
+        for (int k = shown; k < items; k++) {
+            bool m = order[k] >= v->ndev;
+            if (!m) stop_text(v->devices[order[k]].stop_result, &m);
+            if (m) more_missed++;
+        }
         char name[48], st[48];
         snprintf(name, sizeof(name), "+ %d more", items - shown);
         if (more_missed) snprintf(st, sizeof(st), "%d of them NOT STOPPED", more_missed);
@@ -2201,6 +2765,7 @@ void hmi_renderer_render_band(hmi_renderer_t *r, int band_idx, const hmi_view_t 
 
     switch (v->active_screen) {
         case SCREEN_PROCESS_OVERVIEW: render_devices(r, v, content); break;
+        case SCREEN_READINGS:         render_readings(r, v, banner); break;
         case SCREEN_HOST_TELEMETRY:
             if (v->ntok_host) render_manifest(r, v, v->tokens_host, v->ntok_host, content, NULL);
             else if (band_hits(r, content.y, 60)) {           /* never a blank screen: say why */

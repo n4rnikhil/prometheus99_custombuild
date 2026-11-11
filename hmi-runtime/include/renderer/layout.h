@@ -59,7 +59,15 @@ typedef enum {
     HMI_HIT_ALARM_TAB,        /* alarm screen: param 0 = Active, 1 = History */
     HMI_HIT_ALARM_PAGE,       /* alarm screen: param 0 = previous page, 1 = next page */
     HMI_HIT_DEVICE_PAGE,      /* process screen: param 0 = previous page, 1 = next page */
-    HMI_HIT_EMERGENCY_RESET   /* EMERGENCY screen: "Reset EMERGENCY" (Maintenance) */
+    HMI_HIT_EMERGENCY_RESET,  /* EMERGENCY screen: "Reset EMERGENCY" (Maintenance) */
+    HMI_HIT_READ_FILTER,      /* Readings: filter chip; param = HMI_READ_FILTER_* */
+    HMI_HIT_READ_SEARCH,      /* Readings: open the search keyboard */
+    HMI_HIT_READ_PAGE,        /* Readings: param 0 = previous page, 1 = next page */
+    HMI_HIT_READ_ROW,         /* Readings: param = row on the page (a device row opens its faceplate) */
+    HMI_HIT_KBD_KEY,          /* search keyboard: param = key index, see hmi_layout_kbd_char() */
+    HMI_HIT_ALMD_BTN,         /* alarm dialog: param = HMI_ALMD_* button */
+    HMI_HIT_DEVICE_FOCUS,     /* overview tile: show that device's full graphics; param = device slot */
+    HMI_HIT_FOCUS_BACK        /* device view: back to all devices */
 } hmi_hit_kind_t;
 
 /* Dialogs drawn over the screen. While one is open only the dialog and the
@@ -70,8 +78,13 @@ typedef enum {
     HMI_MODAL_PIN,            /* PIN keypad for the chosen role */
     HMI_MODAL_FACEPLATE,      /* a device's values and all its controls */
     HMI_MODAL_NUMPAD,         /* numeric entry of a setpoint */
-    HMI_MODAL_CONFIRM         /* "are you sure?" before a command is sent */
+    HMI_MODAL_CONFIRM,        /* "are you sure?" before a command is sent */
+    HMI_MODAL_SEARCH,         /* on-screen keyboard for the Readings search */
+    HMI_MODAL_ALARM           /* one alarm: details, guidance, Ack / Shelve / Out of service / Open device */
 } hmi_modal_t;
+
+/* Alarm dialog buttons */
+enum { HMI_ALMD_ACK = 0, HMI_ALMD_SHELVE = 1, HMI_ALMD_SERVICE = 2, HMI_ALMD_DEVICE = 3, HMI_ALMD_BUTTONS = 4 };
 
 /* Numeric keypad keys besides the digits 0..9 */
 #define HMI_NP_DEL   10
@@ -85,7 +98,7 @@ typedef enum {
 
 typedef struct {
     hmi_hit_kind_t kind;
-    uint8_t        param;
+    uint16_t       param;          /* screen, role, key, row ... or an absolute tag id */
     hmi_rect_t     rect;
 } hmi_hit_t;
 
@@ -122,13 +135,16 @@ bool       hmi_layout_banner_shown(uint8_t screen, bool alarm_active);
 #define HMI_LAYOUT_ALARM_ROW_H   44    /* summary rows: an Ack button big enough for a gloved finger */
 #define HMI_LAYOUT_HISTORY_ROW_H 26
 #define HMI_LAYOUT_ALARM_FOOT_H  52
-enum { HMI_ALARM_VIEW_ACTIVE = 0, HMI_ALARM_VIEW_HISTORY = 1 };
+enum { HMI_ALARM_VIEW_ACTIVE = 0, HMI_ALARM_VIEW_HISTORY = 1, HMI_ALARM_VIEW_SHELVED = 2, HMI_ALARM_VIEWS = 3 };
 hmi_rect_t hmi_layout_alarm_active_card(int sw, int sh, bool banner_active, int nact);
 int        hmi_layout_alarm_rows(hmi_rect_t card);                 /* summary rows per page */
 int        hmi_layout_history_rows(hmi_rect_t card);               /* journal rows per page */
 int        hmi_layout_alarm_row_y(hmi_rect_t card, int row);       /* text top of a summary row */
-hmi_rect_t hmi_layout_alarm_row_ack(hmi_rect_t card, int row);     /* that row's Ack button */
-hmi_rect_t hmi_layout_alarm_tab(int sw, int sh, int view);         /* Active / History tab */
+hmi_rect_t hmi_layout_alarm_row(hmi_rect_t card, int row);         /* the whole row: opens the alarm dialog */
+hmi_rect_t hmi_layout_alarm_row_ack(hmi_rect_t card, int row);     /* that row's Ack (or Unshelve) button */
+hmi_rect_t hmi_layout_alarm_tab(int sw, int sh, int view);         /* Active / Shelved / History tab */
+/* Alarm dialog (HMI_MODAL_ALARM) */
+hmi_rect_t hmi_layout_almd_button(int sw, int sh, int button);    /* HMI_ALMD_* */
 hmi_rect_t hmi_layout_alarm_page(hmi_rect_t card, int dir);        /* dir 0 = previous, 1 = next */
 /* Settings: idx 0 = access control (left), 1 = system (right) */
 hmi_rect_t hmi_layout_settings_card(int sw, int sh, bool banner_active, int idx);
@@ -147,10 +163,21 @@ hmi_rect_t hmi_layout_modal_key(int sw, int sh, int key);        /* key 0..11, s
  * The process screen is split into one panel per present device:
  *   1 -> full area; 2 -> side by side (or stacked on tall screens);
  *   3 -> three columns on wide screens, else 2 x 2; 4 -> 2 x 2;
- *   5 or more -> a grid of readable cards (2..4 columns, 2..3 rows by screen size), with
- *   Previous / Next pages at the bottom when the grid cannot hold them all.
- * Each panel = a header row (device name, address, status) + a body that shows the
- * profile's full manifest, or its compact manifest when the body is small. */
+ *   5 or more -> a grid of readable cards (2..4 columns, 2..3 rows by screen size) when they all
+ *   fit on one screen; otherwise an overview of small tiles (name, state, main value, alarms),
+ *   as many as the screen holds, with Previous / Next pages when even the tiles do not fit.
+ * Each card = a header row (device name, address, status) + a body that shows the
+ * profile's full manifest, or its compact manifest when the body is small. A tile is one tap
+ * target that opens the device's faceplate. */
+#define HMI_LAYOUT_TILE_MIN_W      176   /* 4 tiles across an 800 px display */
+#define HMI_LAYOUT_TILE_MIN_H      88    /* name, value name, value: never overlapping */
+#define HMI_LAYOUT_TILE_MAX_COLS   8
+bool hmi_layout_device_tiles(hmi_rect_t content, int ndev);            /* overview tiles instead of cards */
+/* Device view (a tile was tapped): one device with its full graphics, as when it is the only one,
+ * above a row with "< All devices" (left) and "Controls >" (right, opens the faceplate). */
+hmi_rect_t hmi_layout_focus_panel(hmi_rect_t content);
+hmi_rect_t hmi_layout_focus_button(hmi_rect_t content, int which);     /* 0 = back, 1 = controls */
+hmi_hit_t  hmi_layout_focus_hit_test(int sw, int sh, bool banner_active, const hmi_device_info_t *dev, int x, int y);
 #define HMI_LAYOUT_DEVICE_HEADER_H 34
 /* A device panel lower than this cannot show its widgets without overlap: it shows a summary
  * (main value, state) instead, and a tap anywhere on it opens the faceplate with every control. */
@@ -183,6 +210,32 @@ hmi_rect_t hmi_layout_numpad_display(int sw, int sh);
 hmi_rect_t hmi_layout_numpad_key(int sw, int sh, int key);           /* 0..9, HMI_NP_* */
 hmi_rect_t hmi_layout_confirm_button(int sw, int sh, bool ok);       /* ok = Confirm, else Cancel */
 
+/* --- Readings screen ---
+ * One card listing every reading of every device, grouped under a row per device, in rows tall
+ * enough to touch. The title row holds the filter chips (All / In alarm / Bad data) and Search;
+ * the card footer holds Previous / Next. A device row opens that device's faceplate. */
+#define HMI_LAYOUT_READ_ROW_H     40
+#define HMI_LAYOUT_READ_ROW_MIN_H 34  /* short cards (under 360 px): more rows per page */
+#define HMI_LAYOUT_READ_HEAD_H    24  /* column captions */
+#define HMI_LAYOUT_READ_FOOT_H    48
+enum { HMI_READ_FILTER_ALL = 0, HMI_READ_FILTER_ALARM = 1, HMI_READ_FILTER_BAD = 2, HMI_READ_FILTERS = 3 };
+hmi_rect_t hmi_layout_read_card(int sw, int sh, bool banner_active);
+int        hmi_layout_read_rows(hmi_rect_t card);                  /* rows per page (>= 1) */
+hmi_rect_t hmi_layout_read_row(hmi_rect_t card, int row);
+hmi_rect_t hmi_layout_read_page(hmi_rect_t card, int dir);         /* dir 0 = previous, 1 = next */
+hmi_rect_t hmi_layout_read_filter(int sw, int sh, bool banner_active, int filter);
+hmi_rect_t hmi_layout_read_search(int sw, int sh, bool banner_active);
+
+/* --- Search keyboard (HMI_MODAL_SEARCH): 4 rows of 10 keys --- */
+#define HMI_KBD_KEYS   40
+#define HMI_KBD_DEL    '\b'
+#define HMI_KBD_CLEAR  0x7F
+#define HMI_KBD_DONE   '\n'
+char       hmi_layout_kbd_char(int key);   /* '0'..'9', 'A'..'Z', ' ', HMI_KBD_DEL / _CLEAR / _DONE; 0 = none */
+const char *hmi_layout_kbd_label(int key); /* key cap text */
+hmi_rect_t hmi_layout_kbd_display(int sw, int sh);
+hmi_rect_t hmi_layout_kbd_key(int sw, int sh, int key);
+
 /* Topmost interactive element at (x, y).
  *   tokens/ntok : manifest of a fixed-manifest screen (telemetry), may be NULL/0
  *   devs/ndev   : present devices in display order (process screen), may be NULL/0
@@ -192,7 +245,7 @@ hmi_rect_t hmi_layout_confirm_button(int sw, int sh, bool ok);       /* ok = Con
  * HMI_HIT_WIDGET_BUTTON returns the ABSOLUTE tag id of the button. */
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
                               const uint32_t *tokens, uint8_t ntok,
-                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t dev_page, uint8_t fp_slot,
+                              const hmi_device_info_t *devs, uint8_t ndev, uint16_t dev_page, uint8_t fp_slot,
                               int x, int y);
 
 /* --- EMERGENCY screen ---

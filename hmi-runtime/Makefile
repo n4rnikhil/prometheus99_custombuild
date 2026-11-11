@@ -39,7 +39,6 @@ HAL_SRC  := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c src/hal/s
 APP_SRC  := src/app/app.c src/platform/linux/main_linux.c src/platform/linux/x11_window.c src/platform/linux/alsa_sound.c
 
 SAN     := -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
-SIM_DIR := ../plc-simulator
 NET_TEST_SRC := src/hal/net_ip.c src/hal/net_posix.c src/hal/timer_posix.c \
             src/fieldbus/device_manager.c src/fieldbus/discovery.c src/fieldbus/modbus_proto.c \
             $(filter src/devices/%,$(CORE_SRC)) src/core/tags.c src/core/alarms.c src/core/crc32.c
@@ -61,8 +60,8 @@ tests/test_core_san: tests/test_core.c $(CORE_SRC) $(HAL_SRC)
 tests/test_core_mcu: tests/test_core.c $(CORE_SRC) $(HAL_SRC)
 	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -DHMI_PROFILE_MCU -Iinclude $^ -o $@ $(LIBS)
 
-tests/test_integration: tests/test_integration.c $(SIM_DIR)/src/plc_models.c $(NET_TEST_SRC)
-	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -Iinclude -I$(SIM_DIR)/include $^ -o $@ $(LIBS)
+tests/test_integration: tests/test_integration.c tests/fixtures/device_models.c $(NET_TEST_SRC)
+	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -Iinclude -Itests $^ -o $@ $(LIBS)
 
 tests/test_modbus_faults: tests/test_modbus_faults.c $(NET_TEST_SRC)
 	$(CC) $(WARN) -O1 -g $(SAN) $(DEFS) -Iinclude $^ -o $@ $(LIBS)

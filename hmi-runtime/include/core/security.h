@@ -82,6 +82,8 @@ typedef enum {
     HMI_CMD_TUNE,              /* MAINTENANCE+: tuning values (ramp times, limits) */
     HMI_CMD_RAW_WRITE,         /* ENGINEER: write any register of an unrecognised device */
     HMI_CMD_EMERGENCY_RESET,   /* MAINTENANCE+: leave the EMERGENCY screen (machines stay stopped) */
+    HMI_CMD_SHELVE_ALARM,      /* OPERATOR+: shelve / unshelve one alarm (ISA-18.2, time-limited) */
+    HMI_CMD_ALARM_SERVICE,     /* MAINTENANCE+: take one alarm out of service / return it */
     HMI_CMD_COUNT
 } hmi_command_t;
 
@@ -140,13 +142,5 @@ bool hmi_security_authorize(hmi_security_ctx_t *sec, hmi_command_t cmd, uint32_t
 const char* hmi_security_role_name(hmi_role_t role);   /* "VIEWER","OPERATOR","MAINT","ENGINEER" */
 const char* hmi_security_command_name(hmi_command_t cmd);
 
-/* Legacy gates (wrappers over hmi_security_required_role) */
-bool hmi_security_can_acknowledge_alarm(const hmi_security_ctx_t *sec);
-bool hmi_security_can_operate_equipment(const hmi_security_ctx_t *sec);
-bool hmi_security_can_adjust_setpoint(const hmi_security_ctx_t *sec);
-bool hmi_security_can_configure_system(const hmi_security_ctx_t *sec);
-
-int16_t hmi_security_clamp_setpoint(int16_t requested, int16_t min_val, int16_t max_val);
-bool hmi_security_validate_packet(const uint8_t *buffer, size_t len, size_t max_allowed);
 
 #endif /* INDUSTRIAL_HMI_SECURITY_H */

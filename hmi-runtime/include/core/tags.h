@@ -1,6 +1,6 @@
 /**
  * @file tags.h
- * @brief Static process tag table (64 x 8-byte tags) with a 60 s trend buffer
+ * @brief Static process tag table (HMI_MAX_TAGS x 8-byte tags) with a 60 s trend per device
  * @standards IEC 61131-3 data model / OPC-style quality flags
  *
  * Values are scaled integers. A tag's metadata says how to display it:
@@ -18,7 +18,7 @@ typedef enum {
     QUALITY_GOOD         = 0,  /* live reading */
     QUALITY_COMM_FAULT   = 1,  /* lost communication / timeout */
     QUALITY_OUT_OF_RANGE = 2,  /* sensor saturated / wire break */
-    QUALITY_SIMULATED    = 3   /* simulator / test injection */
+    QUALITY_SIMULATED    = 3   /* substituted or test value (shown as "Simulated") */
 } hmi_quality_t;
 
 /* --- Tag kinds --- */
@@ -40,7 +40,7 @@ typedef struct {
 /* --- Static tag descriptor (const, lives in .rdata) ---
  * Field order matters: drivers use positional initialisers. */
 typedef struct {
-    uint8_t        tag_id;
+    hmi_tag_id_t   tag_id;
     hmi_tag_type_t type;
     const char    *name;          /* "TANK 01 LEVEL" (ASCII only: 5x7 font) */
     const char    *unit;          /* "%", "RPM", "kPa", "C" */
@@ -69,20 +69,23 @@ typedef struct {
  * After that the registry is read-only, so lookups need no locking.
  * Multiple registrations accumulate (indexed by tag_id, O(1) lookup). */
 void hmi_tag_registry_reset(void);
+/* One past the highest tag id that has had metadata since the reset: loops over tags stop here,
+ * so the memory of device places never used is never touched. */
+uint16_t hmi_tag_ids_in_use(void);
 bool hmi_tag_register_meta(const hmi_tag_meta_t *meta_list, uint8_t count); /* false: NULL, id >= HMI_MAX_TAGS, or duplicate id (nothing registered for that entry) */
-const hmi_tag_meta_t* hmi_tag_get_meta(uint8_t tag_id);                     /* NULL if unregistered */
+const hmi_tag_meta_t* hmi_tag_get_meta(hmi_tag_id_t tag_id);                     /* NULL if unregistered */
 /* Runtime binding for plug-and-play devices (fieldbus thread only). The pointer is
  * published with release ordering, so a reader that sees it also sees the data. */
-void hmi_tag_bind_meta(uint8_t tag_id, const hmi_tag_meta_t *meta);
+void hmi_tag_bind_meta(hmi_tag_id_t tag_id, const hmi_tag_meta_t *meta);
 
 /* --- Table --- */
 void hmi_tags_init(hmi_tag_table_t *table);   /* zero, every tag QUALITY_COMM_FAULT until first write, decimals from registry */
 
-void hmi_tag_write_analog(hmi_tag_table_t *table, uint8_t tag_id, int16_t val, uint8_t quality);
-void hmi_tag_write_digital(hmi_tag_table_t *table, uint8_t tag_id, bool state, uint8_t quality);
-void hmi_tag_set_quality(hmi_tag_table_t *table, uint8_t tag_id, uint8_t quality); /* keeps value */
-int16_t hmi_tag_read_value(const hmi_tag_table_t *table, uint8_t tag_id);
-uint8_t hmi_tag_read_quality(const hmi_tag_table_t *table, uint8_t tag_id);
+void hmi_tag_write_analog(hmi_tag_table_t *table, hmi_tag_id_t tag_id, int16_t val, uint8_t quality);
+void hmi_tag_write_digital(hmi_tag_table_t *table, hmi_tag_id_t tag_id, bool state, uint8_t quality);
+void hmi_tag_set_quality(hmi_tag_table_t *table, hmi_tag_id_t tag_id, uint8_t quality); /* keeps value */
+int16_t hmi_tag_read_value(const hmi_tag_table_t *table, hmi_tag_id_t tag_id);
+uint8_t hmi_tag_read_quality(const hmi_tag_table_t *table, hmi_tag_id_t tag_id);
 
 /* --- Trend --- */
 #define HMI_TREND_GAP INT16_MIN   /* sample recorded while the value was not valid */

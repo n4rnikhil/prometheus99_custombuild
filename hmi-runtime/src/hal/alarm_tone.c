@@ -42,10 +42,33 @@ size_t hal_alarm_tone_pcm(int16_t *out, size_t max_samples, uint32_t rate)
     return n;
 }
 
-size_t hal_alarm_tone_wav(uint8_t *out, size_t cap, uint32_t rate)
+size_t hal_emergency_tone_pcm(int16_t *out, size_t max_samples, uint32_t rate)
+{
+    /* EMERGENCY: a fast rising "yelp", 650 -> 1500 Hz in 0.15 s, four times: never mistaken for
+     * the two-tone alarm. The phase runs on across sweeps, so the jump back down does not click. */
+    size_t per = (size_t)(rate * 15u / 100u), n = 0;
+    uint32_t phase = 0;
+    for (int sweep = 0; sweep < 4 && out; sweep++) {
+        for (size_t i = 0; i < per && n < max_samples; i++, n++) {
+            uint64_t f = 650u + (uint64_t)850u * i / per;
+            phase += (uint32_t)((f << 22) / rate);
+            out[n] = s_sine[(phase >> 16) & 63u];
+        }
+    }
+    size_t ramp = rate / 250u;                                     /* 4 ms in and out: no click when it loops */
+    for (size_t i = 0; i < ramp && i < n / 2; i++) {
+        out[i] = (int16_t)((out[i] * (int32_t)i) / (int32_t)ramp);
+        out[n - 1 - i] = (int16_t)((out[n - 1 - i] * (int32_t)i) / (int32_t)ramp);
+    }
+    return n;
+}
+
+static size_t wav_image(uint8_t *out, size_t cap, uint32_t rate, bool emergency)
 {
     if (!out || cap < 44) return 0;
-    size_t samples = hal_alarm_tone_pcm((int16_t *)(void *)(out + 44), (cap - 44) / 2, rate);
+    int16_t *pcm = (int16_t *)(void *)(out + 44);
+    size_t samples = emergency ? hal_emergency_tone_pcm(pcm, (cap - 44) / 2, rate)
+                               : hal_alarm_tone_pcm(pcm, (cap - 44) / 2, rate);
     uint32_t data = (uint32_t)(samples * 2u);
     out[0] = 'R'; out[1] = 'I'; out[2] = 'F'; out[3] = 'F'; put32(out + 4, 36u + data);
     out[8] = 'W'; out[9] = 'A'; out[10] = 'V'; out[11] = 'E';
@@ -55,3 +78,6 @@ size_t hal_alarm_tone_wav(uint8_t *out, size_t cap, uint32_t rate)
     out[36] = 'd'; out[37] = 'a'; out[38] = 't'; out[39] = 'a'; put32(out + 40, data);
     return 44u + data;
 }
+
+size_t hal_alarm_tone_wav(uint8_t *out, size_t cap, uint32_t rate)     { return wav_image(out, cap, rate, false); }
+size_t hal_emergency_tone_wav(uint8_t *out, size_t cap, uint32_t rate) { return wav_image(out, cap, rate, true); }

@@ -19,6 +19,13 @@ void hal_horn(bool on);
 /* The panel's own alarm sound (two-tone, looped while the horn sounds). On by default; --no-sound
  * turns it off. A wired horn output (GPIO, board pin) is not affected. */
 void hal_sound_enable(bool on);
+/* Sound files (Windows: WAV or MP3). HAL_SOUND_ALARM replaces the two-tone alarm sound,
+ * HAL_SOUND_EMERGENCY is looped while an EMERGENCY is active. NULL or "" = the built-in tone.
+ * Platforms that cannot play files (Linux ALSA, ESP32) keep the tone. */
+enum { HAL_SOUND_ALARM = 0, HAL_SOUND_EMERGENCY = 1 };
+void hal_sound_file(int kind, const char *path);
+/* EMERGENCY sound: on while the EMERGENCY is latched. It takes over from the alarm sound. */
+void hal_emergency_sound(bool on);
 void hal_trim_memory(void);                 /* give back working-set pages (Windows); no-op elsewhere */
 void hal_request_repaint(void);             /* call app_render() soon */
 void hal_request_quit(void);                /* leave the main loop (--exit-after-ms) */

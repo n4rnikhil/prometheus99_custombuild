@@ -102,8 +102,15 @@ static bool horn_gpio_open(const char *spec)
 }
 
 void hal_sound_enable(bool on) { alsa_sound_enable(on); }
+/* ALSA here plays the built-in tone only (no MP3 decoder): sound files are a Windows feature */
+void hal_sound_file(int kind, const char *path) { (void)kind; (void)path; }
 
-void hal_horn(bool on)
+static bool s_emergency_on, s_alarm_on;
+static void horn_output(bool on);
+void hal_emergency_sound(bool on) { s_emergency_on = on; alsa_sound_emergency(on); horn_output(s_alarm_on || on); }
+void hal_horn(bool on)           { s_alarm_on = on; horn_output(on || s_emergency_on); }
+
+static void horn_output(bool on)
 {
     alsa_sound_set(on);                                  /* the panel's own tone, if it has audio */
     if (s_horn_fd < 0 || s_horn_state == (int)on) return;

@@ -162,7 +162,7 @@ void hmi_discovery_clear(void)
 void hmi_discovery_add_defaults(void)
 {
     hmi_discovery_add("127.0.0.1:502", false);
-    hmi_discovery_add("127.0.0.1:1502-1509", false);
+    hmi_discovery_add("127.0.0.1:1502-1629", false);
 }
 
 uint32_t hmi_discovery_target_count(void)

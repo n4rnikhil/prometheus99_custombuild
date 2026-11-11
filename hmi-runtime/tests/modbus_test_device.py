@@ -1,10 +1,10 @@
 """
-modbus_plc_sim.py - minimal Modbus TCP device used by tests/test_modbus_live.c
-(Python standard library only). For interactive testing use the PLC Simulator app.
+modbus_test_device.py - minimal Modbus TCP device used by tests/test_modbus_live.c
+(Python standard library only).
 
-  python tests/modbus_plc_sim.py --profile tank  --port 1502     # Modicon M340 running HMI-TANK
-  python tests/modbus_plc_sim.py --profile meter --port 1504     # PM5560 power meter (NOT a PLC)
-  python tests/modbus_plc_sim.py --profile anon  --port 1505     # Modbus device without FC43
+  python tests/modbus_test_device.py --profile tank  --port 1502     # Modicon M340 running HMI-TANK
+  python tests/modbus_test_device.py --profile meter --port 1504     # PM5560 power meter (NOT a PLC)
+  python tests/modbus_test_device.py --profile anon  --port 1505     # Modbus device without FC43
 
 Every profile answers FC43 / MEI 0x0E "Read Device Identification" with its
 vendor / product code (except "anon"; the tank adds its program name in the regular
@@ -205,7 +205,7 @@ def main():
 
     threading.Thread(target=server, daemon=True).start()
     ident = IDENTITY[a.profile]
-    print(f"{a.profile} simulator on 127.0.0.1:{a.port}  identity={ident}", flush=True)
+    print(f"{a.profile} test device on 127.0.0.1:{a.port}  identity={ident}", flush=True)
     outage_done = False
     try:
         while True:

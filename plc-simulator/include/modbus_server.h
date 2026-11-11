@@ -13,9 +13,9 @@
 
 #include "plc_models.h"
 
-#define PLC_MAX_STATIONS   8
+#define PLC_MAX_STATIONS   128
 #define PLC_MAX_CLIENTS    4
-#define PLC_DEFAULT_PORT   1502          /* first port; devices take 1502..1509 (the HMI looks there) */
+#define PLC_DEFAULT_PORT   1502          /* first port; devices take 1502..1629 (the HMI looks there) */
 #define PLC_PORT_REUSE_MS  65000u        /* an HMI ignores a non-PLC address for 60 s: do not reuse it sooner */
 
 typedef struct {
@@ -29,6 +29,7 @@ typedef struct {
     uint32_t  last_request_ms;
     int       clients;                   /* connected clients */
     char      client_ip[PLC_MAX_CLIENTS][16];
+    uint8_t   ui_details;                /* window: 0 automatic, 1 shown, 2 hidden */
 } plc_station_t;
 
 typedef void (*bench_log_fn)(const char *text);
@@ -43,6 +44,8 @@ const char *bench_lan_ip(void);                            /* "" if unknown */
 uint16_t bench_base_port(void);
 
 int    bench_add(sim_type_t type);                         /* station index, -1 = bench full */
+int    bench_add_mixed(int n);                             /* n PLCs and drives of every type in turn; returns how many */
+int    bench_count(void);                                  /* devices on the bench */
 void   bench_remove(int idx);
 bool   bench_plug(int idx);                                /* start listening */
 void   bench_unplug(int idx);                              /* drop clients, stop listening */
@@ -54,5 +57,9 @@ void   bench_poll(uint32_t now_ms);
  * "compressor", "ahu", "abb", "meter", "unknown"), SIM_TYPE_COUNT if unknown */
 sim_type_t bench_type_by_name(const char *name);
 const char *bench_type_key(sim_type_t t);
+
+/* "tank", "tank:20" (20 tanks) or "mixed:100" (100 PLCs and drives, every type in turn).
+ * Returns how many were added; -1 if the text is not a device type. */
+int bench_add_spec(const char *spec);
 
 #endif /* PLC_SIMULATOR_MODBUS_SERVER_H */

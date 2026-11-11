@@ -7,10 +7,12 @@
  *   plc_simulator_cli --port 502 --add ahu --network      (port 502 needs root on Linux)
  *
  * Options
- *   --add <type>       device to put on the bench (repeatable, default: tank)
+ *   --add <type>[:n]   device(s) to put on the bench (repeatable, default: tank); "tank:20" adds 20,
+ *                      "mixed:100" adds 100 PLCs and drives of every type in turn (128 devices at most)
  *                      types: tank atv340 atv630 conveyor boiler pumps compressor ahu abb meter unknown
  *   --port <n>         first TCP port (default 1502; devices use n, n+1, ...)
- *   --network          listen on every network interface (default: 127.0.0.1 only)
+ *   --network          listen on every network interface (default: 127.0.0.1 only); needs
+ *                      --confirm-network as well: anyone on the network can then write to it
  *   --run-for <s>      stop after s seconds (default: until Ctrl+C)
  *   --status <s>       print every device's values every s seconds (default 0 = never)
  * Every Modbus write from a client is printed as it happens.
@@ -59,8 +61,8 @@ static void on_log(const char *text)
 
 static void usage(void)
 {
-    printf("usage: plc_simulator_cli [--add <type>]... [--port <n>] [--network] [--run-for <s>] [--status <s>]\n"
-           "types: tank atv340 atv630 conveyor boiler pumps compressor ahu abb meter unknown\n");
+    printf("usage: plc_simulator_cli [--add <type>[:n]]... [--port <n>] [--network --confirm-network] [--run-for <s>] [--status <s>]\n"
+           "types: tank atv340 atv630 conveyor boiler pumps compressor ahu abb meter unknown, or mixed:<n>\n");
 }
 
 static void print_status(void)
@@ -83,33 +85,39 @@ static void print_status(void)
 int main(int argc, char **argv)
 {
     uint16_t base = PLC_DEFAULT_PORT;
-    bool network = false;
+    bool network = false, confirmed = false;
     long run_for = 0, status_s = 0;
-    sim_type_t adds[PLC_MAX_STATIONS];
+    const char *adds[PLC_MAX_STATIONS];
     int nadds = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *next = i + 1 < argc ? argv[i + 1] : NULL;
         if (strcmp(a, "--network") == 0) network = true;
+        else if (strcmp(a, "--confirm-network") == 0) confirmed = true;
         else if (strcmp(a, "--port") == 0 && next) {
             long v = strtol(next, NULL, 10);
             if (v <= 0 || v > 65535 - PLC_MAX_STATIONS) { usage(); return 64; }
             base = (uint16_t)v; i++;
         } else if (strcmp(a, "--add") == 0 && next) {
-            sim_type_t t = bench_type_by_name(next);
-            if (t == SIM_TYPE_COUNT) { printf("unknown device type: %s\n", next); usage(); return 64; }
-            if (nadds < PLC_MAX_STATIONS) adds[nadds++] = t;
+            if (nadds < PLC_MAX_STATIONS) adds[nadds++] = next;
             i++;
         } else if (strcmp(a, "--run-for") == 0 && next) { run_for = strtol(next, NULL, 10); i++; }
         else if (strcmp(a, "--status") == 0 && next) { status_s = strtol(next, NULL, 10); i++; }
         else { usage(); return 64; }
     }
-    if (nadds == 0) adds[nadds++] = SIM_TANK;
+    if (nadds == 0) adds[nadds++] = "tank";
+    if (network && !confirmed) {
+        printf("WARNING: --network lets every computer on the network read AND write every simulated register,\n"
+               "with no password (Modbus TCP has no security). Use it only on an isolated test network.\n"
+               "Add --confirm-network to start it anyway.\n");
+        return 64;
+    }
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     if (!bench_init(on_log, base)) { printf("sockets are not available\n"); return 1; }
     bench_set_network(network);
-    for (int i = 0; i < nadds; i++) bench_add(adds[i]);
+    for (int i = 0; i < nadds; i++)
+        if (bench_add_spec(adds[i]) < 0) { printf("unknown device type: %s\n", adds[i]); usage(); bench_shutdown(); return 64; }
     printf("PLC Simulator running (%s). Ctrl+C to stop.\n",
            network ? "network: other computers can connect" : "local: this computer only, --network to share");
     fflush(stdout);

@@ -146,22 +146,6 @@ bool mb_coil_get(const mb_response_t *rsp, uint16_t idx)
     return (rsp->coil_bytes[idx / 8] & (1 << (idx % 8))) != 0;
 }
 
-const char* mb_status_name(mb_status_t st)
-{
-    switch (st) {
-        case MB_RESP_OK:        return "OK";
-        case MB_RESP_EXCEPTION: return "EXCEPTION";
-        case MB_ERR_TID:   return "ERR_TID";
-        case MB_ERR_PROTO: return "ERR_PROTO";
-        case MB_ERR_UNIT:  return "ERR_UNIT";
-        case MB_ERR_FC:    return "ERR_FC";
-        case MB_ERR_LEN:   return "ERR_LEN";
-        case MB_ERR_ECHO:  return "ERR_ECHO";
-        case MB_ERR_ARG:   return "ERR_ARG";
-        default:           return "UNKNOWN";
-    }
-}
-
 /* ------------------------------------------------------------------------- */
 /* FC43 / MEI 0x0E  Read Device Identification                               */
 /* ------------------------------------------------------------------------- */

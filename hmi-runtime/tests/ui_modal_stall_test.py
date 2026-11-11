@@ -7,7 +7,7 @@ thread supervises the UI heartbeat; if the heartbeat stops for more than
 HMI_WATCHDOG_MAX_AGE_MS it raises a CRITICAL "UI loop stalled" failover (and the
 horn). That is a false alarm: the UI is fine, the user is just moving the window.
 
-This test launches the real exe with the built-in simulator, keeps the window in
+This test launches the real exe (no devices needed), keeps the window in
 (1) keyboard move mode and (2) the system menu for a while, then checks that no
 watchdog event reached the alarm log and the fieldbus watchdog never faulted.
 It verifies that the window thread really is inside the modal loop (GetGUIThreadInfo)
@@ -88,7 +88,8 @@ def run_case(name, enter, mask):
         log = os.path.join(out, "alarms.log")
         rep = os.path.join(out, "report.txt")
         try:
-            proc = subprocess.Popen([EXE, "--sim", "--no-discovery", "--log", log, "--report", rep,
+            proc = subprocess.Popen([EXE, "--no-config", "--no-discovery", "--no-sound", "--log", log, "--report", rep,
+                                     "--key", os.path.join(out, "hmi.key"),
                                      "--vault", os.path.join(out, "security.vault")])
         except OSError as e:
             raise RuntimeError("cannot start %s: %s" % (EXE, e))
@@ -103,7 +104,7 @@ def run_case(name, enter, mask):
         if not hwnd:
             raise RuntimeError("HMI window not found")
 
-        time.sleep(2.0)                      # let the simulator attach and the loops settle
+        time.sleep(2.0)                      # let the loops settle
         u32.SetForegroundWindow(hwnd)
         enter(hwnd)
         entered = False

@@ -51,7 +51,12 @@ void hal_console_print(const char *text) { fputs(text, stdout); }
 void hal_beep(void)                      {}           /* the steady output below drives the buzzer */
 bool hal_instance_lock(const char *path) { (void)path; return true; }   /* one firmware image */
 void hal_sound_enable(bool on) { (void)on; }        /* no speaker: the buzzer pin is the horn */
-void hal_horn(bool on)
+void hal_sound_file(int kind, const char *path) { (void)kind; (void)path; }
+static bool s_emergency_on, s_alarm_on;
+static void horn_pin(bool on);
+void hal_emergency_sound(bool on) { s_emergency_on = on; horn_pin(s_alarm_on || on); }
+void hal_horn(bool on)           { s_alarm_on = on; horn_pin(on || s_emergency_on); }
+static void horn_pin(bool on)
 {
 #if BOARD_PIN_HORN >= 0
     static int last = -1;
@@ -232,13 +237,13 @@ static void touch_poll(void)
     static bool down;
     static int  last_x, last_y;
     if (!s_touch) return;
-    uint16_t x[1], y[1];
+    esp_lcd_touch_point_data_t pt[1];
     uint8_t count = 0;
     esp_lcd_touch_read_data(s_touch);
-    bool pressed = esp_lcd_touch_get_coordinates(s_touch, x, y, NULL, &count, 1) && count > 0;
+    bool pressed = esp_lcd_touch_get_data(s_touch, pt, &count, 1) == ESP_OK && count > 0;
     if (pressed) {
-        last_x = x[0];
-        last_y = y[0];
+        last_x = pt[0].x;
+        last_y = pt[0].y;
         if (!down) app_pointer_down(last_x, last_y);
         else       app_pointer_move(last_x, last_y);
     } else if (down) {

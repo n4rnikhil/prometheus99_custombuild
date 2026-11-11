@@ -39,6 +39,7 @@ static bool would_block(void) { return errno == EAGAIN || errno == EWOULDBLOCK |
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "modbus_server.h"
 
@@ -213,10 +214,11 @@ void bench_set_network(bool on)
 /* ------------------------------------------------------------------------- */
 /* Stations                                                                   */
 /* ------------------------------------------------------------------------- */
-static int pick_port_index(uint32_t ms)
+static int pick_port_index(uint32_t ms, const bool *busy)
 {
     bool taken[PLC_MAX_STATIONS] = { false };
     for (int i = 0; i < PLC_MAX_STATIONS; i++) if (s_st[i].used) taken[s_st[i].port - s_base] = true;
+    for (int k = 0; k < PLC_MAX_STATIONS; k++) if (busy[k]) taken[k] = true;
     for (int k = 0; k < PLC_MAX_STATIONS; k++)                     /* prefer ports an HMI has not seen recently */
         if (!taken[k] && (!s_port_ever_freed[k] || ms - s_port_freed_ms[k] >= PLC_PORT_REUSE_MS)) return k;
     for (int k = 0; k < PLC_MAX_STATIONS; k++) if (!taken[k]) return k;
@@ -228,7 +230,9 @@ int bench_add(sim_type_t type)
     if (!sim_type_info(type)) return -1;
     int slot = -1;
     for (int i = 0; i < PLC_MAX_STATIONS; i++) if (!s_st[i].used) { slot = i; break; }
-    int port_idx = pick_port_index(s_now_ms);
+    static bool busy[PLC_MAX_STATIONS];                       /* ports another program holds, this time */
+    memset(busy, 0, sizeof(busy));
+    int port_idx = pick_port_index(s_now_ms, busy);
     if (slot < 0 || port_idx < 0) { logf_("The bench is full: %d devices at most", PLC_MAX_STATIONS); return -1; }
     plc_station_t *p = &s_st[slot];
     memset(p, 0, sizeof(*p));
@@ -237,15 +241,43 @@ int bench_add(sim_type_t type)
     p->port = (uint16_t)(s_base + port_idx);
     s_io[slot].listener = BAD_SOCK;
     for (int k = 0; k < PLC_MAX_CLIENTS; k++) { s_io[slot].cl[k].s = BAD_SOCK; s_io[slot].cl[k].rx_len = 0; }
-    for (uint8_t n = 1; n < 20; n++) {                        /* lowest free number per device type */
+    for (unsigned n = 1; n < 256; n++) {                      /* lowest free number per device type */
         bool clash = false;
-        for (int i = 0; i < PLC_MAX_STATIONS; i++)
+        for (int i = 0; i < PLC_MAX_STATIONS && !clash; i++)
             if (i != slot && s_st[i].used && s_st[i].sim.type == type && s_st[i].number == n) clash = true;
-        if (!clash) { p->number = n; break; }
+        if (!clash) { p->number = (uint8_t)n; break; }
     }
     snprintf(p->name, sizeof(p->name), "%s %u", sim_type_info(type)->type_name, (unsigned)p->number);
-    if (bench_plug(slot)) logf_("%s plugged in on port %u", p->name, (unsigned)p->port);
+    /* a port another program already uses (1521 is a database's default, for example): take the next free one */
+    while (!bench_plug(slot)) {
+        busy[port_idx] = true;
+        port_idx = pick_port_index(s_now_ms, busy);
+        if (port_idx < 0) { logf_("%s not added: every free port is in use by another program", p->name); p->used = false; return -1; }
+        p->port = (uint16_t)(s_base + port_idx);
+    }
+    logf_("%s plugged in on port %u", p->name, (unsigned)p->port);
     return slot;
+}
+
+int bench_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < PLC_MAX_STATIONS; i++) if (s_st[i].used) n++;
+    return n;
+}
+
+int bench_add_mixed(int n)
+{
+    static int next;                                          /* the type after the last one added */
+    int added = 0;
+    for (int tries = 0; added < n && tries < n * SIM_TYPE_COUNT; tries++) {
+        sim_type_t t = (sim_type_t)(next++ % SIM_TYPE_COUNT);
+        const sim_type_info_t *ti = sim_type_info(t);
+        if (!ti || !ti->is_plc) continue;                      /* PLCs and drives: the HMI attaches them on its own */
+        if (bench_add(t) < 0) break;
+        added++;
+    }
+    return added;
 }
 
 void bench_remove(int idx)
@@ -343,4 +375,24 @@ sim_type_t bench_type_by_name(const char *name)
         if (!k[i] && !name[i]) return (sim_type_t)t;
     }
     return SIM_TYPE_COUNT;
+}
+
+int bench_add_spec(const char *spec)
+{
+    char name[24];
+    size_t i = 0;
+    while (spec[i] && spec[i] != ':' && i + 1 < sizeof(name)) { name[i] = spec[i]; i++; }
+    name[i] = '\0';
+    long n = 1;
+    if (spec[i] == ':') {
+        char *end = NULL;
+        n = strtol(spec + i + 1, &end, 10);
+        if (!end || *end != '\0' || n < 1 || n > 9999) return -1;    /* more than fit: added until the bench is full */
+    } else if (spec[i] != '\0') return -1;
+    if (strcmp(name, "mixed") == 0) return bench_add_mixed((int)n);
+    sim_type_t t = bench_type_by_name(name);
+    if (t == SIM_TYPE_COUNT) return -1;
+    int added = 0;
+    while (added < n && bench_add(t) >= 0) added++;
+    return added;
 }

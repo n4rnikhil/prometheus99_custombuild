@@ -19,9 +19,20 @@ static void publish_ptr(const hmi_tag_meta_t * volatile *slot, const hmi_tag_met
 #endif
 }
 
+/* One past the highest tag id that has ever had metadata since the reset (never shrinks). */
+static volatile uint16_t s_in_use;
+
+uint16_t hmi_tag_ids_in_use(void) { return s_in_use; }
+
+static void note_in_use(hmi_tag_id_t id)
+{
+    if ((uint32_t)id + 1u > s_in_use) s_in_use = (uint16_t)(id + 1u);
+}
+
 void hmi_tag_registry_reset(void)
 {
     for (int i = 0; i < HMI_MAX_TAGS; i++) publish_ptr(&s_meta_by_id[i], NULL);
+    s_in_use = 0;
 }
 
 bool hmi_tag_register_meta(const hmi_tag_meta_t *meta_list, uint8_t count)
@@ -29,17 +40,18 @@ bool hmi_tag_register_meta(const hmi_tag_meta_t *meta_list, uint8_t count)
     bool ok = true;
     if (!meta_list) return false;
     for (uint8_t i = 0; i < count; i++) {
-        uint8_t id = meta_list[i].tag_id;
+        hmi_tag_id_t id = meta_list[i].tag_id;
         if (id >= HMI_MAX_TAGS || s_meta_by_id[id] != NULL) {
             ok = false;
             continue;
         }
         publish_ptr(&s_meta_by_id[id], &meta_list[i]);
+        note_in_use(id);
     }
     return ok;
 }
 
-const hmi_tag_meta_t* hmi_tag_get_meta(uint8_t tag_id)
+const hmi_tag_meta_t* hmi_tag_get_meta(hmi_tag_id_t tag_id)
 {
     if (tag_id >= HMI_MAX_TAGS) return NULL;
 #if defined(__GNUC__) || defined(__clang__)
@@ -49,23 +61,25 @@ const hmi_tag_meta_t* hmi_tag_get_meta(uint8_t tag_id)
 #endif
 }
 
-void hmi_tag_bind_meta(uint8_t tag_id, const hmi_tag_meta_t *meta)
+void hmi_tag_bind_meta(hmi_tag_id_t tag_id, const hmi_tag_meta_t *meta)
 {
-    if (tag_id < HMI_MAX_TAGS) publish_ptr(&s_meta_by_id[tag_id], meta);
+    if (tag_id >= HMI_MAX_TAGS) return;
+    publish_ptr(&s_meta_by_id[tag_id], meta);
+    if (meta) note_in_use(tag_id);
 }
 
 void hmi_tags_init(hmi_tag_table_t *table)
 {
     if (!table) return;
     memset(table, 0, sizeof(hmi_tag_table_t));
-    for (uint8_t i = 0; i < HMI_MAX_TAGS; i++) {
+    for (hmi_tag_id_t i = 0; i < HMI_MAX_TAGS; i++) {
         const hmi_tag_meta_t *m = s_meta_by_id[i];
         table->tags[i].quality  = QUALITY_COMM_FAULT;   /* no data yet */
         table->tags[i].decimals = m ? m->decimals : 0;
     }
 }
 
-void hmi_tag_write_analog(hmi_tag_table_t *table, uint8_t tag_id, int16_t val, uint8_t quality)
+void hmi_tag_write_analog(hmi_tag_table_t *table, hmi_tag_id_t tag_id, int16_t val, uint8_t quality)
 {
     if (!table || tag_id >= HMI_MAX_TAGS) return;
     hmi_tag_t *t = &table->tags[tag_id];
@@ -73,24 +87,24 @@ void hmi_tag_write_analog(hmi_tag_table_t *table, uint8_t tag_id, int16_t val, u
     t->quality = quality;
 }
 
-void hmi_tag_write_digital(hmi_tag_table_t *table, uint8_t tag_id, bool state, uint8_t quality)
+void hmi_tag_write_digital(hmi_tag_table_t *table, hmi_tag_id_t tag_id, bool state, uint8_t quality)
 {
     hmi_tag_write_analog(table, tag_id, (int16_t)(state ? 1 : 0), quality);
 }
 
-void hmi_tag_set_quality(hmi_tag_table_t *table, uint8_t tag_id, uint8_t quality)
+void hmi_tag_set_quality(hmi_tag_table_t *table, hmi_tag_id_t tag_id, uint8_t quality)
 {
     if (!table || tag_id >= HMI_MAX_TAGS) return;
     table->tags[tag_id].quality = quality;
 }
 
-int16_t hmi_tag_read_value(const hmi_tag_table_t *table, uint8_t tag_id)
+int16_t hmi_tag_read_value(const hmi_tag_table_t *table, hmi_tag_id_t tag_id)
 {
     if (!table || tag_id >= HMI_MAX_TAGS) return 0;
     return table->tags[tag_id].value;
 }
 
-uint8_t hmi_tag_read_quality(const hmi_tag_table_t *table, uint8_t tag_id)
+uint8_t hmi_tag_read_quality(const hmi_tag_table_t *table, hmi_tag_id_t tag_id)
 {
     if (!table || tag_id >= HMI_MAX_TAGS) return QUALITY_COMM_FAULT;
     return table->tags[tag_id].quality;

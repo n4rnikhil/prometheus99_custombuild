@@ -26,6 +26,8 @@ static const hmi_role_t s_required_role[HMI_CMD_COUNT] = {
     [HMI_CMD_TUNE]           = ROLE_MAINTENANCE,
     [HMI_CMD_RAW_WRITE]      = ROLE_ENGINEER,
     [HMI_CMD_EMERGENCY_RESET] = ROLE_MAINTENANCE,
+    [HMI_CMD_SHELVE_ALARM]   = ROLE_OPERATOR,
+    [HMI_CMD_ALARM_SERVICE]  = ROLE_MAINTENANCE,
 };
 
 static const char * const s_cmd_names[HMI_CMD_COUNT] = {
@@ -45,6 +47,8 @@ static const char * const s_cmd_names[HMI_CMD_COUNT] = {
     [HMI_CMD_TUNE]           = "Change tuning",
     [HMI_CMD_RAW_WRITE]      = "Write register",
     [HMI_CMD_EMERGENCY_RESET] = "Emergency reset",
+    [HMI_CMD_SHELVE_ALARM]   = "Shelve alarm",
+    [HMI_CMD_ALARM_SERVICE]  = "Alarm out of service",
 };
 
 void hmi_security_init(hmi_security_ctx_t *sec)
@@ -116,39 +120,6 @@ const char* hmi_security_command_name(hmi_command_t cmd)
 {
     if ((int)cmd < 0 || cmd >= HMI_CMD_COUNT || !s_cmd_names[cmd]) return "COMMAND";
     return s_cmd_names[cmd];
-}
-
-bool hmi_security_can_acknowledge_alarm(const hmi_security_ctx_t *sec)
-{
-    return sec && sec->current_role >= hmi_security_required_role(HMI_CMD_ACK_ALARMS);
-}
-
-bool hmi_security_can_operate_equipment(const hmi_security_ctx_t *sec)
-{
-    return sec && sec->current_role >= hmi_security_required_role(HMI_CMD_PUMP_TOGGLE);
-}
-
-bool hmi_security_can_adjust_setpoint(const hmi_security_ctx_t *sec)
-{
-    return sec && sec->current_role >= hmi_security_required_role(HMI_CMD_SETPOINT);
-}
-
-bool hmi_security_can_configure_system(const hmi_security_ctx_t *sec)
-{
-    return sec && sec->current_role >= ROLE_ENGINEER;
-}
-
-int16_t hmi_security_clamp_setpoint(int16_t requested, int16_t min_val, int16_t max_val)
-{
-    if (min_val > max_val) { int16_t t = min_val; min_val = max_val; max_val = t; }
-    if (requested < min_val) return min_val;
-    if (requested > max_val) return max_val;
-    return requested;
-}
-
-bool hmi_security_validate_packet(const uint8_t *buffer, size_t len, size_t max_allowed)
-{
-    return buffer != NULL && len != 0 && len <= max_allowed;
 }
 
 /* ------------------------------------------------------------------------- */

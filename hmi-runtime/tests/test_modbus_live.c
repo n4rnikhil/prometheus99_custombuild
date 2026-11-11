@@ -2,8 +2,8 @@
  * @file test_modbus_live.c
  * @brief Headless plug-and-play test: real discovery thread + device manager + Modbus TCP
  *
- *   start "" python tests/modbus_plc_sim.py --profile tank  --port 1502 --outage-at 6 --outage-for 3 --run-for 30
- *   start "" python tests/modbus_plc_sim.py --profile meter --port 1504 --run-for 30
+ *   start "" python tests/modbus_test_device.py --profile tank  --port 1502 --outage-at 6 --outage-for 3 --run-for 30
+ *   start "" python tests/modbus_test_device.py --profile meter --port 1504 --run-for 30
  *   tests\test_modbus_live.exe 20
  *
  * Checks: the tank PLC is discovered and attached with the tank-skid driver, the
@@ -113,7 +113,7 @@ int main(int argc, char **argv)
     hmi_devmgr_shutdown();
     printf("tank_attached=%d meter_ignored=%d valve_write_seen=%d outage_detected=%d recovered=%d\n",
            tank_up, !meter_attached, valve_seen, offline, recovered);
-    for (uint8_t i = 0; i < hmi_alarms_journal_count(&al); i++) {
+    for (uint16_t i = 0; i < hmi_alarms_journal_count(&al); i++) {
         const hmi_alarm_record_t *r = hmi_alarms_journal_newest(&al, i);
         printf("  journal: %s\n", r->message);
     }

@@ -162,18 +162,36 @@ int hmi_layout_alarm_row_y(hmi_rect_t card, int row)
     return card.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H + (HMI_LAYOUT_ALARM_ROW_H - 20) / 2;
 }
 
+hmi_rect_t hmi_layout_alarm_row(hmi_rect_t card, int row)
+{
+    return mk(card.x + 16, card.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H, card.w - 32, HMI_LAYOUT_ALARM_ROW_H);
+}
+
 hmi_rect_t hmi_layout_alarm_row_ack(hmi_rect_t card, int row)
 {
-    int w = 84, h = HMI_LAYOUT_ALARM_ROW_H - 6;
+    int w = 96, h = HMI_LAYOUT_ALARM_ROW_H - 6;
     return mk(card.x + card.w - 16 - w, card.y + 42 + row * HMI_LAYOUT_ALARM_ROW_H + 3, w, h);
 }
 
 hmi_rect_t hmi_layout_alarm_tab(int sw, int sh, int view)
 {
+    static const int place[HMI_ALARM_VIEWS] = { [HMI_ALARM_VIEW_ACTIVE] = 0, [HMI_ALARM_VIEW_SHELVED] = 1,
+                                                [HMI_ALARM_VIEW_HISTORY] = 2 };
+    if (view < 0 || view >= HMI_ALARM_VIEWS) return mk(0, 0, 0, 0);
     hmi_rect_t c = hmi_layout_content(sw, sh, false);
     int bh = 36, by = c.y + (HMI_LAYOUT_TITLE_H - 8 - bh) / 2;
-    int w = 112, x0 = c.x + 104;                  /* right of the "Alarms" title */
-    return mk(x0 + view * (w + 6), by, w, bh);
+    int w = sw < 800 ? 64 : 84, x0 = c.x + 96;    /* right of the "Alarms" title; narrow screens: narrower */
+    return mk(x0 + place[view] * (w + 6), by, w, bh);
+}
+
+hmi_rect_t hmi_layout_almd_button(int sw, int sh, int button)
+{
+    if (button < 0 || button >= HMI_ALMD_BUTTONS) return mk(0, 0, 0, 0);
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_ALARM);
+    int bw = (m.w - 32 - 8) / 2, bh = 44;
+    int col = button % 2, row = button / 2;
+    int y0 = m.y + m.h - 16 - 2 * bh - 8;
+    return mk(m.x + 16 + col * (bw + 8), y0 + row * (bh + 8), bw, bh);
 }
 
 hmi_rect_t hmi_layout_alarm_page(hmi_rect_t card, int dir)
@@ -205,11 +223,13 @@ hmi_rect_t hmi_layout_screen_button(int sw, int sh, bool banner_active, hmi_hit_
     int by = c.y + (HMI_LAYOUT_TITLE_H - 8 - bh) / 2;
     int right = c.x + c.w;
 
+    /* Alarm title-row widths: below 800 px they shrink so the three view tabs still fit beside them */
+    int wa = sw < 800 ? 112 : 140, ws = sw < 800 ? 88 : 116, wr = sw < 800 ? 80 : 104;
     switch (kind) {
         /* Alarm screen: title-row buttons, primary action right-most */
-        case HMI_HIT_ALARM_ACK:     return mk(right - 150, by, 150, bh);
-        case HMI_HIT_ALARM_SILENCE: return mk(right - 150 - 8 - 124, by, 124, bh);
-        case HMI_HIT_ESTOP_RESET:   return mk(right - 150 - 8 - 124 - 8 - 112, by, 112, bh);
+        case HMI_HIT_ALARM_ACK:     return mk(right - wa, by, wa, bh);
+        case HMI_HIT_ALARM_SILENCE: return mk(right - wa - 8 - ws, by, ws, bh);
+        case HMI_HIT_ESTOP_RESET:   return mk(right - wa - 8 - ws - 8 - wr, by, wr, bh);
 
         /* Settings screen: buttons along the bottom of each card */
         case HMI_HIT_SET_ROLE: {
@@ -247,6 +267,15 @@ static int np_key_h(int sh)
     return kh < 30 ? 30 : kh > 44 ? 44 : kh;
 }
 
+/* Search keyboard: 4 rows of keys, sized to fit the screen height */
+#define KBD_TOP 130                                        /* title + query display + hint line */
+static int kbd_key_h(int sh)
+{
+    int avail = sh - (HMI_LAYOUT_HEADER_H + 4) - 4;
+    int kh = (avail - KBD_TOP - 8) / 4 - MODAL_GAP;
+    return kh < 34 ? 34 : kh > 48 ? 48 : kh;
+}
+
 hmi_rect_t hmi_layout_modal(int sw, int sh, uint8_t modal)
 {
     int w, h;
@@ -258,6 +287,11 @@ hmi_rect_t hmi_layout_modal(int sw, int sh, uint8_t modal)
     }
     else if (modal == HMI_MODAL_NUMPAD) { w = 360; h = NP_TOP + 5 * (np_key_h(sh) + MODAL_GAP) + 8; }
     else if (modal == HMI_MODAL_CONFIRM) { w = 440; h = 196; }
+    else if (modal == HMI_MODAL_SEARCH) { w = 720; h = KBD_TOP + 4 * (kbd_key_h(sh) + MODAL_GAP) + 8; }
+    else if (modal == HMI_MODAL_ALARM)  {
+        int avail = sh - (HMI_LAYOUT_HEADER_H + 4) - 4;
+        w = 600; h = avail < 352 ? avail : 352;
+    }
     else return mk(0, 0, 0, 0);
     if (w > sw - 32) w = sw - 32;
     int top = HMI_LAYOUT_HEADER_H + 4;
@@ -372,9 +406,54 @@ hmi_rect_t hmi_layout_confirm_button(int sw, int sh, bool ok)
 
 /* ---------------- Plug-and-play dashboard ---------------- */
 
-/* Grid of the process screen. Up to 4 devices keep the hand-tuned layouts; more devices get a
- * grid in which every card stays readable (about 380 x 170 px or more), and pages when even that
- * grid cannot hold them all. */
+/* Cards for 5 or more devices: every card stays readable (about 380 x 170 px or more). */
+static void card_grid(hmi_rect_t c, int n, int *cols, int *rows)
+{
+    int cw = c.w / 380, rh = c.h / 170;
+    *cols = cw < 2 ? 2 : cw > 4 ? 4 : cw;
+    *rows = rh < 2 ? 2 : rh > 3 ? 3 : rh;
+    while (*rows > 2 && (*rows - 1) * *cols >= n) (*rows)--;     /* no empty rows ... */
+    while (*cols > 2 && (*cols - 1) * *rows >= n) (*cols)--;     /* ... or columns */
+}
+
+/* Overview tiles: as many as the screen holds at the minimum tile size. */
+static void tile_grid(hmi_rect_t c, int n, int *cols, int *rows)
+{
+    int g = HMI_LAYOUT_GAP;
+    int cw = (c.w + g) / (HMI_LAYOUT_TILE_MIN_W + g), rh = (c.h + g) / (HMI_LAYOUT_TILE_MIN_H + g);
+    *cols = cw < 1 ? 1 : cw > HMI_LAYOUT_TILE_MAX_COLS ? HMI_LAYOUT_TILE_MAX_COLS : cw;
+    *rows = rh < 1 ? 1 : rh;
+    if (*cols * *rows < n) return;                                /* pages: as many tiles as fit */
+    /* Everything fits: pick the shape whose tiles are largest, read as a 2:1 tile (so 8 devices
+     * do not become 8 tall strips in a tall window). Among shapes within 10 % of the best, the
+     * one with the fewest empty places wins (no lone tile on a last row when a fuller grid fits). */
+    int maxc = *cols, maxr = *rows, best = -1;
+    for (int pass = 0; pass < 2; pass++) {
+        int best_empty = 1 << 30, best2 = 1 << 30;
+        for (int cc = 1; cc <= maxc; cc++) {
+            int rr = (n + cc - 1) / cc;
+            if (rr > maxr) continue;
+            int tw = (c.w - (cc - 1) * g) / cc, th = (c.h - (rr - 1) * g) / rr;
+            int score = tw < 2 * th ? tw : 2 * th, empty = cc * rr - n;
+            if (pass == 0) { if (score > best) best = score; continue; }
+            if (score * 10 < best * 9) continue;
+            if (empty < best_empty || (empty == best_empty && rr < best2)) {   /* then: fuller last row */
+                best_empty = empty; best2 = rr; *cols = cc; *rows = rr;
+            }
+        }
+    }
+}
+
+bool hmi_layout_device_tiles(hmi_rect_t c, int n)
+{
+    if (n <= 4) return false;
+    int cols, rows;
+    card_grid(c, n, &cols, &rows);
+    return cols * rows < n;                                       /* cards would need pages */
+}
+
+/* Grid of the process screen. Up to 4 devices keep the hand-tuned layouts; 5 or more get cards
+ * when they all fit on one screen, otherwise tiles (with pages when even the tiles do not fit). */
 static void dev_grid(hmi_rect_t c, int n, int *cols, int *rows)
 {
     *cols = 1; *rows = 1;
@@ -382,11 +461,8 @@ static void dev_grid(hmi_rect_t c, int n, int *cols, int *rows)
     else if (n == 3) { if (c.w >= 1100) *cols = 3; else { *cols = 2; *rows = 2; } }
     else if (n == 4) { *cols = 2; *rows = 2; }
     else if (n > 4) {
-        int cw = c.w / 380, rh = c.h / 170;
-        *cols = cw < 2 ? 2 : cw > 4 ? 4 : cw;
-        *rows = rh < 2 ? 2 : rh > 3 ? 3 : rh;
-        while (*rows > 2 && (*rows - 1) * *cols >= n) (*rows)--;     /* no empty rows ... */
-        while (*cols > 2 && (*cols - 1) * *rows >= n) (*cols)--;     /* ... or columns */
+        if (hmi_layout_device_tiles(c, n)) tile_grid(c, n, cols, rows);
+        else card_grid(c, n, cols, rows);
     }
 }
 
@@ -408,7 +484,7 @@ int hmi_layout_devices_per_page(hmi_rect_t c, int n)
 
 hmi_rect_t hmi_layout_device_pager(hmi_rect_t c, int which)
 {
-    int w = c.w / 4 < 170 ? c.w / 4 : 170;
+    int w = c.w / 4 < 220 ? c.w / 4 : 220;                   /* room for "Next (12 in alarm) >" */
     int y = c.y + c.h - HMI_LAYOUT_DEV_PAGER_H;
     return which ? mk(c.x + c.w - w, y, w, HMI_LAYOUT_DEV_PAGER_H) : mk(c.x, y, w, HMI_LAYOUT_DEV_PAGER_H);
 }
@@ -457,6 +533,142 @@ const uint32_t* hmi_layout_device_manifest(const hmi_device_profile_t *p, hmi_re
     return compact ? p->ui_compact : p->ui_full;
 }
 
+/* ---------------- Device view (one device, full graphics) ---------------- */
+
+static bool hit(hmi_rect_t r, int x, int y);
+static hmi_hit_t result(hmi_hit_kind_t k, uint16_t param, hmi_rect_t r);
+
+hmi_rect_t hmi_layout_focus_panel(hmi_rect_t c)
+{
+    return mk(c.x, c.y, c.w, c.h - HMI_LAYOUT_DEV_PAGER_H - HMI_LAYOUT_GAP);
+}
+
+hmi_rect_t hmi_layout_focus_button(hmi_rect_t c, int which)
+{
+    return hmi_layout_device_pager(c, which);
+}
+
+hmi_hit_t hmi_layout_focus_hit_test(int sw, int sh, bool banner_active, const hmi_device_info_t *dev, int x, int y)
+{
+    hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
+    hmi_rect_t b = hmi_layout_focus_button(c, 0);
+    if (hit(b, x, y)) return result(HMI_HIT_FOCUS_BACK, 0, b);
+    if (!dev) return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
+    b = hmi_layout_focus_button(c, 1);
+    if (hit(b, x, y)) return result(HMI_HIT_DEVICE_OPEN, dev->slot, b);
+    hmi_rect_t panel = hmi_layout_focus_panel(c);
+    hmi_rect_t head = hmi_layout_device_open(panel);
+    if (hmi_rect_contains(head, x, y)) return result(HMI_HIT_DEVICE_OPEN, dev->slot, head);
+    hmi_rect_t body = hmi_layout_device_body(panel);
+    uint8_t nt = 0;
+    const uint32_t *tk = hmi_layout_device_manifest(dev->profile, body, &nt);
+    for (uint8_t i = 0; tk && i < nt; i++) {
+        if (hmi_token_get_type(tk[i]) != WIDGET_ACTION_BUTTON) continue;
+        uint8_t rel = hmi_token_get_tag(tk[i]);
+        if (rel >= HMI_DEVICE_TAG_SPAN) continue;
+        hmi_rect_t r = hmi_layout_token_rect(tk[i], body);
+        if (hit(r, x, y)) return result(HMI_HIT_WIDGET_BUTTON, HMI_DEV_TAG(dev->slot, rel), r);
+    }
+    return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
+}
+
+/* ---------------- Readings screen ---------------- */
+
+hmi_rect_t hmi_layout_read_card(int sw, int sh, bool banner_active)
+{
+    return hmi_layout_screen_body(sw, sh, banner_active);
+}
+
+/* Short cards (a 7" panel with the alarm banner shown) use the compact row height */
+static int read_row_h(hmi_rect_t card)
+{
+    return card.h < 360 ? HMI_LAYOUT_READ_ROW_MIN_H : HMI_LAYOUT_READ_ROW_H;
+}
+
+int hmi_layout_read_rows(hmi_rect_t card)
+{
+    int n = (card.h - HMI_LAYOUT_READ_HEAD_H - HMI_LAYOUT_READ_FOOT_H) / read_row_h(card);
+    return n < 1 ? 1 : n;
+}
+
+hmi_rect_t hmi_layout_read_row(hmi_rect_t card, int row)
+{
+    int rh = read_row_h(card);
+    return mk(card.x + 8, card.y + HMI_LAYOUT_READ_HEAD_H + row * rh, card.w - 16, rh);
+}
+
+hmi_rect_t hmi_layout_read_page(hmi_rect_t card, int dir)
+{
+    int w = 112, h = HMI_LAYOUT_READ_FOOT_H - 10;
+    int y = card.y + card.h - HMI_LAYOUT_READ_FOOT_H + 2;
+    int right = card.x + card.w - 16;
+    return dir ? mk(right - w, y, w, h) : mk(right - 2 * w - 8 - 140, y, w, h);   /* page label between */
+}
+
+hmi_rect_t hmi_layout_read_filter(int sw, int sh, bool banner_active, int filter)
+{
+    static const int w[HMI_READ_FILTERS] = { 72, 104, 104 };
+    if (filter < 0 || filter >= HMI_READ_FILTERS) return mk(0, 0, 0, 0);
+    hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
+    int bh = 36, by = c.y + (HMI_LAYOUT_TITLE_H - 8 - bh) / 2;
+    int x = c.x + 132;                                        /* right of the "Readings" title */
+    for (int i = 0; i < filter; i++) x += w[i] + 6;
+    return mk(x, by, w[filter], bh);
+}
+
+hmi_rect_t hmi_layout_read_search(int sw, int sh, bool banner_active)
+{
+    hmi_rect_t c = hmi_layout_content(sw, sh, banner_active);
+    hmi_rect_t last = hmi_layout_read_filter(sw, sh, banner_active, HMI_READ_FILTERS - 1);
+    int left = last.x + last.w + 12, right = c.x + c.w;
+    int w = right - left < 220 ? right - left : 220;
+    return mk(right - w, last.y, w, last.h);
+}
+
+/* ---------------- Search keyboard ---------------- */
+
+static const char s_kbd[HMI_KBD_KEYS] = {
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P',
+    'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', HMI_KBD_DEL,
+    'Z', 'X', 'C', 'V', 'B', 'N', 'M', ' ', HMI_KBD_CLEAR, HMI_KBD_DONE
+};
+
+char hmi_layout_kbd_char(int key)
+{
+    return (key >= 0 && key < HMI_KBD_KEYS) ? s_kbd[key] : 0;
+}
+
+const char *hmi_layout_kbd_label(int key)
+{
+    static char one[2];
+    char c = hmi_layout_kbd_char(key);
+    switch (c) {
+        case 0:             return "";
+        case HMI_KBD_DEL:   return "Del";
+        case HMI_KBD_CLEAR: return "Clear";
+        case HMI_KBD_DONE:  return "Done";
+        case ' ':           return "Space";
+        default:            one[0] = c; one[1] = '\0'; return one;
+    }
+}
+
+hmi_rect_t hmi_layout_kbd_display(int sw, int sh)
+{
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_SEARCH);
+    return mk(m.x + 16, m.y + 56, m.w - 32, 48);
+}
+
+hmi_rect_t hmi_layout_kbd_key(int sw, int sh, int key)
+{
+    if (key < 0 || key >= HMI_KBD_KEYS) return mk(0, 0, 0, 0);
+    hmi_rect_t m = hmi_layout_modal(sw, sh, HMI_MODAL_SEARCH);
+    int kh = kbd_key_h(sh);
+    int kw = (m.w - 32 - 9 * 6) / 10;
+    int col = key % 10, row = key / 10;
+    return mk(m.x + 16 + col * (kw + 6), m.y + KBD_TOP + row * (kh + MODAL_GAP), kw, kh);
+}
+
 /* ---------------- Hit test ---------------- */
 
 static bool hit(hmi_rect_t r, int x, int y)
@@ -464,7 +676,7 @@ static bool hit(hmi_rect_t r, int x, int y)
     return hmi_rect_contains(hmi_rect_inset(r, -HMI_LAYOUT_TOUCH_SLOP, -HMI_LAYOUT_TOUCH_SLOP), x, y);
 }
 
-static hmi_hit_t result(hmi_hit_kind_t k, uint8_t param, hmi_rect_t r)
+static hmi_hit_t result(hmi_hit_kind_t k, uint16_t param, hmi_rect_t r)
 {
     hmi_hit_t h;
     h.kind = k; h.param = param; h.rect = r;
@@ -473,7 +685,7 @@ static hmi_hit_t result(hmi_hit_kind_t k, uint8_t param, hmi_rect_t r)
 
 hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active, uint8_t modal,
                               const uint32_t *tokens, uint8_t ntok,
-                              const hmi_device_info_t *devs, uint8_t ndev, uint8_t dev_page, uint8_t fp_slot,
+                              const hmi_device_info_t *devs, uint8_t ndev, uint16_t dev_page, uint8_t fp_slot,
                               int x, int y)
 {
     /* EMERGENCY is reachable even while a dialog is open */
@@ -515,6 +727,16 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
             if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_CONFIRM_OK, 0, r);
             r = hmi_layout_confirm_button(sw, sh, false);
             if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_MODAL_CANCEL, 0, r);
+        } else if (modal == HMI_MODAL_SEARCH) {
+            for (int k = 0; k < HMI_KBD_KEYS; k++) {
+                hmi_rect_t r = hmi_layout_kbd_key(sw, sh, k);
+                if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_KBD_KEY, (uint16_t)k, r);
+            }
+        } else if (modal == HMI_MODAL_ALARM) {
+            for (int k = 0; k < HMI_ALMD_BUTTONS; k++) {
+                hmi_rect_t r = hmi_layout_almd_button(sw, sh, k);
+                if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_ALMD_BTN, (uint16_t)k, r);
+            }
         }
         if (hmi_rect_contains(m, x, y)) return result(HMI_HIT_MODAL_BLOCK, 0, m);
         return result(HMI_HIT_MODAL_CANCEL, 0, m);      /* tap outside closes the dialog */
@@ -557,7 +779,7 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
         if (hit(r, x, y)) return result(btns[i], 0, r);
     }
     if (screen == SCREEN_ALARM_MATRIX) {
-        for (int t = 0; t < 2; t++) {
+        for (int t = 0; t < HMI_ALARM_VIEWS; t++) {
             hmi_rect_t r = hmi_layout_alarm_tab(sw, sh, t);
             if (hit(r, x, y)) return result(HMI_HIT_ALARM_TAB, (uint8_t)t, r);
         }
@@ -566,6 +788,27 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
             hmi_rect_t r = hmi_layout_alarm_page(card, d);
             if (hit(r, x, y)) return result(HMI_HIT_ALARM_PAGE, (uint8_t)d, r);
         }
+    }
+
+    /* Readings: filters, search, pages, rows */
+    if (screen == SCREEN_READINGS) {
+        for (int f = 0; f < HMI_READ_FILTERS; f++) {
+            hmi_rect_t r = hmi_layout_read_filter(sw, sh, banner_active, f);
+            if (hit(r, x, y)) return result(HMI_HIT_READ_FILTER, (uint16_t)f, r);
+        }
+        hmi_rect_t s = hmi_layout_read_search(sw, sh, banner_active);
+        if (hit(s, x, y)) return result(HMI_HIT_READ_SEARCH, 0, s);
+        hmi_rect_t card = hmi_layout_read_card(sw, sh, banner_active);
+        for (int d = 0; d < 2; d++) {
+            hmi_rect_t r = hmi_layout_read_page(card, d);
+            if (hit(r, x, y)) return result(HMI_HIT_READ_PAGE, (uint16_t)d, r);
+        }
+        int rows = hmi_layout_read_rows(card);
+        for (int k = 0; k < rows; k++) {
+            hmi_rect_t r = hmi_layout_read_row(card, k);
+            if (hmi_rect_contains(r, x, y)) return result(HMI_HIT_READ_ROW, (uint16_t)k, r);
+        }
+        return result(HMI_HIT_NONE, 0, mk(0, 0, 0, 0));
     }
 
     /* Device panels (process screen) */
@@ -584,6 +827,10 @@ hmi_hit_t hmi_layout_hit_test(int sw, int sh, uint8_t screen, bool banner_active
         for (uint8_t k = 0; per > 0 && k < per && first + k < ndev; k++) {
             uint8_t d = (uint8_t)(first + k);
             hmi_rect_t panel = hmi_layout_device_panel(c, ndev, k);
+            if (hmi_layout_device_tiles(c, ndev)) {                 /* a tile is one tap target: its device view */
+                if (hmi_rect_contains(panel, x, y)) return result(HMI_HIT_DEVICE_FOCUS, devs[d].slot, panel);
+                continue;
+            }
             hmi_rect_t head = hmi_layout_device_open(panel);
             if (hmi_rect_contains(head, x, y)) return result(HMI_HIT_DEVICE_OPEN, devs[d].slot, head);
             if (hmi_layout_device_summary(panel)) {                 /* summary card: all of it opens the faceplate */
