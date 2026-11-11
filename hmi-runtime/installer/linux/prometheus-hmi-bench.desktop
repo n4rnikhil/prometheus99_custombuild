@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Prometheus HMI (bench)
+Comment=The HMI together with the PLC simulator (a drive, a tank, a meter)
+Exec=@LIB@/prometheus-hmi-bench
+Icon=prometheus-hmi
+Terminal=false
+Categories=Utility;Engineering;
+StartupWMClass=Prometheus-HMI
